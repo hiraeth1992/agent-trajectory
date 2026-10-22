@@ -6,6 +6,14 @@
   "description": "A local-first, read-only trajectory viewer for multiple coding agents.",
   "author": "Agent Trajectory Contributors",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hiraeth1992/agent-trajectory.git"
+  },
+  "homepage": "https://github.com/hiraeth1992/agent-trajectory#readme",
+  "bugs": {
+    "url": "https://github.com/hiraeth1992/agent-trajectory/issues"
+  },
   "private": true,
   "type": "module",
   "main": "dist-electron/main.mjs",

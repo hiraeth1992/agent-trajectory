@@ -49,19 +49,17 @@ npm run dist
 
 ```bash
 npm run dist:linux -- \
-  --config.extraMetadata.homepage='https://github.com/OWNER/REPOSITORY' \
-  --config.linux.maintainer='OWNER <OWNER@users.noreply.github.com>'
+  --config.extraMetadata.homepage='https://github.com/hiraeth1992/agent-trajectory' \
+  --config.linux.maintainer='hiraeth1992 <hiraeth1992@users.noreply.github.com>'
 ```
 
-请将 `OWNER/REPOSITORY` 替换为真实公开仓库。发行文件输出到 `release/`。建议在对应
-操作系统的 CI runner 上分别构建；公开发布 macOS 版本还需要 Developer ID 签名与
-notarization，Windows 版本建议配置代码签名证书。
+发行文件输出到 `release/`。建议在对应操作系统的 CI runner 上分别构建；公开发布
+macOS 版本还需要 Developer ID 签名与 notarization，Windows 版本建议配置代码签名证书。
 
-Linux DEB 要求 homepage 与 maintainer 元数据。仓库未写死托管平台账号或个人邮箱；
-GitHub Actions 会在发行构建时根据 `GITHUB_REPOSITORY` 注入项目主页，并使用仓库所有者的
-GitHub noreply 地址作为包维护者。若在其他 CI 或本地构建 DEB，请通过
-electron-builder 的 `--config.extraMetadata.homepage` 和 `--config.linux.maintainer`
-参数提供对应的公开项目元数据。
+Linux DEB 要求 homepage 与 maintainer 元数据。项目仅使用公开仓库账号和 GitHub noreply
+地址，不包含个人邮箱；GitHub Actions 会在发行构建时根据 `GITHUB_REPOSITORY` 动态注入
+同类元数据。若在其他 CI 中构建 DEB，请通过 electron-builder 的
+`--config.extraMetadata.homepage` 和 `--config.linux.maintainer` 参数提供对应的公开项目元数据。
 
 ## 浏览器开发模式
 
