@@ -1,0 +1,99 @@
+{
+  "session": {
+    "id": "session-fixture-zcode",
+    "directory": "/workspace/example",
+    "title": "Anonymous fixture",
+    "version": "0.0.0-fixture",
+    "time_created": 1000,
+    "time_updated": 1070,
+    "last_outcome": "completed"
+  },
+  "messages": [
+    {
+      "id": "user-fixture",
+      "sequence": 0,
+      "time_created": 1010,
+      "time_updated": 1010,
+      "data": {
+        "role": "user",
+        "time": { "created": 1010 },
+        "semantics": { "transcriptVisibility": "visible" }
+      }
+    },
+    {
+      "id": "assistant-fixture",
+      "sequence": 1,
+      "time_created": 1020,
+      "time_updated": 1070,
+      "data": {
+        "role": "assistant",
+        "providerId": "fixture-provider",
+        "modelId": "fixture-model",
+        "time": { "created": 1020, "completed": 1070 }
+      }
+    }
+  ],
+  "parts": [
+    {
+      "id": "user-text-fixture",
+      "message_id": "user-fixture",
+      "sequence": 0,
+      "time_created": 1010,
+      "time_updated": 1010,
+      "data": { "type": "text", "text": "inspect the sample project" }
+    },
+    {
+      "id": "assistant-text-fixture",
+      "message_id": "assistant-fixture",
+      "sequence": 0,
+      "time_created": 1040,
+      "time_updated": 1070,
+      "data": { "type": "text", "text": "sample inspection complete" }
+    }
+  ],
+  "modelUsage": [
+    {
+      "id": "model-fixture",
+      "turn_id": "turn-fixture",
+      "assistant_message_id": "assistant-fixture",
+      "status": "completed",
+      "provider_id": "fixture-provider",
+      "model_id": "fixture-model",
+      "started_at": 1020,
+      "first_token_at": 1040,
+      "completed_at": 1070,
+      "duration_ms": 50,
+      "time_to_first_token_ms": 20,
+      "input_tokens": 10,
+      "output_tokens": 4,
+      "reasoning_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "computed_total_tokens": 14,
+      "retry_count": 0,
+      "error_type": null,
+      "error_code": null,
+      "error_message": null
+    }
+  ],
+  "toolUsage": [],
+  "turnUsage": [
+    {
+      "turn_id": "turn-fixture",
+      "user_message_id": "user-fixture",
+      "status": "completed",
+      "started_at": 1010,
+      "completed_at": 1070,
+      "duration_ms": 60,
+      "time_to_first_token_ms": 30,
+      "input_tokens": 10,
+      "output_tokens": 4,
+      "reasoning_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "computed_total_tokens": 14,
+      "error_type": null,
+      "error_code": null
+    }
+  ]
+}

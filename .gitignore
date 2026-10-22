@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-electron/
+release/
+build/icon.iconset/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+
+# Generated from private local agent sessions. Keep this evidence local.
+evidence/real-source-verification.json

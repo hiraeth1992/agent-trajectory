@@ -1,0 +1,63 @@
+import type {
+  SessionDetail,
+  SessionSummary,
+  SourceCapabilities,
+  SourceCapability,
+  SourceColorToken,
+  SourceIconToken,
+  SourceId,
+  SourceStatus,
+} from '../../src/types'
+
+export interface SourceMetadata {
+  label: string
+  colorToken: SourceColorToken
+  iconToken: SourceIconToken
+}
+
+const SOURCE_METADATA: Record<SourceId, SourceMetadata> = {
+  dsh: { label: 'DSH', colorToken: 'blue', iconToken: 'agent' },
+  codex: { label: 'Codex', colorToken: 'green', iconToken: 'code' },
+  zcode: { label: 'ZCode', colorToken: 'amber', iconToken: 'terminal' },
+}
+
+export interface SourceSessionRef {
+  source: SourceId
+  sourceSessionId: string
+  locator: string
+  locators?: readonly string[]
+  summary: SessionSummary
+}
+
+export interface SessionSource {
+  readonly id: SourceId
+  probe(): Promise<SourceStatus>
+  list(): Promise<readonly SourceSessionRef[]>
+  load(ref: SourceSessionRef): Promise<SessionDetail>
+  fingerprint(ref: SourceSessionRef): Promise<string>
+}
+
+export function sessionKey(source: SourceId, sourceSessionId: string): string {
+  return `${source}:${sourceSessionId}`
+}
+
+export function sourceMetadata(source: SourceId): SourceMetadata {
+  return SOURCE_METADATA[source]
+}
+
+export function capabilities(...enabled: SourceCapability[]): SourceCapabilities {
+  const selected = new Set(enabled)
+  return {
+    messages: selected.has('messages'),
+    tools: selected.has('tools'),
+    nestedTools: selected.has('nestedTools'),
+    timing: selected.has('timing'),
+    usage: selected.has('usage'),
+    live: selected.has('live'),
+    attachments: selected.has('attachments'),
+    trace: selected.has('trace'),
+    lineage: selected.has('lineage'),
+    policy: selected.has('policy'),
+    tasks: selected.has('tasks'),
+  }
+}

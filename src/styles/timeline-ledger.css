@@ -1,0 +1,377 @@
+.overview {
+  min-width: 0;
+  height: 131px;
+  padding: 8px 14px 5px;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+  user-select: none;
+}
+
+.overview-heading {
+  height: 23px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.overview-heading > div {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.overview-heading strong {
+  color: #555c65;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.overview-heading span {
+  color: #91969e;
+  font-size: 10px;
+}
+
+.overview-hint {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.overview:hover .overview-hint {
+  opacity: 1;
+}
+
+.timeline-grid {
+  height: 84px;
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr);
+}
+
+.lane-labels {
+  display: grid;
+  grid-template-rows: repeat(3, 28px);
+  color: #969ca5;
+  font-size: 11px;
+}
+
+.lane-labels span {
+  display: flex;
+  align-items: center;
+}
+
+.timeline-viewport {
+  position: relative;
+  height: 84px;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.timeline-lane {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 28px;
+  border-bottom: 1px solid #f0f1f3;
+}
+
+.timeline-record {
+  position: absolute;
+  top: 7px;
+  min-width: 4px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: #98a0aa;
+  cursor: pointer;
+  transition: filter 100ms ease, transform 100ms ease;
+}
+
+.timeline-record:hover,
+.timeline-record.selected {
+  z-index: 4;
+  filter: saturate(1.25) brightness(.93);
+  transform: scaleY(1.25);
+}
+
+.timeline-record.selected {
+  outline: 2px solid #1f2937;
+  outline-offset: 1px;
+}
+
+.timeline-record.point {
+  width: 7px;
+}
+
+.timeline-record.kind-system {
+  background: #7f8790;
+}
+
+.timeline-record.kind-user {
+  background: #6288e6;
+}
+
+.timeline-record.kind-steering {
+  background: #2fa2aa;
+}
+
+.timeline-record.kind-context {
+  background: #5bb883;
+}
+
+.timeline-record.kind-assistant {
+  background: var(--assistant-decode);
+}
+
+.timeline-record.kind-model {
+  background: #65508f;
+}
+
+.timeline-record.kind-tool,
+.timeline-record.kind-subtool {
+  background: #dd7d1e;
+}
+
+.timeline-record.kind-compaction {
+  background: #b94f69;
+}
+
+.turn-marker {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #dfe2e6;
+  pointer-events: none;
+}
+
+.turn-marker span {
+  position: absolute;
+  top: 0;
+  left: 3px;
+  color: #a0a5ac;
+  font-size: 9px;
+}
+
+.timeline-axis {
+  display: flex;
+  justify-content: space-between;
+  padding-left: 50px;
+  color: #a0a5ac;
+  font-size: 9px;
+}
+
+.ledger {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 31px minmax(0, 1fr);
+  background: #fff;
+}
+
+.ledger-header,
+.ledger-row {
+  display: grid;
+  grid-template-columns: 42px 90px minmax(180px, 1fr) 22px 92px 66px;
+  align-items: center;
+}
+
+.ledger-header {
+  padding: 0 9px 0 0;
+  border-bottom: 1px solid var(--border);
+  color: #9298a1;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.ledger-header span:last-child {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ledger-scroll {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.ledger-spacer {
+  position: relative;
+  min-width: 660px;
+}
+
+.turn-row,
+.ledger-row {
+  position: absolute;
+  right: 0;
+  left: 0;
+  width: 100%;
+}
+
+.turn-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: #fafbfc;
+  color: #717780;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.turn-row small {
+  margin-left: 4px;
+  color: #a0a5ac;
+  font-size: 10px;
+}
+
+.ledger-row {
+  padding: 0 9px 0 0;
+  border: 0;
+  border-bottom: 1px solid #eceef0;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ledger-row:hover {
+  background: #fafbfc;
+}
+
+.ledger-row.selected {
+  background: #eef4ff;
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+.step-cell {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #eceef0;
+  color: #9ba0a8;
+  font-size: 10px;
+}
+
+.kind-badge {
+  width: max-content;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  height: 25px;
+  margin-left: calc(var(--record-depth, 0) * 11px);
+  padding: 0 8px;
+  border-radius: 5px;
+  background: #eef0f2;
+  color: #636a73;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.kind-badge.kind-system {
+  background: #eef0f2;
+  color: #5f6670;
+}
+
+.kind-badge.kind-user {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.kind-badge.kind-steering {
+  background: #e1f4f5;
+  color: #1c8790;
+}
+
+.kind-badge.kind-context {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.kind-badge.kind-assistant {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+
+.kind-badge.kind-model {
+  background: #eee9f7;
+  color: #65508f;
+}
+
+.kind-badge.kind-tool,
+.kind-badge.kind-subtool {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+.kind-badge.kind-compaction {
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+
+.record-main {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 0 10px;
+  overflow: hidden;
+}
+
+.record-main strong {
+  flex-shrink: 0;
+  max-width: 190px;
+  overflow: hidden;
+  color: #272b31;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-main span {
+  overflow: hidden;
+  color: #656c75;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #9ba1a9;
+}
+
+.status-dot.status-complete {
+  background: #39a56e;
+}
+
+.status-dot.status-running {
+  background: #d99a25;
+  box-shadow: 0 0 0 3px #fbf0d9;
+}
+
+.status-dot.status-error,
+.status-dot.status-interrupted {
+  background: #c45062;
+}
+
+.duration-cell,
+.seq-cell {
+  color: #7f858e;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.seq-cell {
+  text-align: right;
+}

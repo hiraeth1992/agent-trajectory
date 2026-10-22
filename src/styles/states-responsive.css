@@ -1,0 +1,193 @@
+.error-banner {
+  padding: 9px 14px;
+  border-bottom: 1px solid #efc5cd;
+  background: #fff5f6;
+  color: #a13e51;
+  font-size: 12px;
+}
+
+.loading-state,
+.empty-state,
+.no-results {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b9199;
+}
+
+.loading-state {
+  grid-row: 4 / -1;
+  gap: 9px;
+  font-size: 13px;
+}
+
+.loading-state svg {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.empty-state {
+  grid-row: 4 / -1;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.empty-state strong {
+  color: #555b63;
+  font-size: 14px;
+}
+
+.empty-state span {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.no-results {
+  font-size: 12px;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: .35;
+  }
+}
+
+@media (max-width: 1100px) {
+  .app-shell.inspector-open {
+    padding-right: 0;
+  }
+
+  .inspector {
+    box-shadow: -12px 0 30px rgb(30 38 48 / 12%);
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    grid-template-rows: 50px 42px 48px auto 125px minmax(0, 1fr);
+  }
+
+  .brand {
+    min-width: auto;
+  }
+
+  .brand span,
+  .brand small,
+  .live-status,
+  .session-picker svg,
+  .text-button span {
+    display: none;
+  }
+
+  .toolbar-modes button {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .toolbar-modes button span {
+    display: none;
+  }
+
+  .session-picker {
+    width: 0;
+    flex: 1 1 0;
+    gap: 5px;
+    overflow: hidden;
+  }
+
+  .session-picker .source-filter {
+    width: 82px;
+    flex-basis: 82px;
+  }
+
+  .session-picker select:not(.source-filter) {
+    width: 0;
+    flex: 1 1 0;
+  }
+
+  .header-actions {
+    flex: 0 0 auto;
+  }
+
+  .app-header {
+    gap: 7px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .view-tabs {
+    gap: 12px;
+    padding: 0 8px;
+  }
+
+  .source-health {
+    width: 0;
+    flex: 1 1 0;
+    gap: 5px;
+  }
+
+  .source-health-item {
+    padding: 0 5px;
+  }
+
+  .source-health-item.status-available small {
+    display: none;
+  }
+
+  .session-meta dl {
+    display: none;
+  }
+
+  .toolbar {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .toolbar-actions,
+  .search-box {
+    width: 100%;
+  }
+
+  .text-button {
+    width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .overview {
+    height: 125px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .overview-hint {
+    display: none;
+  }
+
+  .timeline-grid {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+
+  .timeline-axis {
+    padding-left: 38px;
+  }
+
+  .ledger-header,
+  .ledger-row {
+    grid-template-columns: 30px 74px minmax(190px, 1fr) 16px 72px 54px;
+  }
+
+  .kind-badge {
+    min-width: 42px;
+    padding: 0 6px;
+    font-size: 11px;
+  }
+
+  .record-main strong {
+    max-width: 120px;
+  }
+
+  .inspector {
+    width: min(94vw, 420px);
+  }
+}

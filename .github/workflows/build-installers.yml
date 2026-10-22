@@ -1,0 +1,70 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-14
+            command: npm run dist:mac
+            artifacts: |
+              release/*.dmg
+              release/*.zip
+              release/*.blockmap
+          - name: Windows
+            os: windows-2025
+            command: npm run dist:win
+            artifacts: |
+              release/*.exe
+              release/*.blockmap
+          - name: Linux
+            os: ubuntu-24.04
+            command: >-
+              npm run dist:linux --
+              --config.extraMetadata.homepage=https://github.com/${{ github.repository }}
+              --config.linux.maintainer="${{ github.repository_owner }} <${{ github.repository_owner }}@users.noreply.github.com>"
+            artifacts: |
+              release/*.AppImage
+              release/*.deb
+              release/*.blockmap
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build installers
+        run: ${{ matrix.command }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agent-trajectory-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ matrix.artifacts }}
+          if-no-files-found: error
