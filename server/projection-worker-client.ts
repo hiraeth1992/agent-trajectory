@@ -2,6 +2,7 @@ import { Worker, type WorkerOptions } from 'node:worker_threads'
 import type {
   SessionEvent,
   SessionHeader,
+  SourceId,
   TrajectoryProjection,
 } from '../src/types'
 import type { CodexEnvelope } from './projectors/codex'
@@ -13,8 +14,14 @@ type WorkerFactory = (filename: URL, options: WorkerOptions) => Worker
 interface ProjectionReply {
   requestId: number
   ok: boolean
+  workerStartedAt?: number
+  workerCompletedAt?: number
   projection?: TrajectoryProjection
   needsSnapshot?: boolean
+  workerMetrics?: {
+    stateEntries: number
+    stateBytes: number
+  }
   error?: {
     name: string
     message: string
@@ -25,10 +32,12 @@ interface ProjectionReply {
 interface PendingProjection {
   resolve(value: ProjectionReply): void
   reject(error: Error): void
+  enqueuedAt: number
+  sentAt: number
 }
 
 interface ProjectionMessage {
-  source: 'dsh' | 'codex' | 'zcode'
+  source: SourceId
   key: string
   mode: 'snapshot' | 'append'
   header?: SessionHeader
@@ -42,6 +51,18 @@ export class ProjectionWorkerClient {
   private requestId = 0
   private readonly pending = new Map<number, PendingProjection>()
   private closed = false
+  private readonly durations: number[] = []
+  private readonly ipcOverheads: number[] = []
+  private readonly queueWaits: number[] = []
+  private readonly workerDurations: number[] = []
+  private requests = 0
+  private snapshots = 0
+  private appends = 0
+  private snapshotFallbacks = 0
+  private payloadBytes = 0
+  private maxPending = 0
+  private workerStateEntries = 0
+  private workerStateBytes = 0
 
   constructor(
     private readonly workerFactory: WorkerFactory = (filename, options) =>
@@ -103,12 +124,51 @@ export class ProjectionWorkerClient {
     if (worker !== undefined) await worker.terminate()
   }
 
+  metrics() {
+    const percentile = (values: number[], quantile: number): number | undefined => {
+      if (values.length === 0) return undefined
+      const sorted = [...values].sort((left, right) => left - right)
+      return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * quantile))]
+    }
+    return {
+      requests: this.requests,
+      snapshots: this.snapshots,
+      appends: this.appends,
+      snapshotFallbacks: this.snapshotFallbacks,
+      payloadBytes: this.payloadBytes,
+      pending: this.pending.size,
+      maxPending: this.maxPending,
+      roundTripMs: {
+        p50: percentile(this.durations, 0.5),
+        p95: percentile(this.durations, 0.95),
+      },
+      queueWaitMs: {
+        p50: percentile(this.queueWaits, 0.5),
+        p95: percentile(this.queueWaits, 0.95),
+      },
+      workerExecutionMs: {
+        p50: percentile(this.workerDurations, 0.5),
+        p95: percentile(this.workerDurations, 0.95),
+      },
+      ipcOverheadMs: {
+        p50: percentile(this.ipcOverheads, 0.5),
+        p95: percentile(this.ipcOverheads, 0.95),
+      },
+      workerStateEntries: this.workerStateEntries,
+      workerStateBytes: this.workerStateBytes,
+      processRssBytes: process.memoryUsage().rss,
+    }
+  }
+
   private async withSnapshotFallback(
     message: ProjectionMessage,
     snapshot: ProjectionMessage,
   ): Promise<TrajectoryProjection> {
     let reply = await this.send(message)
-    if (reply.needsSnapshot === true) reply = await this.send(snapshot)
+    if (reply.needsSnapshot === true) {
+      this.snapshotFallbacks++
+      reply = await this.send(snapshot)
+    }
     return this.requireProjection(reply)
   }
 
@@ -121,11 +181,24 @@ export class ProjectionWorkerClient {
     if (this.closed) return Promise.reject(new Error('projection worker is closed'))
     const worker = this.ensureWorker()
     const requestId = ++this.requestId
+    const enqueuedAt = performance.now()
+    const payloadBytes = Buffer.byteLength(JSON.stringify(message))
+    const sentAt = Date.now()
     return new Promise((resolve, reject) => {
       worker.ref()
-      this.pending.set(requestId, { resolve, reject })
+      this.requests++
+      if (message.mode === 'append') this.appends++
+      else this.snapshots++
+      this.payloadBytes += payloadBytes
+      this.pending.set(requestId, {
+        resolve,
+        reject,
+        enqueuedAt,
+        sentAt,
+      })
+      this.maxPending = Math.max(this.maxPending, this.pending.size)
       try {
-        worker.postMessage({ requestId, ...message })
+        worker.postMessage({ requestId, sentAt, ...message })
       } catch (caught) {
         this.pending.delete(requestId)
         if (this.pending.size === 0) worker.unref()
@@ -151,6 +224,33 @@ export class ProjectionWorkerClient {
       const pending = this.pending.get(reply.requestId)
       if (pending === undefined) return
       this.pending.delete(reply.requestId)
+      const completedAt = performance.now()
+      const roundTrip = completedAt - pending.enqueuedAt
+      const queueWait = Math.max(
+        0,
+        (reply.workerStartedAt ?? pending.sentAt) - pending.sentAt,
+      )
+      const workerDuration = reply.workerStartedAt !== undefined
+        && reply.workerCompletedAt !== undefined
+        ? Math.max(
+          0,
+          reply.workerCompletedAt - reply.workerStartedAt,
+        )
+        : undefined
+      this.durations.push(roundTrip)
+      this.queueWaits.push(queueWait)
+      if (workerDuration !== undefined) {
+        this.workerDurations.push(workerDuration)
+        this.ipcOverheads.push(Math.max(0, roundTrip - queueWait - workerDuration))
+      }
+      if (this.durations.length > 256) this.durations.shift()
+      if (this.queueWaits.length > 256) this.queueWaits.shift()
+      if (this.workerDurations.length > 256) this.workerDurations.shift()
+      if (this.ipcOverheads.length > 256) this.ipcOverheads.shift()
+      this.workerStateEntries = reply.workerMetrics?.stateEntries
+        ?? this.workerStateEntries
+      this.workerStateBytes = reply.workerMetrics?.stateBytes
+        ?? this.workerStateBytes
       if (this.pending.size === 0) worker.unref()
       if (reply.ok) {
         pending.resolve(reply)

@@ -1,5 +1,4 @@
 import type {
-  EvaluationDataset,
   EvaluationTargetRef,
   FrozenEvaluationCase,
 } from '../../src/evaluation-types'
@@ -13,6 +12,7 @@ import type {
   TrajectoryRecord,
 } from '../../src/types'
 import { capabilities, sessionKey } from '../sources/types'
+import { createEvaluationDataset } from './identity'
 
 const SOURCE_CAPABILITIES: Record<SourceId, SourceCapabilities> = {
   dsh: capabilities(
@@ -204,10 +204,10 @@ const cases: FrozenEvaluationCase[] = [
       { criterionId: 'recovery', verdict: 'not_applicable' },
     ],
     expectedRequirements: [{
-      id: 'requirement:user-1',
+      id: 'requirement:user-1:01',
       state: 'implemented',
     }],
-    expectedChainContinuity: 'not_applicable',
+    expectedChain: { continuity: 'not_applicable' },
   }),
   goldCase({
     id: 'codex-unverified-completion',
@@ -229,7 +229,7 @@ const cases: FrozenEvaluationCase[] = [
       { criterionId: 'reliability', verdict: 'pass' },
     ],
     expectedRequirements: [{
-      id: 'requirement:user-1',
+      id: 'requirement:user-1:01',
       state: 'insufficient_evidence',
     }],
   }),
@@ -253,7 +253,7 @@ const cases: FrozenEvaluationCase[] = [
       { criterionId: 'recovery', verdict: 'fail' },
     ],
     expectedRequirements: [{
-      id: 'requirement:user-1',
+      id: 'requirement:user-1:01',
       state: 'understood_unimplemented',
     }],
   }),
@@ -402,10 +402,10 @@ const cases: FrozenEvaluationCase[] = [
       { criterionId: 'outcome', verdict: 'pass' },
     ],
     expectedRequirements: [
-      { id: 'requirement:user-1', state: 'insufficient_evidence' },
-      { id: 'requirement:user-2', state: 'insufficient_evidence' },
+      { id: 'requirement:user-1:01', state: 'insufficient_evidence' },
+      { id: 'requirement:user-2:01', state: 'insufficient_evidence' },
     ],
-    expectedChainContinuity: 'insufficient_evidence',
+    expectedChain: { continuity: 'insufficient_evidence' },
   }),
   goldCase({
     id: 'codex-explicit-continuity',
@@ -415,11 +415,12 @@ const cases: FrozenEvaluationCase[] = [
     detail: detail('codex', 'codex-explicit-continuity', [
       user('codex', 'user-1', '先设计升级方案'),
       user('codex', 'user-2', '按已确认方案继续开发', 2, 2),
+      record('codex', 'action-1', { seq: 3, turn: 2, step: 1 }),
     ]),
     expected: [
       { criterionId: 'reliability', verdict: 'pass' },
     ],
-    expectedChainContinuity: 'normal',
+    expectedChain: { continuity: 'normal' },
   }),
   goldCase({
     id: 'dsh-reported-context-loss',
@@ -433,14 +434,21 @@ const cases: FrozenEvaluationCase[] = [
     expected: [
       { criterionId: 'outcome', verdict: 'insufficient_evidence' },
     ],
-    expectedChainContinuity: 'missing',
+    expectedChain: {
+      continuity: 'missing',
+      failedTransition: { fromTurn: 1, toTurn: 2 },
+    },
   }),
 ]
 
-export const MINIMAL_GOLD_DATASET: EvaluationDataset = {
+export const SYNTHETIC_CONTRACT_DATASET = createEvaluationDataset({
   schemaVersion: 1,
-  id: 'agent-trajectory-minimal-gold',
+  id: 'agent-trajectory-synthetic-contract',
   version: '1',
-  description: 'Twelve anonymous frozen trajectories for evaluator calibration and regression.',
+  description: 'Twelve anonymous frozen trajectories for evaluator contract regression.',
+  goldCompleteness: 'partial-contract',
   cases,
-}
+})
+
+/** @deprecated Use SYNTHETIC_CONTRACT_DATASET. */
+export const MINIMAL_GOLD_DATASET = SYNTHETIC_CONTRACT_DATASET

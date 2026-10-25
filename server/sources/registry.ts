@@ -148,6 +148,24 @@ export class SourceRegistry {
       .sort((a, b) => b.updatedAt - a.updatedAt)
   }
 
+  metrics() {
+    return {
+      detailCache: this.detailCache.metrics(),
+      detailLoadsInFlight: this.detailLoads.size,
+      referenceCacheEntries: this.refCache.size,
+      knownReferences: [...this.knownRefs.values()].reduce(
+        (total, refs) => total + refs.size,
+        0,
+      ),
+      missingReferences: this.missingRefs.size,
+      projectionWorker: this.projectionWorker?.metrics() ?? null,
+      sources: Object.fromEntries([...this.sources].map(([id, source]) => [
+        id,
+        source.metrics?.() ?? null,
+      ])),
+    }
+  }
+
   private async ref(source: SourceId, sourceSessionId: string): Promise<SourceSessionRef | undefined> {
     const missingUntil = this.missingRefs.get(`${source}:${sourceSessionId}`)
     if (missingUntil !== undefined) {

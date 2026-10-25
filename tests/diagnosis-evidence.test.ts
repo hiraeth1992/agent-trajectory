@@ -3,6 +3,11 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { DiagnosisEvidenceStore } from '../server/diagnosis/evidence-store'
+import { parseDiagnosisEvidenceArguments } from '../server/diagnosis/evidence-cli'
+import {
+  diagnosisAccessLedgerHash,
+  readDiagnosisEvidenceAccesses,
+} from '../server/diagnosis/access-ledger'
 import { queryDiagnosisEvidence } from '../server/diagnosis/evidence-query'
 import { capabilities, sessionKey } from '../server/sources/types'
 import type { SessionDetail } from '../src/types'
@@ -94,6 +99,22 @@ function detail(): SessionDetail {
 }
 
 describe('diagnosis evidence', () => {
+  it('parses process-check reports without weakening evidence views', () => {
+    expect(parseDiagnosisEvidenceArguments([
+      '--root',
+      '/private/evidence',
+      'process-check',
+      'snapshot-12345678901234567890',
+      '--report',
+      '/private/report.md',
+    ])).toMatchObject({
+      root: '/private/evidence',
+      view: 'process-check',
+      snapshotId: 'snapshot-12345678901234567890',
+      report: '/private/report.md',
+    })
+  })
+
   it('freezes redacted evidence and exposes only bounded read views', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-evidence-'))
     roots.push(root)
@@ -165,6 +186,25 @@ describe('diagnosis evidence', () => {
       originalBytes: 13,
       preview: '1 te',
     })
+
+    const accesses = await readDiagnosisEvidenceAccesses(
+      store.directory,
+      snapshot.snapshotId,
+    )
+    expect(accesses.map(access => ({
+      snapshotId: access.snapshotId,
+      view: access.view,
+      recordId: access.recordId,
+    }))).toEqual([
+      { snapshotId: snapshot.snapshotId, view: 'overview', recordId: undefined },
+      { snapshotId: snapshot.snapshotId, view: 'records', recordId: undefined },
+      { snapshotId: snapshot.snapshotId, view: 'record', recordId: 'tool-1' },
+      { snapshotId: snapshot.snapshotId, view: 'record', recordId: 'tool-1' },
+    ])
+    expect(diagnosisAccessLedgerHash(accesses)).toMatch(/^[a-f0-9]{64}$/)
+    const serializedLedger = JSON.stringify(accesses)
+    expect(serializedLedger).not.toContain('测试通过')
+    expect(serializedLedger).not.toContain('1 test passed')
   })
 
   it('rejects traversal and mismatched snapshot identifiers', async () => {

@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { SourceId } from '../src/types'
+import { isSourceId, type SourceId } from '../src/types'
 
 const MAX_HOOK_BYTES = 64 * 1024
 
@@ -23,9 +23,7 @@ export interface HookPayload {
 }
 
 function sourceId(value: unknown): SourceId | undefined {
-  return value === 'codex' || value === 'dsh' || value === 'zcode'
-    ? value
-    : undefined
+  return isSourceId(value) ? value : undefined
 }
 
 function text(value: unknown, maxLength: number): string | undefined {

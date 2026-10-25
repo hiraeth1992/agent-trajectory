@@ -17,6 +17,7 @@ function message(seq: number, text: string): SessionEvent {
     type: 'user/message',
     seq,
     time: 1_000 + seq,
+    surfaceOp: 'append',
     data: {
       source: { kind: 'user' },
       content: [{ type: 'text', text }],
@@ -68,6 +69,30 @@ describe('projection worker', () => {
       )
 
       expect(incremental).toEqual(projectTrajectory(header, [first, second]))
+      expect(worker.metrics()).toMatchObject({
+        requests: 2,
+        snapshots: 1,
+        appends: 1,
+        snapshotFallbacks: 0,
+        payloadBytes: expect.any(Number),
+        pending: 0,
+        maxPending: 1,
+        roundTripMs: {
+          p50: expect.any(Number),
+          p95: expect.any(Number),
+        },
+        queueWaitMs: {
+          p50: expect.any(Number),
+          p95: expect.any(Number),
+        },
+        ipcOverheadMs: {
+          p50: expect.any(Number),
+          p95: expect.any(Number),
+        },
+        workerStateEntries: 1,
+        workerStateBytes: expect.any(Number),
+        processRssBytes: expect.any(Number),
+      })
     } finally {
       await worker.close()
     }

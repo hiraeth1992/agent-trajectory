@@ -107,6 +107,10 @@ class SqliteWorkerClient {
     private readonly workerFactory: WorkerFactory,
   ) {}
 
+  get pendingCount(): number {
+    return this.pending.size
+  }
+
   query<T>(
     operation: SqliteOperation,
     sessionId?: string,
@@ -293,6 +297,13 @@ export class ZcodeSource implements SessionSource {
       maxWeight: options.cacheBytes ?? 96 * 1024 * 1024,
       weight: entry => jsonWeight(entry.input),
     })
+  }
+
+  metrics() {
+    return {
+      cache: this.cache.metrics(),
+      pendingWorkerRequests: this.sqlite.pendingCount,
+    }
   }
 
   async probe(): Promise<SourceStatus> {

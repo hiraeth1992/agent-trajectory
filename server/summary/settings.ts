@@ -8,7 +8,7 @@ import type {
   SummarySettings,
 } from '../../src/ai-summary-types'
 import { AI_ENHANCEMENT_MODULES } from '../../src/ai-summary-types'
-import type { SourceId } from '../../src/types'
+import { isSourceId, type SourceId } from '../../src/types'
 import { SerialTransaction, writePrivateJson } from './file-transaction'
 import type { SummarySecretStore } from './types'
 
@@ -40,9 +40,7 @@ function cleanSelection(value: unknown): SummaryModelSelection | undefined {
 }
 
 function cleanSource(value: unknown): SourceId | undefined {
-  return value === 'dsh' || value === 'codex' || value === 'zcode'
-    ? value
-    : undefined
+  return isSourceId(value) ? value : undefined
 }
 
 function cleanMapping(value: unknown): SummaryModelMapping | undefined {

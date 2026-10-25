@@ -29,6 +29,9 @@ const dataset: AnnotationDatasetSummary = {
   datasetHash: 'a'.repeat(64),
   description: 'Private real dataset',
   cases: 1,
+  requestedCases: 1,
+  skippedCases: 0,
+  allowPartial: false,
   sources: { dsh: 1, codex: 0, zcode: 0 },
   splits: { calibration: 1, regression: 0, independent: 0 },
   privacyAuditPassed: true,
@@ -289,9 +292,130 @@ describe('AnnotationWorkspace', () => {
     expect(fetchMock.mock.calls.some(([input]) =>
       String(input).includes('/records/'))).toBe(false)
 
-    fireEvent.click(screen.getByRole('button', { name: /工具 · exec_command/ }))
+    fireEvent.click(screen.getByRole('button', { name: /测试通过/ }))
     expect(await screen.findByText(/Tests 2 passed/)).toBeTruthy()
     expect(fetchMock.mock.calls.filter(([input]) =>
       String(input).includes('/records/'))).toHaveLength(1)
+  })
+
+  it('ignores stale record responses when requests resolve out of order', async () => {
+    let resolveFirst!: (value: Response) => void
+    let resolveSecond!: (value: Response) => void
+    const first = new Promise<Response>(resolve => {
+      resolveFirst = resolve
+    })
+    const second = new Promise<Response>(resolve => {
+      resolveSecond = resolve
+    })
+    const extendedWorkspace = {
+      ...workspace,
+      records: [
+        ...workspace.records,
+        {
+          ...workspace.records[1]!,
+          id: 'record-003',
+          summary: '第二条测试记录',
+        },
+      ],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
+        return response(overview)
+      }
+      if (url === '/api/annotations/datasets/private-v1/reviewer-a/cases/real-dsh-case') {
+        return response(extendedWorkspace)
+      }
+      if (url.endsWith('/records/record-002')) return first
+      if (url.endsWith('/records/record-003')) return second
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(
+      <AnnotationWorkspace
+        dataset={dataset}
+        reviewer="reviewer-a"
+        onExit={vi.fn()}
+      />,
+    )
+    fireEvent.change(await screen.findByRole('combobox', { name: '记录筛选' }), {
+      target: { value: 'all' },
+    })
+    await screen.findByText('第二条测试记录')
+    fireEvent.click(screen.getByRole('button', { name: /测试通过/ }))
+    fireEvent.click(screen.getByRole('button', { name: /第二条测试记录/ }))
+
+    resolveSecond(response({
+      ...extendedWorkspace.records[2],
+      output: 'SECOND_RESPONSE',
+    }))
+    expect(await screen.findByText(/SECOND_RESPONSE/)).toBeTruthy()
+
+    resolveFirst(response({
+      ...extendedWorkspace.records[1],
+      output: 'STALE_FIRST_RESPONSE',
+    }))
+    await waitFor(() => {
+      expect(screen.queryByText(/STALE_FIRST_RESPONSE/)).toBeNull()
+    })
+    expect(screen.getByText(/SECOND_RESPONSE/)).toBeTruthy()
+  })
+
+  it('keeps case navigation disabled while a save lease is active', async () => {
+    let resolveSave!: (value: Response) => void
+    const saveResponse = new Promise<Response>(resolve => {
+      resolveSave = resolve
+    })
+    const secondCase = {
+      ...workspace,
+      candidate: { ...workspace.candidate, id: 'real-dsh-case-2' },
+      annotation: { ...workspace.annotation, caseId: 'real-dsh-case-2' },
+    }
+    const twoCases = {
+      ...overview,
+      progress: { complete: 0, total: 2 },
+      cases: [
+        overview.cases[0]!,
+        { ...overview.cases[0]!, id: 'real-dsh-case-2' },
+      ],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
+        return response(twoCases)
+      }
+      if (url.endsWith('/cases/real-dsh-case') && init?.method !== 'PUT') {
+        return response(workspace)
+      }
+      if (url.endsWith('/cases/real-dsh-case-2')) return response(secondCase)
+      if (url.endsWith('/cases/real-dsh-case') && init?.method === 'PUT') {
+        return saveResponse
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(
+      <AnnotationWorkspace
+        dataset={dataset}
+        reviewer="reviewer-a"
+        onExit={vi.fn()}
+      />,
+    )
+    await screen.findByText('最终结果')
+    fireEvent.click(screen.getByRole('button', { name: /^保存$/ }))
+    expect(await screen.findByRole('button', { name: /保存中/ })).toBeTruthy()
+    const nextCase = screen.getByRole('button', { name: /2\. DSH/ })
+    expect(nextCase).toHaveProperty('disabled', true)
+    fireEvent.click(nextCase)
+
+    resolveSave(response({
+      revision: 'revision-2',
+      progress: { complete: 0, total: 2 },
+      case: overview.cases[0],
+    }))
+    await waitFor(() => {
+      expect(screen.getByText('real-dsh-case')).toBeTruthy()
+      expect(screen.queryByText('real-dsh-case-2')).toBeNull()
+    })
   })
 })

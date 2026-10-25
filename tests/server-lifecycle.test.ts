@@ -74,4 +74,83 @@ describe('server resource ownership', () => {
       await secondWorker.close()
     }
   })
+
+  it('keeps detail revision history isolated per server instance', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-lifecycle-'))
+    roots.push(root)
+    const makeRegistry = (title: string) => ({
+      listSources: async () => [],
+      listSessions: async () => [],
+      fingerprint: async () => title,
+      load: async (source: SourceId, sourceSessionId: string) => ({
+        summary: {
+          id: sessionKey(source, sourceSessionId),
+          source,
+          sourceSessionId,
+          format: 'test',
+          capabilities: capabilities('messages'),
+          cwd: '/tmp',
+          title,
+          createdAt: 0,
+          updatedAt: 0,
+          size: 1,
+        },
+        projection: {
+          header: {
+            source,
+            format: 'test',
+            id: sourceSessionId,
+            createdAt: 0,
+          },
+          records: [],
+          turns: [],
+          lanes: [],
+          startTime: 0,
+          endTime: 0,
+          eventCount: 0,
+          eventTypeCounts: {},
+          unknownEventTypes: [],
+          turnEnds: {},
+        },
+      }),
+    })
+    const first = await startAgentTrajectoryServer({
+      root,
+      port: 0,
+      registry: makeRegistry('first'),
+      summaryDataRoot: path.join(root, 'first-state'),
+      summarySecretStore: new MemorySummarySecretStore(),
+    })
+    const second = await startAgentTrajectoryServer({
+      root,
+      port: 0,
+      registry: makeRegistry('second'),
+      summaryDataRoot: path.join(root, 'second-state'),
+      summarySecretStore: new MemorySummarySecretStore(),
+    })
+    try {
+      const firstResponse = await fetch(`${first.url}/api/sessions/codex/shared`)
+      const firstSnapshot = await firstResponse.json() as {
+        kind: 'snapshot'
+        revision: string
+      }
+      const crossServer = await (
+        await fetch(
+          `${second.url}/api/sessions/codex/shared?revision=${
+            encodeURIComponent(firstSnapshot.revision)
+          }`,
+        )
+      ).json() as { kind: string; detail?: { summary?: { title?: string } } }
+
+      expect(crossServer).toMatchObject({
+        kind: 'snapshot',
+        detail: { summary: { title: 'second' } },
+      })
+      await first.close()
+      expect((await fetch(`${second.url}/api/sessions/codex/shared`)).status).toBe(200)
+    } finally {
+      await first.close()
+      await second.close()
+    }
+  })
 })

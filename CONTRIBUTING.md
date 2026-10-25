@@ -24,8 +24,14 @@ npm audit
 
 ## Change guidelines
 
-- Keep all source adapters read-only. Do not add writes, hooks, injection, or
-  decryption against DSH, Codex, or ZCode.
+- Keep all source adapters and ordinary view/evaluation paths read-only. They
+  must not write, inject, decrypt, or execute tools against DSH, Codex, or
+  ZCode.
+- `install-hooks` and `uninstall-hooks` are the only upstream-configuration
+  write paths. They run only after an explicit user command, may modify only
+  entries marked as Agent Trajectory activation hooks, and must use a
+  rollback-tested file transaction. Do not use this exception for session
+  content, Agent control, tool execution, or implicit setup.
 - Preserve opaque session routing and loopback-only HTTP access.
 - Add or update tests for behavior changes, especially parsing, projection,
   redaction, source isolation, and cache invalidation.

@@ -4,6 +4,7 @@ import path from 'node:path'
 import type { ViteDevServer } from 'vite'
 import { BrowserSession } from './browser-session'
 import {
+  ApiSessionState,
   handleApi,
   sendError,
   sendJson,
@@ -172,7 +173,10 @@ export async function startAgentTrajectoryServer(
   )
   const annotations = new AnnotationWorkspaceStore(
     path.join(summaryDataRoot, 'calibration'),
+    path.join(summaryDataRoot, 'evaluations'),
+    registry,
   )
+  const apiState = new ApiSessionState()
   let vite: ViteDevServer | undefined
   if (development) {
     const { createServer: createViteServer } = await import('vite')
@@ -225,6 +229,7 @@ export async function startAgentTrajectoryServer(
         annotations,
         diagnosis,
         registry,
+        state: apiState,
         summary,
       })) return
       if (vite !== undefined) {
@@ -254,6 +259,7 @@ export async function startAgentTrajectoryServer(
           registry.close?.() ?? Promise.resolve(),
           summary.close(),
         ])
+        apiState.clear()
         options.sessionActivationHub?.close()
       },
     }

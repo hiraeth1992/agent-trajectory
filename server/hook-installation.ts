@@ -159,6 +159,66 @@ async function atomicWrite(file: string, contents: string): Promise<void> {
   await fs.rename(temporary, file)
 }
 
+interface FileSnapshot {
+  contents?: Buffer
+  file: string
+  mode?: number
+}
+
+async function snapshotFile(file: string): Promise<FileSnapshot> {
+  try {
+    const [contents, stat] = await Promise.all([
+      fs.readFile(file),
+      fs.stat(file),
+    ])
+    return { contents, file, mode: stat.mode & 0o777 }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { file }
+    throw error
+  }
+}
+
+async function restoreFile(snapshot: FileSnapshot): Promise<void> {
+  if (snapshot.contents === undefined) {
+    await fs.rm(snapshot.file, { force: true })
+    return
+  }
+  await fs.mkdir(path.dirname(snapshot.file), { recursive: true })
+  const temporary = `${snapshot.file}.${process.pid}.rollback.tmp`
+  await fs.writeFile(temporary, snapshot.contents, {
+    mode: snapshot.mode ?? 0o600,
+  })
+  await fs.rename(temporary, snapshot.file)
+  if (process.platform !== 'win32' && snapshot.mode !== undefined) {
+    await fs.chmod(snapshot.file, snapshot.mode)
+  }
+}
+
+async function withFileTransaction<T>(
+  files: readonly string[],
+  operation: () => Promise<T>,
+): Promise<T> {
+  const snapshots = await Promise.all([...new Set(files)].map(snapshotFile))
+  try {
+    return await operation()
+  } catch (error) {
+    const restored = await Promise.allSettled(
+      [...snapshots].reverse().map(restoreFile),
+    )
+    const failures = restored.flatMap(result =>
+      result.status === 'rejected' ? [result.reason] : [])
+    if (failures.length > 0) {
+      throw new AggregateError(
+        [error, ...failures],
+        `Hook transaction failed and rollback was incomplete: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+    throw error
+  }
+}
+
 async function writeHookInstallation(
   installation: HookInstallation,
 ): Promise<void> {
@@ -376,58 +436,82 @@ export async function installAgentHooks(
   platform: NodeJS.Platform = process.platform,
   metadata: HookInstallationMetadata = { packageVersion: 'unknown' },
 ): Promise<HookInstallResult[]> {
-  const results = await Promise.all([
-    updateJsonHooks(
-      path.join(locations.codexHome, 'hooks.json'),
-      'codex',
-      shellCommand(nodeExecutable, cliFile, dataRoot, 'codex', platform),
-      false,
-    ),
-    updateJsonHooks(
-      path.join(locations.zcodeHome, 'cli', 'config.json'),
-      'zcode',
-      shellCommand(nodeExecutable, cliFile, dataRoot, 'zcode', platform),
-      false,
-    ),
-    updateDshHook(
-      locations.dshHome,
-      { nodeExecutable, cliFile, dataRoot },
-      false,
-    ),
-  ])
-  await writeHookInstallation({
-    version: HOOK_INSTALLATION_VERSION,
-    packageVersion: metadata.packageVersion,
-    platform,
-    nodeExecutable,
-    runtimeFile: cliFile,
-    dataRoot,
-    installedAt: metadata.installedAt ?? new Date().toISOString(),
+  const codexFile = path.join(locations.codexHome, 'hooks.json')
+  const zcodeFile = path.join(locations.zcodeHome, 'cli', 'config.json')
+  const dshPatch = path.join(locations.dshHome, 'profiles', 'desktop', 'cordis.patch.yml')
+  const dshPlugin = path.join(locations.dshHome, 'agent-trajectory-plugin.mjs')
+  const installationFile = hookInstallationFile(dataRoot)
+  return withFileTransaction([
+    codexFile,
+    `${codexFile}.agent-trajectory.bak`,
+    zcodeFile,
+    `${zcodeFile}.agent-trajectory.bak`,
+    dshPatch,
+    `${dshPatch}.agent-trajectory.bak`,
+    dshPlugin,
+    installationFile,
+  ], async () => {
+    const results = [
+      await updateJsonHooks(
+        codexFile,
+        'codex',
+        shellCommand(nodeExecutable, cliFile, dataRoot, 'codex', platform),
+        false,
+      ),
+      await updateJsonHooks(
+        zcodeFile,
+        'zcode',
+        shellCommand(nodeExecutable, cliFile, dataRoot, 'zcode', platform),
+        false,
+      ),
+      await updateDshHook(
+        locations.dshHome,
+        { nodeExecutable, cliFile, dataRoot },
+        false,
+      ),
+    ]
+    await writeHookInstallation({
+      version: HOOK_INSTALLATION_VERSION,
+      packageVersion: metadata.packageVersion,
+      platform,
+      nodeExecutable,
+      runtimeFile: cliFile,
+      dataRoot,
+      installedAt: metadata.installedAt ?? new Date().toISOString(),
+    })
+    return results
   })
-  return results
 }
 
 export async function uninstallAgentHooks(
   locations: HookInstallLocations,
   dataRoot?: string,
 ): Promise<HookInstallResult[]> {
-  const results = await Promise.all([
-    updateJsonHooks(
-      path.join(locations.codexHome, 'hooks.json'),
-      'codex',
-      '',
-      true,
-    ),
-    updateJsonHooks(
-      path.join(locations.zcodeHome, 'cli', 'config.json'),
-      'zcode',
-      '',
-      true,
-    ),
-    updateDshHook(locations.dshHome, undefined, true),
-  ])
-  if (dataRoot !== undefined) {
-    await fs.rm(hookInstallationFile(dataRoot), { force: true })
-  }
-  return results
+  const codexFile = path.join(locations.codexHome, 'hooks.json')
+  const zcodeFile = path.join(locations.zcodeHome, 'cli', 'config.json')
+  const dshPatch = path.join(locations.dshHome, 'profiles', 'desktop', 'cordis.patch.yml')
+  const dshPlugin = path.join(locations.dshHome, 'agent-trajectory-plugin.mjs')
+  const installationFile = dataRoot === undefined
+    ? undefined
+    : hookInstallationFile(dataRoot)
+  return withFileTransaction([
+    codexFile,
+    `${codexFile}.agent-trajectory.bak`,
+    zcodeFile,
+    `${zcodeFile}.agent-trajectory.bak`,
+    dshPatch,
+    `${dshPatch}.agent-trajectory.bak`,
+    dshPlugin,
+    ...(installationFile === undefined ? [] : [installationFile]),
+  ], async () => {
+    const results = [
+      await updateJsonHooks(codexFile, 'codex', '', true),
+      await updateJsonHooks(zcodeFile, 'zcode', '', true),
+      await updateDshHook(locations.dshHome, undefined, true),
+    ]
+    if (installationFile !== undefined) {
+      await fs.rm(installationFile, { force: true })
+    }
+    return results
+  })
 }

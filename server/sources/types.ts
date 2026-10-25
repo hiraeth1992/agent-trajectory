@@ -21,12 +21,36 @@ const SOURCE_METADATA: Record<SourceId, SourceMetadata> = {
   zcode: { label: 'ZCode', colorToken: 'amber', iconToken: 'terminal' },
 }
 
+const SOURCE_APPLICATION_ICONS: Partial<
+  Record<SourceId, Partial<Record<NodeJS.Platform, string[]>>>
+> = {
+  dsh: {
+    darwin: ['/Applications/DeepSeek Harness.app/Contents/Resources/icon.png'],
+  },
+  zcode: {
+    darwin: ['/Applications/ZCode.app/Contents/Resources/icon.png'],
+  },
+}
+
 export interface SourceSessionRef {
   source: SourceId
   sourceSessionId: string
   locator: string
   locators?: readonly string[]
   summary: SessionSummary
+}
+
+export class SessionFormatError extends Error {
+  constructor(
+    message: string,
+    readonly code:
+      | 'session_migration_required'
+      | 'session_protocol_unsupported'
+      | 'session_corrupt',
+  ) {
+    super(message)
+    this.name = 'SessionFormatError'
+  }
 }
 
 export interface SessionSource {
@@ -36,6 +60,7 @@ export interface SessionSource {
   load(ref: SourceSessionRef): Promise<SessionDetail>
   audit(ref: SourceSessionRef): Promise<readonly unknown[]>
   fingerprint(ref: SourceSessionRef): Promise<string>
+  metrics?(): unknown
   close?(): Promise<void>
 }
 
@@ -45,6 +70,13 @@ export function sessionKey(source: SourceId, sourceSessionId: string): string {
 
 export function sourceMetadata(source: SourceId): SourceMetadata {
   return SOURCE_METADATA[source]
+}
+
+export function sourceApplicationIcons(
+  source: SourceId,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  return [...(SOURCE_APPLICATION_ICONS[source]?.[platform] ?? [])]
 }
 
 export function capabilities(...enabled: SourceCapability[]): SourceCapabilities {

@@ -4,11 +4,13 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   auditCalibrationCandidates,
+  annotationContentHash,
   compareHumanAnnotations,
   createAnnotationTemplate,
   loadAdjudicatedDataset,
   loadCandidateManifest,
   loadHumanAnnotations,
+  parseCalibrationPrivacyAudit,
   parseAdjudication,
   prepareCalibrationCandidates,
   sanitizeCalibrationDetail,
@@ -251,10 +253,27 @@ describe('private real-trajectory calibration', () => {
     })
 
     expect(prepared.manifest.cases).toHaveLength(3)
+    expect(prepared.manifest.preparation).toEqual({
+      requested: 3,
+      produced: 3,
+      skipped: 0,
+      allowPartial: false,
+      candidatePoolHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      candidateMultiplier: 4,
+      samplingPolicyVersion: 2,
+      seed: 'private-real-test@1:sampling-v2',
+      groupPolicy: 'source-parent-workspace',
+      splitPolicy: 'group-aware-50-20-30',
+      independentAccess: 'restricted',
+    })
     expect(new Set(prepared.manifest.cases.map(item => item.target.source)))
       .toEqual(new Set(['dsh', 'codex', 'zcode']))
-    expect(prepared.manifest.cases.map(item => item.split))
-      .toEqual(['calibration', 'calibration', 'independent'])
+    expect(new Set(prepared.manifest.cases.map(item => item.groupHash)).size).toBe(3)
+    expect(prepared.manifest.cases.every(item =>
+      !item.traits.some(trait =>
+        trait === 'recovered'
+        || trait === 'unresolved'
+        || trait.endsWith('-outcome')))).toBe(true)
     const serialized = await Promise.all(
       prepared.manifest.cases.map(item =>
         fs.readFile(path.join(root, item.file), 'utf8')),
@@ -270,6 +289,9 @@ describe('private real-trajectory calibration', () => {
         item.verdict === undefined && item.attribution === undefined))).toBe(true)
     expect(JSON.stringify(reviewerA)).not.toContain('local-trajectory')
     expect(await auditCalibrationCandidates(root)).toMatchObject({
+      schemaVersion: 2,
+      kind: 'calibration-privacy-audit',
+      manifestHash: prepared.manifest.contentHash,
       cases: 3,
       hashesVerified: 3,
       forbiddenRecordFields: 0,
@@ -286,6 +308,95 @@ describe('private real-trajectory calibration', () => {
       expect((await fs.stat(prepared.manifestFile)).mode & 0o777).toBe(0o600)
       expect((await fs.stat(prepared.reviewerATemplate)).mode & 0o777).toBe(0o600)
     }
+  })
+
+  it('requires the requested count unless partial preparation is explicit', async () => {
+    const strictRoot = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    roots.push(strictRoot)
+    await expect(prepareCalibrationCandidates(source(), strictRoot, {
+      count: 30,
+      datasetId: 'private-real-strict',
+      datasetVersion: '1',
+    })).rejects.toThrow(/requested 30, produced 3.*--allow-partial/)
+    expect(await fs.readdir(strictRoot)).toEqual([])
+
+    const partialRoot = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    roots.push(partialRoot)
+    const partial = await prepareCalibrationCandidates(source(), partialRoot, {
+      count: 30,
+      allowPartial: true,
+      datasetId: 'private-real-partial',
+      datasetVersion: '1',
+    })
+    expect(partial.manifest).toMatchObject({
+      preparation: {
+        requested: 30,
+        produced: 3,
+        skipped: 0,
+        allowPartial: true,
+      },
+      cases: expect.any(Array),
+    })
+    expect(partial.manifest.cases).toHaveLength(3)
+  })
+
+  it('keeps seeded sampling and group-aware splits reproducible', async () => {
+    const firstRoot = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    const secondRoot = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    roots.push(firstRoot, secondRoot)
+    const options = {
+      count: 3,
+      createdAt: '2026-10-25T00:00:00.000Z',
+      datasetId: 'private-real-seeded',
+      datasetVersion: '1',
+      seed: 'fixed-seed',
+    }
+    const first = await prepareCalibrationCandidates(source(), firstRoot, options)
+    const second = await prepareCalibrationCandidates(source(), secondRoot, options)
+
+    expect(second.manifest.preparation).toEqual(first.manifest.preparation)
+    expect(second.manifest.cases.map(item => ({
+      id: item.id,
+      split: item.split,
+      groupHash: item.groupHash,
+      traits: item.traits,
+    }))).toEqual(first.manifest.cases.map(item => ({
+      id: item.id,
+      split: item.split,
+      groupHash: item.groupHash,
+      traits: item.traits,
+    })))
+    const splitByGroup = new Map<string, Set<string>>()
+    for (const candidate of first.manifest.cases) {
+      const splits = splitByGroup.get(candidate.groupHash) ?? new Set()
+      splits.add(candidate.split)
+      splitByGroup.set(candidate.groupHash, splits)
+    }
+    expect([...splitByGroup.values()].every(splits => splits.size === 1)).toBe(true)
+  })
+
+  it('binds privacy audits to the exact manifest and audit schema', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    roots.push(root)
+    const prepared = await prepareCalibrationCandidates(source(), root, {
+      count: 3,
+      datasetId: 'private-real-audit',
+      datasetVersion: '1',
+    })
+    const audit = JSON.parse(
+      await fs.readFile(path.join(root, 'privacy-audit.json'), 'utf8'),
+    ) as Record<string, unknown>
+
+    expect(parseCalibrationPrivacyAudit(audit, prepared.manifest))
+      .toMatchObject({ passed: true, manifestHash: prepared.manifest.contentHash })
+    expect(() => parseCalibrationPrivacyAudit({
+      ...audit,
+      manifestHash: '0'.repeat(64),
+    }, prepared.manifest)).toThrow(/manifest hash mismatch/)
+    expect(() => parseCalibrationPrivacyAudit({
+      ...audit,
+      schemaVersion: 1,
+    }, prepared.manifest)).toThrow(/unsupported calibration privacy audit/)
   })
 
   it('rejects candidate tampering before loading adjudicated Gold', async () => {
@@ -369,6 +480,8 @@ describe('private real-trajectory calibration', () => {
     ))
     right.cases[0]!.criteria[0]!.verdict = 'warning'
     const report = compareHumanAnnotations(manifest, left, right)
+    expect(annotationContentHash(left))
+      .toBe(annotationContentHash(JSON.parse(JSON.stringify(left))))
 
     expect(report).toMatchObject({
       reviewerA: 'reviewer-a',
@@ -383,6 +496,42 @@ describe('private real-trajectory calibration', () => {
     })
     expect(report.criterionExactAgreement).toBeCloseTo(14 / 15)
     expect(report.criterionKappa).toBeLessThan(1)
+    expect(report.criterionExactAgreementCi).toMatchObject({
+      confidence: 0.95,
+      lower: expect.any(Number),
+      upper: expect.any(Number),
+      samples: 1_000,
+    })
+    expect(report.criterionKappaCi).toMatchObject({
+      confidence: 0.95,
+      lower: expect.any(Number),
+      upper: expect.any(Number),
+    })
+    expect(report.criterionAgreement.outcome).toMatchObject({
+      sampleSize: 3,
+      verdictAgreement: 2 / 3,
+      attributionAgreement: 1,
+      verdictMarginals: {
+        reviewerA: { pass: 3 },
+        reviewerB: { pass: 2, warning: 1 },
+      },
+    })
+    expect(report.criterionAgreement.outcome?.verdictAgreementCi).toMatchObject({
+      confidence: 0.95,
+      lower: expect.any(Number),
+      upper: expect.any(Number),
+      samples: 1_000,
+    })
+    expect(compareHumanAnnotations(manifest, left, right).criterionExactAgreementCi)
+      .toEqual(report.criterionExactAgreementCi)
+    expect(report.requirementDetectionAgreement).toBe(1)
+    expect(report.requirementStateAgreement).toBe(1)
+    expect(report.chainExactAgreement).toBe(1)
+    expect(report.chainKappa).toBeUndefined()
+    expect(report.chainMarginals).toEqual({
+      reviewerA: { not_applicable: 3 },
+      reviewerB: { not_applicable: 3 },
+    })
 
     const incomplete = createAnnotationTemplate(manifest, 'adjudicator')
     expect(() => parseAdjudication({
@@ -436,6 +585,21 @@ describe('private real-trajectory calibration', () => {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
     expect(dataset.cases).toHaveLength(3)
+    expect(dataset).toMatchObject({
+      goldCompleteness: 'full-gold',
+      datasetHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      goldHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    })
+    expect(dataset.cases[0]!.expectedRequirements?.[0]).toMatchObject({
+      id: 'requirement:record-001',
+      text: '修复并验证私有项目',
+      required: true,
+      evidenceRecordIds: ['record-001', 'record-002'],
+    })
+    expect(dataset.cases[0]!.expectedChain).toEqual({
+      continuity: 'not_applicable',
+      evidenceRecordIds: ['record-001'],
+    })
     expect(run.cases).toHaveLength(3)
     expect(run.aggregate.evaluatorError).toBe(0)
 

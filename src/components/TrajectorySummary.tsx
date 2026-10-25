@@ -30,7 +30,7 @@ import type {
   AnalysisStep,
   TrajectoryAnalysis,
 } from '../trajectory-analysis'
-import type { TokenUsage } from '../types'
+import type { SourceId, TokenUsage } from '../types'
 import type {
   AiEvaluationEnhancement,
   ValidatedAiSummary,
@@ -73,7 +73,7 @@ interface SummarySessionMeta {
 
 interface TrajectorySummaryProps {
   analysis: TrajectoryAnalysis
-  source: 'dsh' | 'codex' | 'zcode'
+  source: SourceId
   sourceSessionId: string
   sessionModel?: string
   sessionProvider?: string

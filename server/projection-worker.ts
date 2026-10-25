@@ -7,6 +7,7 @@ import {
 import type {
   SessionEvent,
   SessionHeader,
+  SourceId,
   TrajectoryProjection,
 } from '../src/types'
 import {
@@ -18,11 +19,12 @@ import {
   type ZcodeProjectionInput,
 } from './projectors/zcode'
 
-type ProjectionSource = 'dsh' | 'codex' | 'zcode'
+type ProjectionSource = SourceId
 type ProjectionMode = 'snapshot' | 'append'
 
 interface ProjectionRequest {
   requestId: number
+  sentAt: number
   source: ProjectionSource
   key: string
   mode: ProjectionMode
@@ -146,11 +148,18 @@ function project(request: ProjectionRequest): TrajectoryProjection | undefined {
 if (parentPort === null) throw new Error('projection worker requires a parent port')
 
 parentPort.on('message', (request: ProjectionRequest) => {
+  const workerStartedAt = Date.now()
   try {
     const projection = project(request)
     parentPort?.postMessage({
       requestId: request.requestId,
       ok: true,
+      workerStartedAt,
+      workerCompletedAt: Date.now(),
+      workerMetrics: {
+        stateEntries: states.size,
+        stateBytes,
+      },
       ...(projection === undefined ? { needsSnapshot: true } : { projection }),
     })
   } catch (caught) {
@@ -158,6 +167,8 @@ parentPort.on('message', (request: ProjectionRequest) => {
     parentPort?.postMessage({
       requestId: request.requestId,
       ok: false,
+      workerStartedAt,
+      workerCompletedAt: Date.now(),
       error: {
         name: error.name,
         message: error.message,

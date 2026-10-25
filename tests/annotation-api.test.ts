@@ -135,11 +135,17 @@ const registry: ApiRegistry = {
   fingerprint: async () => undefined,
 }
 
-async function start(annotations: AnnotationWorkspaceStore): Promise<string> {
+async function start(
+  annotations: AnnotationWorkspaceStore,
+  selectedRegistry: ApiRegistry = registry,
+): Promise<string> {
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
-      if (!await handleApi(request, response, url, { annotations, registry })) {
+      if (!await handleApi(request, response, url, {
+        annotations,
+        registry: selectedRegistry,
+      })) {
         response.writeHead(404).end()
       }
     })().catch(error => sendError(response, 500, error))
@@ -151,6 +157,136 @@ async function start(annotations: AnnotationWorkspaceStore): Promise<string> {
 }
 
 describe('annotation workspace API', () => {
+  it('prepares datasets only inside the configured calibration root', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-api-prepare-'))
+    roots.push(root)
+    const calibrationRoot = path.join(root, 'calibration')
+    const calibrationSource = source()
+    const selectedRegistry: ApiRegistry = {
+      listSources: calibrationSource.listSources,
+      listSessions: calibrationSource.listSessions,
+      load: calibrationSource.load,
+      fingerprint: calibrationSource.fingerprint,
+    }
+    const store = new AnnotationWorkspaceStore(
+      calibrationRoot,
+      path.join(root, 'evaluations'),
+      selectedRegistry,
+    )
+    const base = await start(store, selectedRegistry)
+
+    const preparedResponse = await fetch(`${base}/api/annotations/datasets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directoryId: 'real-v1',
+        datasetId: 'private-api-prepared',
+        datasetVersion: '1',
+        count: 3,
+        allowPartial: false,
+      }),
+    })
+    expect(preparedResponse.status).toBe(201)
+    expect(await preparedResponse.json()).toMatchObject({
+      dataset: {
+        directoryId: 'real-v1',
+        datasetId: 'private-api-prepared',
+        cases: 3,
+        allowPartial: false,
+        privacyAuditPassed: true,
+      },
+      skipped: 0,
+    })
+    expect(await fs.readdir(path.join(calibrationRoot, 'real-v1'))).toEqual(
+      expect.arrayContaining([
+        'manifest.json',
+        'privacy-audit.json',
+        'reviewer-a.json',
+        'reviewer-b.json',
+      ]),
+    )
+
+    const duplicate = await fetch(`${base}/api/annotations/datasets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directoryId: 'real-v1',
+        datasetId: 'private-api-prepared',
+        datasetVersion: '2',
+        count: 3,
+        allowPartial: false,
+      }),
+    })
+    expect(duplicate.status).toBe(409)
+    expect(await duplicate.json()).toMatchObject({
+      code: 'annotation_conflict',
+      error: expect.stringMatching(/already exists/),
+    })
+
+    const invalidPath = await fetch(`${base}/api/annotations/datasets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        directoryId: '../outside',
+        datasetId: 'private-api-invalid',
+        datasetVersion: '1',
+        count: 3,
+        allowPartial: false,
+      }),
+    })
+    expect(invalidPath.status).toBe(400)
+    expect(await invalidPath.json()).toMatchObject({
+      code: 'invalid_annotation',
+    })
+    expect(await fs.access(path.join(root, 'outside')).then(
+      () => true,
+      () => false,
+    )).toBe(false)
+  })
+
+  it('deduplicates identical preparation requests and rejects conflicting ones', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-api-prepare-'))
+    roots.push(root)
+    const calibrationRoot = path.join(root, 'calibration')
+    const delegate = source()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    let sourceReads = 0
+    const delayed: CalibrationSource = {
+      ...delegate,
+      listSources: async () => {
+        sourceReads++
+        await gate
+        return delegate.listSources()
+      },
+    }
+    const store = new AnnotationWorkspaceStore(
+      calibrationRoot,
+      path.join(root, 'evaluations'),
+      delayed,
+    )
+    const request = {
+      directoryId: 'real-v1',
+      datasetId: 'private-api-concurrent',
+      datasetVersion: '1',
+      count: 3,
+      allowPartial: false,
+    }
+    const first = store.prepareDataset(request)
+    const duplicate = store.prepareDataset(request)
+    await expect(store.prepareDataset({
+      ...request,
+      datasetVersion: '2',
+    })).rejects.toThrow(/already running/)
+    release()
+
+    const [firstResult, duplicateResult] = await Promise.all([first, duplicate])
+    expect(firstResult.dataset.datasetHash).toBe(duplicateResult.dataset.datasetHash)
+    expect(sourceReads).toBe(1)
+  })
+
   it('lists, loads, lazy-reads, saves, and rejects stale revisions', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-api-'))
     roots.push(root)
@@ -164,12 +300,24 @@ describe('annotation workspace API', () => {
         datasetVersion: '1',
       },
     )
-    const base = await start(new AnnotationWorkspaceStore(calibrationRoot))
+    const store = new AnnotationWorkspaceStore(calibrationRoot)
+    const base = await start(store)
 
     const datasets = await (
       await fetch(`${base}/api/annotations/datasets`)
     ).json() as Array<{ directoryId: string }>
     expect(datasets).toEqual([expect.objectContaining({ directoryId: 'private-v1' })])
+
+    const workflowResponse = await fetch(
+      `${base}/api/annotations/datasets/private-v1/workflow`,
+    )
+    expect(workflowResponse.status).toBe(200)
+    expect(await workflowResponse.json()).toMatchObject({
+      reviewersComplete: false,
+      adjudication: { exists: false, complete: false },
+      runs: [],
+      diffs: [],
+    })
 
     const overviewResponse = await fetch(
       `${base}/api/annotations/datasets/private-v1/reviewer-a`,
@@ -230,6 +378,146 @@ describe('annotation workspace API', () => {
     expect(conflict.status).toBe(409)
     expect(await conflict.json()).toMatchObject({
       error: expect.stringMatching(/changed in another window/),
+    })
+
+    const malformed = await fetch(
+      `${base}/api/annotations/datasets/private-v1/reviewer-a/cases/${selected.id}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{',
+      },
+    )
+    expect(malformed.status).toBe(400)
+    expect(await malformed.json()).toEqual({
+      code: 'invalid_json',
+      error: 'invalid JSON body',
+    })
+
+    const tooLarge = await fetch(
+      `${base}/api/annotations/datasets/private-v1/reviewer-a/cases/${selected.id}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: 'x'.repeat(513 * 1024) }),
+      },
+    )
+    expect(tooLarge.status).toBe(413)
+    expect(await tooLarge.json()).toEqual({
+      code: 'request_body_too_large',
+      error: 'request body too large',
+    })
+
+    const missingCase = await fetch(
+      `${base}/api/annotations/datasets/private-v1/reviewer-a/cases/missing-case`,
+    )
+    expect(missingCase.status).toBe(404)
+    expect(await missingCase.json()).toMatchObject({
+      code: 'annotation_not_found',
+    })
+
+    const invalidRecord = await fetch(
+      `${base}/api/annotations/datasets/private-v1/reviewer-a/cases/${
+        selected.id
+      }/records/not-a-record`,
+    )
+    expect(invalidRecord.status).toBe(400)
+    expect(await invalidRecord.json()).toMatchObject({
+      code: 'invalid_annotation',
+    })
+
+    const invalidSaveShape = await fetch(
+      `${base}/api/annotations/datasets/private-v1/reviewer-a/cases/${selected.id}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: 'null',
+      },
+    )
+    expect(invalidSaveShape.status).toBe(400)
+    expect(await invalidSaveShape.json()).toMatchObject({
+      code: 'invalid_annotation_request',
+    })
+
+    const invalidRun = await fetch(
+      `${base}/api/annotations/datasets/private-v1/workflow/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ split: 'unknown' }),
+      },
+    )
+    expect(invalidRun.status).toBe(400)
+    expect(await invalidRun.json()).toMatchObject({
+      code: 'invalid_evaluation_request',
+    })
+    const invalidBaselineRun = await fetch(
+      `${base}/api/annotations/datasets/private-v1/workflow/run`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          split: 'calibration',
+          baselineRunId: '../not-a-run',
+        }),
+      },
+    )
+    expect(invalidBaselineRun.status).toBe(400)
+    expect(await invalidBaselineRun.json()).toMatchObject({
+      code: 'invalid_evaluation_request',
+    })
+
+    const missingRun = await fetch(
+      `${base}/api/annotations/datasets/private-v1/workflow/runs/${'x'.repeat(24)}`,
+    )
+    expect(missingRun.status).toBe(404)
+    expect(await missingRun.json()).toMatchObject({
+      code: 'annotation_not_found',
+    })
+
+    const invalidRunId = await fetch(
+      `${base}/api/annotations/datasets/private-v1/workflow/runs/bad%2Fid`,
+    )
+    expect(invalidRunId.status).toBe(400)
+    expect(await invalidRunId.json()).toMatchObject({
+      code: 'invalid_annotation',
+    })
+
+    store.evaluationRunDetails = async () => ({
+      run: {
+        runId: 'r'.repeat(24),
+        createdAt: '2026-10-25T00:00:00.000Z',
+        split: 'calibration',
+        assertionAgreement: 1,
+        evaluatorError: 0,
+        cases: [{
+          caseId: 'case-1',
+          assertionsPassed: 1,
+          assertionsTotal: 1,
+          criteria: [{
+            criterionId: 'outcome',
+            verdict: 'pass',
+            attribution: 'agent',
+            evidenceRecordIds: ['record-002'],
+          }],
+          mismatches: [],
+        }],
+      },
+      diffs: [],
+    })
+    const runDetails = await fetch(
+      `${base}/api/annotations/datasets/private-v1/workflow/runs/${'r'.repeat(24)}`,
+    )
+    expect(runDetails.status).toBe(200)
+    expect(await runDetails.json()).toMatchObject({
+      run: {
+        runId: 'r'.repeat(24),
+        cases: [{
+          caseId: 'case-1',
+          criteria: [{ criterionId: 'outcome', verdict: 'pass' }],
+        }],
+      },
+      diffs: [],
     })
   })
 })

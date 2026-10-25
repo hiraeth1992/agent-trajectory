@@ -38,6 +38,17 @@ const MAX_EVIDENCE_ITEMS = 24
 const MAX_EVIDENCE_ITEM_BYTES = 12 * 1024
 const MAX_EVIDENCE_TOTAL_BYTES = 96 * 1024
 
+export class SummaryRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: 400 | 404 | 409,
+    readonly code: string,
+  ) {
+    super(message)
+    this.name = 'SummaryRequestError'
+  }
+}
+
 interface GenerateContext {
   detail: SessionDetail
   preview: SummaryPreview
@@ -386,23 +397,37 @@ export class SummaryEngine {
     requested?: SummaryModelSelection,
   ): Promise<GenerateContext> {
     const detail = await this.registry.load(source, sourceSessionId)
-    if (detail === undefined) throw new Error('session not found')
+    if (detail === undefined) {
+      throw new SummaryRequestError('session not found', 404, 'summary_session_not_found')
+    }
     const preview = buildSummaryPreview(detail, analyzeTrajectory(detail), modules)
     const adapters = await this.adapters()
     const settings = await this.settings.read()
     const statuses = this.visibleStatuses(await this.statuses(adapters), settings)
     const resolved = requested ?? this.select(detail, statuses, settings).selected
     if (!selectionExists(resolved, statuses)) {
-      throw new Error('selected summary model is unavailable')
+      throw new SummaryRequestError(
+        'selected summary model is unavailable',
+        409,
+        'summary_model_unavailable',
+      )
     }
     const adapter = adapters.find(candidate => candidate.id === resolved.adapterId)
-    if (adapter === undefined) throw new Error('selected summary adapter is unavailable')
+    if (adapter === undefined) {
+      throw new SummaryRequestError(
+        'selected summary adapter is unavailable',
+        409,
+        'summary_adapter_unavailable',
+      )
+    }
     return { detail, preview, adapter, selection: resolved }
   }
 
   async options(source: SourceId, sourceSessionId: string): Promise<AiSummaryOptions> {
     const detail = await this.registry.load(source, sourceSessionId)
-    if (detail === undefined) throw new Error('session not found')
+    if (detail === undefined) {
+      throw new SummaryRequestError('session not found', 404, 'summary_session_not_found')
+    }
     const settings = await this.settings.read()
     const selectedModules = settings.lastModules
     const analysis = analyzeTrajectory(detail)
@@ -474,9 +499,17 @@ export class SummaryEngine {
     const modules = requestedModules === undefined
       ? (await this.settings.read()).lastModules
       : normalizeModules(requestedModules)
-    if (modules.length === 0) throw new Error('at least one enhancement module is required')
+    if (modules.length === 0) {
+      throw new SummaryRequestError(
+        'at least one enhancement module is required',
+        400,
+        'invalid_summary_modules',
+      )
+    }
     const detail = await this.registry.load(source, sourceSessionId)
-    if (detail === undefined) throw new Error('session not found')
+    if (detail === undefined) {
+      throw new SummaryRequestError('session not found', 404, 'summary_session_not_found')
+    }
     return buildSummaryPreview(detail, analyzeTrajectory(detail), modules)
   }
 
@@ -519,7 +552,13 @@ export class SummaryEngine {
   ): Promise<ValidatedAiSummary> {
     throwIfAborted(signal)
     const modules = normalizeModules(request.modules)
-    if (modules.length === 0) throw new Error('at least one enhancement module is required')
+    if (modules.length === 0) {
+      throw new SummaryRequestError(
+        'at least one enhancement module is required',
+        400,
+        'invalid_summary_modules',
+      )
+    }
     onProgress?.({ stage: 'preparing', message: '正在准备脱敏事实包' })
     const context = await this.context(source, sourceSessionId, modules, {
       adapterId: request.adapterId,
@@ -600,15 +639,35 @@ export class SummaryEngine {
   }
 
   async updateSettings(value: unknown) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new SummaryRequestError(
+        'invalid summary settings',
+        400,
+        'invalid_summary_settings',
+      )
+    }
     return this.settings.update(value)
   }
 
   async setCredential(id: string, value: string | undefined): Promise<void> {
-    await this.settings.setCredential(id, value)
+    try {
+      await this.settings.setCredential(id, value)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'unknown summary adapter') {
+        throw new SummaryRequestError(
+          error.message,
+          404,
+          'summary_adapter_not_found',
+        )
+      }
+      throw error
+    }
   }
 
   async removeModel(value: unknown) {
-    if (value === null || typeof value !== 'object') throw new Error('invalid summary model')
+    if (value === null || typeof value !== 'object') {
+      throw new SummaryRequestError('invalid summary model', 400, 'invalid_summary_model')
+    }
     const source = value as Record<string, unknown>
     const adapterId = typeof source.adapterId === 'string' ? source.adapterId : undefined
     const model = typeof source.model === 'string' ? source.model : undefined
@@ -618,18 +677,20 @@ export class SummaryEngine {
       ? source.adapterType : undefined
     if (adapterId === undefined || model === undefined
       || label === undefined || adapterType === undefined) {
-      throw new Error('invalid summary model')
+      throw new SummaryRequestError('invalid summary model', 400, 'invalid_summary_model')
     }
     return this.settings.removeModel({ adapterId, model, label, adapterType })
   }
 
   async restoreModel(value: unknown) {
-    if (value === null || typeof value !== 'object') throw new Error('invalid summary model')
+    if (value === null || typeof value !== 'object') {
+      throw new SummaryRequestError('invalid summary model', 400, 'invalid_summary_model')
+    }
     const source = value as Record<string, unknown>
     const adapterId = typeof source.adapterId === 'string' ? source.adapterId : undefined
     const model = typeof source.model === 'string' ? source.model : undefined
     if (adapterId === undefined || model === undefined) {
-      throw new Error('invalid summary model')
+      throw new SummaryRequestError('invalid summary model', 400, 'invalid_summary_model')
     }
     return this.settings.restoreModel({ adapterId, model })
   }

@@ -248,4 +248,69 @@ describe('agent hook installation', () => {
     expect(await fs.access(hookInstallationFile(dataRoot))
       .then(() => true, () => false)).toBe(false)
   })
+
+  it('rolls back every file when installation fails after a partial write', async () => {
+    const { root, locations, codexFile, zcodeFile, dshPatch } = await fixture()
+    const dataRoot = path.join(root, 'data')
+    const before = {
+      codex: await fs.readFile(codexFile),
+      zcode: await fs.readFile(zcodeFile),
+      dsh: await fs.readFile(dshPatch),
+    }
+    const blockedHome = path.join(root, 'blocked-zcode-home')
+    await fs.writeFile(blockedHome, 'not a directory')
+
+    await expect(installAgentHooks(
+      { ...locations, zcodeHome: blockedHome },
+      process.execPath,
+      path.join(root, 'cli.mjs'),
+      dataRoot,
+    )).rejects.toBeDefined()
+
+    expect(await fs.readFile(codexFile)).toEqual(before.codex)
+    expect(await fs.readFile(zcodeFile)).toEqual(before.zcode)
+    expect(await fs.readFile(dshPatch)).toEqual(before.dsh)
+    for (const file of [
+      `${codexFile}.agent-trajectory.bak`,
+      `${zcodeFile}.agent-trajectory.bak`,
+      `${dshPatch}.agent-trajectory.bak`,
+      path.join(locations.dshHome, 'agent-trajectory-plugin.mjs'),
+      hookInstallationFile(dataRoot),
+    ]) {
+      expect(await fs.access(file).then(() => true, () => false)).toBe(false)
+    }
+  })
+
+  it('rolls back every file when uninstallation fails after a partial removal', async () => {
+    const { root, locations, codexFile, zcodeFile, dshPatch } = await fixture()
+    const dataRoot = path.join(root, 'data')
+    await installAgentHooks(
+      locations,
+      process.execPath,
+      path.join(root, 'cli.mjs'),
+      dataRoot,
+    )
+    const plugin = path.join(locations.dshHome, 'agent-trajectory-plugin.mjs')
+    const installation = hookInstallationFile(dataRoot)
+    const before = {
+      codex: await fs.readFile(codexFile),
+      zcode: await fs.readFile(zcodeFile),
+      dsh: await fs.readFile(dshPatch),
+      plugin: await fs.readFile(plugin),
+      installation: await fs.readFile(installation),
+    }
+    const blockedHome = path.join(root, 'blocked-zcode-home')
+    await fs.writeFile(blockedHome, 'not a directory')
+
+    await expect(uninstallAgentHooks(
+      { ...locations, zcodeHome: blockedHome },
+      dataRoot,
+    )).rejects.toBeDefined()
+
+    expect(await fs.readFile(codexFile)).toEqual(before.codex)
+    expect(await fs.readFile(zcodeFile)).toEqual(before.zcode)
+    expect(await fs.readFile(dshPatch)).toEqual(before.dsh)
+    expect(await fs.readFile(plugin)).toEqual(before.plugin)
+    expect(await fs.readFile(installation)).toEqual(before.installation)
+  })
 })

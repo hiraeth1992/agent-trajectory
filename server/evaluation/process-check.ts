@@ -1,7 +1,18 @@
+import { createHash } from 'node:crypto'
 import type {
   EvaluationResult,
   EvaluationVerdict,
+  ProcessEvaluationRun,
 } from '../../src/evaluation-types'
+import { aggregateEvaluationResults } from '../../src/trajectory-evaluation'
+import {
+  diagnosisAccessLedgerHash,
+  type DiagnosisEvidenceAccessRecord,
+} from '../diagnosis/access-ledger'
+import {
+  processCheckEvaluatorDefinition,
+  type EvaluatorDefinition,
+} from './registry'
 
 export type DiagnosisEvidenceView = 'overview' | 'findings' | 'records' | 'record'
 
@@ -14,6 +25,7 @@ export interface TrajectoryDiagnosisProcessInput {
   snapshotId: string
   evidenceAccesses: DiagnosisEvidenceAccess[]
   liveSourceReads?: string[]
+  liveReadMonitoringComplete?: boolean
   report: string
 }
 
@@ -44,14 +56,15 @@ const REQUIRED_HEADINGS = [
 ]
 
 function result(
+  evaluator: EvaluatorDefinition,
   check: ProcessCheckDefinition,
   verdict: EvaluationVerdict,
   summary: string,
   evidenceBoundary: string,
 ): EvaluationResult {
   return {
-    evaluatorId: 'trajectory-diagnosis-process',
-    evaluatorVersion: '1',
+    evaluatorId: evaluator.id,
+    evaluatorVersion: evaluator.version,
     criterionId: check.id,
     verdict,
     confidence: 'high',
@@ -75,6 +88,7 @@ function result(
 }
 
 function headingResult(
+  evaluator: EvaluatorDefinition,
   check: ProcessCheckDefinition,
   report: string,
 ): EvaluationResult {
@@ -82,6 +96,7 @@ function headingResult(
   const pass = actual.length === REQUIRED_HEADINGS.length
     && actual.every((heading, index) => heading === REQUIRED_HEADINGS[index])
   return result(
+    evaluator,
     check,
     pass ? 'pass' : 'fail',
     pass
@@ -92,6 +107,7 @@ function headingResult(
 }
 
 function recommendationResult(
+  evaluator: EvaluatorDefinition,
   check: ProcessCheckDefinition,
   report: string,
 ): EvaluationResult {
@@ -99,6 +115,7 @@ function recommendationResult(
   const material = /(?:问题|建议)[:：]/u.test(section)
   if (!material || /无实质问题|没有实质问题|未发现实质问题/u.test(section)) {
     return result(
+      evaluator,
       check,
       'not_applicable',
       '报告未提出实质修改建议。',
@@ -114,6 +131,7 @@ function recommendationResult(
   ]
   const missing = required.filter(pattern => !pattern.test(section)).length
   return result(
+    evaluator,
     check,
     missing === 0 ? 'pass' : 'warning',
     missing === 0
@@ -127,6 +145,7 @@ export function evaluateTrajectoryDiagnosisProcess(
   spec: ProcessCheckSpec,
   input: TrajectoryDiagnosisProcessInput,
 ): EvaluationResult[] {
+  const evaluator = processCheckEvaluatorDefinition(spec)
   const byId = new Map(spec.checks.map(check => [check.id, check]))
   const check = (id: string): ProcessCheckDefinition => {
     const selected = byId.get(id)
@@ -147,9 +166,13 @@ export function evaluateTrajectoryDiagnosisProcess(
       || overviewIndex < firstDetailed && findingsIndex < firstDetailed)
   const detailedAfterContext = firstDetailed < 0 || startsWithOverviewAndFindings
   const noLiveReads = (input.liveSourceReads?.length ?? 0) === 0
+  const liveReadVerdict = input.liveReadMonitoringComplete !== true
+    ? 'insufficient_evidence'
+    : noLiveReads ? 'pass' : 'fail'
 
   return [
     result(
+      evaluator,
       check('frozen-target-only'),
       allFrozen ? 'pass' : 'fail',
       allFrozen
@@ -158,6 +181,7 @@ export function evaluateTrajectoryDiagnosisProcess(
       `${input.evidenceAccesses.length} 次证据读取。`,
     ),
     result(
+      evaluator,
       check('overview-findings-first'),
       startsWithOverviewAndFindings ? 'pass' : 'fail',
       startsWithOverviewAndFindings
@@ -166,6 +190,7 @@ export function evaluateTrajectoryDiagnosisProcess(
       `overview=${overviewIndex}, findings=${findingsIndex}, firstDetailed=${firstDetailed}`,
     ),
     result(
+      evaluator,
       check('evidence-read-on-demand'),
       detailedAfterContext ? 'pass' : 'warning',
       detailedAfterContext
@@ -174,14 +199,75 @@ export function evaluateTrajectoryDiagnosisProcess(
       '此检查只验证读取顺序，不判断每次读取是否业务必要。',
     ),
     result(
+      evaluator,
       check('no-live-source-read'),
-      noLiveReads ? 'pass' : 'fail',
-      noLiveReads
+      liveReadVerdict,
+      input.liveReadMonitoringComplete !== true
+        ? '当前只记录专用冻结证据命令，无法证明未通过其他工具读取 live source。'
+        : noLiveReads
         ? '没有观察到 live source 或外部系统读取。'
         : `观察到 ${input.liveSourceReads!.length} 次非冻结来源读取。`,
-      noLiveReads ? 'liveSourceReads 为空。' : input.liveSourceReads!.join('；'),
+      input.liveReadMonitoringComplete !== true
+        ? '缺少覆盖所有工具和外部系统的读取监控。'
+        : noLiveReads ? 'liveSourceReads 为空。' : input.liveSourceReads!.join('；'),
     ),
-    headingResult(check('four-section-report'), input.report),
-    recommendationResult(check('actionable-recommendations'), input.report),
+    headingResult(evaluator, check('four-section-report'), input.report),
+    recommendationResult(evaluator, check('actionable-recommendations'), input.report),
   ]
+}
+
+export function createTrajectoryDiagnosisProcessRun(
+  spec: ProcessCheckSpec,
+  input: {
+    snapshotId: string
+    accesses: DiagnosisEvidenceAccessRecord[]
+    report: string
+    createdAt?: string
+    liveSourceReads?: string[]
+    liveReadMonitoringComplete?: boolean
+  },
+): ProcessEvaluationRun {
+  const evaluator = processCheckEvaluatorDefinition(spec)
+  const accessLedgerHash = diagnosisAccessLedgerHash(input.accesses)
+  const results = evaluateTrajectoryDiagnosisProcess(spec, {
+    snapshotId: input.snapshotId,
+    evidenceAccesses: input.accesses.map(access => ({
+      snapshotId: access.snapshotId,
+      view: access.view,
+    })),
+    report: input.report,
+    liveSourceReads: input.liveSourceReads,
+    liveReadMonitoringComplete: input.liveReadMonitoringComplete,
+  })
+  const runId = createHash('sha256').update(JSON.stringify({
+    snapshotId: input.snapshotId,
+    evaluator,
+    accessLedgerHash,
+    report: input.report,
+    liveSourceReads: input.liveSourceReads ?? [],
+    liveReadMonitoringComplete: input.liveReadMonitoringComplete === true,
+    results: results.map(result => [
+      result.criterionId,
+      result.verdict,
+      result.evidenceBoundary,
+    ]),
+  })).digest('base64url').slice(0, 24)
+  return {
+    schemaVersion: 1,
+    kind: 'process-evaluation-run',
+    runId,
+    createdAt: input.createdAt ?? new Date().toISOString(),
+    snapshotId: input.snapshotId,
+    evaluatorId: evaluator.id,
+    evaluatorVersion: evaluator.version,
+    evaluatorBuildHash: evaluator.buildHash,
+    contractHash: evaluator.contractHash,
+    contextPolicyHash: evaluator.contextPolicyHash,
+    evaluatorDependencies: [...evaluator.dependencies],
+    evaluatorCalibrationStatus: evaluator.calibrationStatus,
+    evaluatorGateLevel: evaluator.gateLevel,
+    accessLedgerHash,
+    results,
+    aggregate: aggregateEvaluationResults(results),
+  }
 }

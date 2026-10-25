@@ -83,7 +83,21 @@ const header: SessionHeader = {
 }
 
 function event(seq: number, time: number, type: string, data: Record<string, unknown>): SessionEvent {
-  return { type, seq, time, data }
+  return {
+    type,
+    seq,
+    time,
+    data,
+    ...([
+      'system/message',
+      'developer/message',
+      'user/message',
+      'assistant/message',
+      'tool/result',
+    ].includes(type)
+      ? { surfaceOp: 'append' as const }
+      : {}),
+  }
 }
 
 describe('projectTrajectory', () => {
@@ -847,6 +861,179 @@ describe('projectTrajectory', () => {
 
     expect(() => projectTrajectory(header, [appended]))
       .toThrow(/sourceEventSeqs must not be empty/)
+  })
+
+  it('requires explicit surface markers and rejects metadata on log-only events', () => {
+    const { surfaceOp: _surfaceOp, ...missingMarker } = event(
+      0,
+      1_000,
+      'user/message',
+      {
+        id: 'message',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'message' }],
+      },
+    )
+    expect(() => projectTrajectory(header, [missingMarker]))
+      .toThrow(/requires a surfaceOp marker/)
+
+    expect(() => projectTrajectory(header, [{
+      ...event(0, 1_000, 'turn/start', { turn: 1 }),
+      surfaceOp: 'append',
+    }])).toThrow(/not surface-eligible and cannot carry surfaceOp/)
+    expect(() => projectTrajectory(header, [{
+      ...event(0, 1_000, 'turn/start', { turn: 1 }),
+      sourceEventSeqs: [0],
+    }])).toThrow(/not surface-eligible and cannot carry sourceEventSeqs/)
+  })
+
+  it('restricts tool-result replacement to one current result and content-only changes', () => {
+    const original = event(0, 1_000, 'tool/result', {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'tool',
+        source: { kind: 'tool', callId: 'call-1' },
+        content: [{ type: 'text', text: 'before' }],
+        isError: false,
+      },
+    })
+    const rewrite = {
+      ...event(1, 1_010, 'tool/result', {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { kind: 'tool', callId: 'call-1' },
+          content: [{ type: 'text', text: 'after' }],
+          isError: false,
+        },
+      }),
+      surfaceOp: { op: 'replace' as const, startSeq: 0, endSeq: 0 },
+      sourceEventSeqs: [0],
+    }
+    expect(projectTrajectory(header, [original, rewrite]).modelContextRecordIds)
+      .toEqual(['tool:call-1'])
+
+    const user = event(0, 1_000, 'user/message', {
+      id: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'before' }],
+    })
+    expect(() => projectTrajectory(header, [
+      user,
+      { ...rewrite, sourceEventSeqs: [0] },
+    ])).toThrow(/must target a current tool\/result/)
+
+    const changedIdentity = {
+      ...rewrite,
+      data: {
+        ...rewrite.data,
+        message: {
+          ...(rewrite.data.message as Record<string, unknown>),
+          source: { kind: 'tool', callId: 'different-call' },
+        },
+      },
+    }
+    expect(() => projectTrajectory(header, [original, changedIdentity]))
+      .toThrow(/may change only content/)
+  })
+
+  it('protects the system prompt at the surface head', () => {
+    const system = event(0, 1_000, 'system/message', {
+      message: {
+        role: 'system',
+        content: [{ type: 'text', text: 'trusted system' }],
+      },
+    })
+    const user = event(1, 1_010, 'user/message', {
+      id: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'request' }],
+    })
+    const invalid = {
+      ...event(2, 1_020, 'developer/message', {
+        message: {
+          role: 'developer',
+          source: { kind: 'compaction' },
+          content: [{ type: 'text', text: 'replacement' }],
+        },
+      }),
+      surfaceOp: { op: 'replace' as const, startSeq: 0, endSeq: 1 },
+      sourceEventSeqs: [0, 1],
+    }
+    expect(() => projectTrajectory(header, [system, user, invalid]))
+      .toThrow(/node 0 holds the system prompt/)
+
+    const valid = {
+      ...event(1, 1_010, 'system/message', {
+        message: {
+          role: 'system',
+          content: [{ type: 'text', text: 'updated system' }],
+        },
+      }),
+      surfaceOp: { op: 'replace' as const, startSeq: 0, endSeq: 0 },
+      sourceEventSeqs: [0],
+    }
+    expect(projectTrajectory(header, [system, valid]).modelContextRecordIds)
+      .toEqual(['system:1'])
+  })
+
+  it('validates developer header lineage and complete tool additions', () => {
+    const headerEvent = event(0, 1_000, 'request/header', {
+      header: {
+        tools: [{
+          name: 'search',
+          description: 'Search records',
+          parameters: { type: 'object' },
+          deferLoading: true,
+        }],
+      },
+    })
+    const addition = event(1, 1_010, 'developer/message', {
+      headerSeq: 0,
+      message: {
+        role: 'developer',
+        source: { kind: 'plugin', plugin: 'tools' },
+        content: [{ type: 'tool-addition', toolName: 'search' }],
+      },
+    })
+    expect(() => projectTrajectory(header, [headerEvent, addition])).not.toThrow()
+
+    expect(() => projectTrajectory(header, [{
+      ...addition,
+      seq: 0,
+      data: { ...addition.data, headerSeq: 1 },
+    }])).toThrow(/must reference an earlier request\/header/)
+
+    const missing = {
+      ...addition,
+      data: {
+        ...addition.data,
+        message: {
+          ...(addition.data.message as Record<string, unknown>),
+          content: [{ type: 'tool-addition', toolName: 'missing' }],
+        },
+      },
+    }
+    expect(() => projectTrajectory(header, [headerEvent, missing]))
+      .toThrow(/must name exactly one tool/)
+
+    const invalidHeader = {
+      ...headerEvent,
+      data: {
+        header: {
+          tools: [{
+            name: 'search',
+            description: 'Search records',
+            parameters: { type: 'object' },
+            deferLoading: false,
+          }],
+        },
+      },
+    }
+    expect(() => projectTrajectory(header, [invalidHeader, addition]))
+      .toThrow(/deferLoading must be true/)
   })
 
   it('deduplicates transcript record ids when one step contains multiple assistant messages', () => {

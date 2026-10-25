@@ -22,7 +22,7 @@ describe('DSH source identity', () => {
     }
   })
 
-  it('blocks an unknown session protocol with a portable diagnosis', async () => {
+  it('keeps an unknown session protocol visible with a portable diagnosis', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-protocol-'))
     const file = path.join(root, 'session-new', 'session.v5.jsonl')
     await fs.mkdir(path.dirname(file), { recursive: true })
@@ -36,8 +36,8 @@ describe('DSH source identity', () => {
       })}\n`)
 
       expect(await new DshSource({ sessionsRoot: root }).probe()).toMatchObject({
-        availability: 'blocked',
-        reason: 'unsupported_dsh_protocol',
+        availability: 'degraded',
+        reason: 'additional_dsh_protocols_visible',
         protocol: {
           detected: 'dsh-session-v5',
           supported: ['dsh-session-v4'],
@@ -61,7 +61,7 @@ describe('DSH source identity', () => {
 
       expect(await new DshSource({ sessionsRoot: root }).probe()).toMatchObject({
         availability: 'degraded',
-        reason: 'additional_dsh_protocols_ignored',
+        reason: 'additional_dsh_protocols_visible',
         protocol: {
           detected: 'dsh-session-v4,dsh-session-v5',
           supported: ['dsh-session-v4'],
@@ -174,6 +174,85 @@ describe('DSH source identity', () => {
       expect(refs).toHaveLength(1)
       expect(refs[0]?.sourceSessionId).toBe(sessionId)
       expect(refs[0]?.locator).toBe(path.join(directory, 'session.v4.jsonl'))
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('selects the highest canonical generation and exposes unsupported status', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-generations-'))
+    const sessionId = 'session-generations'
+    const directory = path.join(root, sessionId)
+    await fs.mkdir(directory, { recursive: true })
+    try {
+      await Promise.all([3, 4, 5].map(version =>
+        fs.writeFile(
+          path.join(directory, `session.v${version}.jsonl`),
+          `${JSON.stringify({
+            type: 'session',
+            version,
+            id: sessionId,
+            createdAt: 1_000,
+            cwd: '/tmp/generations',
+          })}\n`,
+        )))
+
+      const source = new DshSource({ sessionsRoot: root })
+      const refs = await source.list()
+
+      expect(refs).toHaveLength(1)
+      expect(refs[0]).toMatchObject({
+        sourceSessionId: sessionId,
+        locator: path.join(directory, 'session.v5.jsonl'),
+        summary: {
+          format: 'session-v5',
+          rawVersion: 5,
+          formatStatus: 'unsupported-future',
+        },
+      })
+      await expect(source.load(refs[0]!)).rejects.toMatchObject({
+        code: 'session_protocol_unsupported',
+      })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps migration-required and corrupt generations in discovery', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-generations-'))
+    const oldDirectory = path.join(root, 'session-old')
+    const corruptDirectory = path.join(root, 'session-corrupt')
+    await fs.mkdir(oldDirectory, { recursive: true })
+    await fs.mkdir(corruptDirectory, { recursive: true })
+    try {
+      await fs.writeFile(
+        path.join(oldDirectory, 'session.v3.jsonl'),
+        '{"type":"session","version":3,"id":"session-old"}\n',
+      )
+      await fs.writeFile(
+        path.join(corruptDirectory, 'session.v4.jsonl'),
+        'not json\n',
+      )
+
+      const source = new DshSource({ sessionsRoot: root })
+      const refs = await source.list()
+      const old = refs.find(ref => ref.sourceSessionId === 'session-old')!
+      const corrupt = refs.find(ref => ref.sourceSessionId === 'session-corrupt')!
+
+      expect(old.summary).toMatchObject({
+        formatStatus: 'migration-required',
+        rawVersion: 3,
+      })
+      expect(corrupt.summary).toMatchObject({
+        formatStatus: 'corrupt',
+        rawVersion: 4,
+      })
+      await expect(source.load(old)).rejects.toMatchObject({
+        code: 'session_migration_required',
+      })
+      await expect(source.load(corrupt)).rejects.toMatchObject({
+        code: 'session_corrupt',
+      })
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }
@@ -321,6 +400,7 @@ describe('DSH source incremental loading', () => {
       type: 'user/message',
       seq: 0,
       time: 1_100,
+      surfaceOp: 'append',
       data: {
         source: { kind: 'user' },
         content: [{ type: 'text', text: 'first' }],
@@ -330,6 +410,7 @@ describe('DSH source incremental loading', () => {
       type: 'assistant/message',
       seq: 1,
       time: 1_200,
+      surfaceOp: 'append',
       data: {
         turn: 1,
         step: 1,
@@ -371,6 +452,7 @@ describe('DSH source incremental loading', () => {
       type: 'user/message',
       seq,
       time: 1_100 + seq,
+      surfaceOp: 'append',
       data: {
         source: { kind: 'user' },
         content: [{ type: 'text', text }],

@@ -229,9 +229,13 @@ describe('App request ordering', () => {
 
   it('navigates between session analysis and evaluation center through URL history', async () => {
     const dshSession = summary('dsh', 'workspace-session', 'Workspace session')
+    const streams: Array<{ url: string; close: ReturnType<typeof vi.fn> }> = []
     vi.stubGlobal('EventSource', class {
+      close = vi.fn()
+      constructor(readonly url: string) {
+        streams.push(this)
+      }
       addEventListener() {}
-      close() {}
     })
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -250,11 +254,47 @@ describe('App request ordering', () => {
     fireEvent.click(screen.getByRole('button', { name: '评测中心' }))
     expect(await screen.findByText('尚未准备评测数据集')).toBeTruthy()
     expect(window.location.search).toContain('workspace=evaluation')
+    await waitFor(() => {
+      expect(streams.length).toBeGreaterThan(0)
+      expect(streams.every(stream => stream.close.mock.calls.length === 1)).toBe(true)
+    })
 
     window.history.back()
     window.dispatchEvent(new PopStateEvent('popstate'))
     expect(await screen.findByRole('tab', { name: '轨迹评测' })).toBeTruthy()
     expect(window.location.search).not.toContain('workspace=evaluation')
+  })
+
+  it('clears a deep-link target when history navigates to a URL without one', async () => {
+    const linked = summary('zcode', 'linked-session', 'Linked session')
+    const fallback = summary('dsh', 'fallback-session', 'Fallback session')
+    window.history.replaceState(
+      null,
+      '',
+      '/?source=zcode&session=linked-session',
+    )
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=zcode') return response([linked])
+      if (url === '/api/sessions?source=all') return response([fallback])
+      if (url === '/api/sessions/zcode/linked-session') return response(detail(linked))
+      if (url === '/api/sessions/dsh/fallback-session') return response(detail(fallback))
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+    await waitForLoadedSession('zcode', 'linked-session')
+    window.history.pushState(null, '', '/')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+
+    expect(await screen.findByRole('option', { name: '[DSH API] Fallback session' }))
+      .toBeTruthy()
+    expect(screen.queryByText(/正在等待 ZCode 会话写入/)).toBeNull()
   })
 
   it('copies a diagnosis prompt for the switched trajectory target', async () => {

@@ -9,9 +9,22 @@ interface LruEntry<V> {
   weight: number
 }
 
+export interface LruMetrics {
+  entries: number
+  weight: number
+  hits: number
+  misses: number
+  sets: number
+  evictions: number
+}
+
 export class WeightedLruCache<K, V> {
   private readonly entries = new Map<K, LruEntry<V>>()
   private totalWeight = 0
+  private hits = 0
+  private misses = 0
+  private sets = 0
+  private evictions = 0
 
   constructor(private readonly options: LruOptions<K, V>) {
     if (!Number.isInteger(options.maxEntries) || options.maxEntries <= 0) {
@@ -32,7 +45,11 @@ export class WeightedLruCache<K, V> {
 
   get(key: K): V | undefined {
     const entry = this.entries.get(key)
-    if (entry === undefined) return undefined
+    if (entry === undefined) {
+      this.misses++
+      return undefined
+    }
+    this.hits++
     this.entries.delete(key)
     this.entries.set(key, entry)
     return entry.value
@@ -44,6 +61,7 @@ export class WeightedLruCache<K, V> {
 
   set(key: K, value: V): this {
     this.delete(key)
+    this.sets++
     const weight = Math.max(0, this.options.weight(value, key))
     this.entries.set(key, { value, weight })
     this.totalWeight += weight
@@ -64,11 +82,23 @@ export class WeightedLruCache<K, V> {
     this.totalWeight = 0
   }
 
+  metrics(): LruMetrics {
+    return {
+      entries: this.entries.size,
+      weight: this.totalWeight,
+      hits: this.hits,
+      misses: this.misses,
+      sets: this.sets,
+      evictions: this.evictions,
+    }
+  }
+
   private evict(): void {
     while (this.entries.size > this.options.maxEntries
       || this.totalWeight > this.options.maxWeight) {
       const oldest = this.entries.keys().next().value as K | undefined
       if (oldest === undefined) break
+      this.evictions++
       this.delete(oldest)
     }
   }

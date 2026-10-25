@@ -311,6 +311,10 @@ export class CodexSource implements SessionSource {
     })
   }
 
+  metrics() {
+    return { cache: this.cache.metrics() }
+  }
+
   private addPage(page: DiscoveredPage): void {
     this.pendingRollouts.delete(page.file)
     const previous = this.pagesByFile.get(page.file)

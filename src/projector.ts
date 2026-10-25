@@ -335,6 +335,28 @@ function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
+function deepJsonEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => deepJsonEqual(value, right[index]))
+  }
+  if (left === null || right === null
+    || typeof left !== 'object' || typeof right !== 'object') {
+    return false
+  }
+  const leftValue = left as JsonObject
+  const rightValue = right as JsonObject
+  const leftKeys = Object.keys(leftValue)
+  const rightKeys = Object.keys(rightValue)
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every(key =>
+      Object.hasOwn(rightValue, key)
+      && deepJsonEqual(leftValue[key], rightValue[key]))
+}
+
 function applyGoalChange(
   state: GoalFoldState,
   current: TrajectoryTaskState['target'],
@@ -462,12 +484,12 @@ function messageFromSurfaceEvent(event: SessionEvent): JsonObject {
   return event.type === 'user/message' ? event.data : eventMessage(event)
 }
 
-function applyImageOffload(
+function planImageOffload(
   event: SessionEvent,
   nodes: readonly number[],
   eventsBySeq: ReadonlyMap<number, SessionEvent>,
-  projectedMessages: Map<number, JsonObject>,
-): void {
+  projectedMessages: ReadonlyMap<number, JsonObject>,
+): Map<number, JsonObject> {
   const data = event.data
   if (!hasExactKeys(data, ['targets'])
     || !Array.isArray(data.targets)
@@ -516,31 +538,45 @@ function applyImageOffload(
       ),
     )
   }
-  for (const [seq, message] of next) projectedMessages.set(seq, message)
+  return next
 }
 
 function sourceRelations(event: SessionEvent): TrajectoryRelation[] {
-  const sourceEventSeqs = event.sourceEventSeqs ?? []
-  if (event.sourceEventSeqs !== undefined && sourceEventSeqs.length === 0) {
+  const raw = (event as unknown as { sourceEventSeqs?: unknown }).sourceEventSeqs
+  if (raw !== undefined && !Array.isArray(raw)) {
+    throw new Error(
+      `invalid surface event at seq ${event.seq}: sourceEventSeqs must be an array`,
+    )
+  }
+  const sourceEventSeqs = raw ?? []
+  if (raw !== undefined && sourceEventSeqs.length === 0) {
     throw new Error(
       `invalid surface event at seq ${event.seq}: sourceEventSeqs must not be empty`,
     )
   }
-  if (event.type === 'assistant/message' && event.sourceEventSeqs !== undefined) {
+  if (event.type === 'assistant/message' && raw !== undefined) {
     throw new Error(
       `invalid surface event at seq ${event.seq}: `
       + 'assistant/message cannot carry sourceEventSeqs',
     )
   }
-  const sources = new Set(sourceEventSeqs)
+  const sources = new Set<number>()
+  for (const seq of sourceEventSeqs) {
+    if (!canonicalIndex(seq)) {
+      throw new Error(
+        `invalid surface event at seq ${event.seq}: `
+        + 'sourceEventSeqs must contain non-negative safe integers',
+      )
+    }
+    sources.add(seq)
+  }
   if (sources.size !== sourceEventSeqs.length) {
     throw new Error(
       `invalid surface event at seq ${event.seq}: `
       + 'sourceEventSeqs must not contain duplicates',
     )
   }
-  const nonEarlierSource = sourceEventSeqs.find(seq =>
-    !Number.isSafeInteger(seq) || seq < 0 || seq >= event.seq)
+  const nonEarlierSource = sourceEventSeqs.find(seq => seq >= event.seq)
   if (nonEarlierSource !== undefined) {
     throw new Error(
       `invalid surface event at seq ${event.seq}: `
@@ -556,6 +592,146 @@ function sourceRelations(event: SessionEvent): TrajectoryRelation[] {
   }))
 }
 
+type SurfaceOperation = 'append' | {
+  op: 'replace'
+  startSeq: number
+  endSeq: number
+}
+
+function surfaceOperation(event: SessionEvent): SurfaceOperation | undefined {
+  const raw = event as unknown as {
+    surfaceOp?: unknown
+    sourceEventSeqs?: unknown
+  }
+  if (!SURFACE_EVENT_TYPES.has(event.type)) {
+    if (!KNOWN_EVENT_TYPES.has(event.type) && event.ignorable === true) return undefined
+    if (raw.surfaceOp !== undefined) {
+      throw new Error(
+        `session event "${event.type}" is not surface-eligible and cannot carry surfaceOp`,
+      )
+    }
+    if (raw.sourceEventSeqs !== undefined) {
+      throw new Error(
+        `session event "${event.type}" is not surface-eligible and cannot carry sourceEventSeqs`,
+      )
+    }
+    return undefined
+  }
+  if (raw.surfaceOp === undefined) {
+    throw new Error(
+      `session event "${event.type}" is surface-eligible and requires a surfaceOp marker`,
+    )
+  }
+  if (raw.surfaceOp === 'append') return 'append'
+  if (raw.surfaceOp === null
+    || typeof raw.surfaceOp !== 'object'
+    || Array.isArray(raw.surfaceOp)) {
+    throw new Error(`session event "${event.type}" carries an invalid surfaceOp`)
+  }
+  const operation = raw.surfaceOp as JsonObject
+  if (!hasExactKeys(operation, ['op', 'startSeq', 'endSeq'])
+    || operation.op !== 'replace'
+    || !canonicalIndex(operation.startSeq)
+    || !canonicalIndex(operation.endSeq)
+    || operation.startSeq >= event.seq
+    || operation.endSeq >= event.seq) {
+    throw new Error(`session event "${event.type}" carries an invalid replace surfaceOp`)
+  }
+  return {
+    op: 'replace',
+    startSeq: operation.startSeq,
+    endSeq: operation.endSeq,
+  }
+}
+
+function assertDeveloperHeader(
+  event: SessionEvent,
+  eventsBySeq: ReadonlyMap<number, SessionEvent>,
+): void {
+  if (event.type !== 'developer/message' || event.data.headerSeq === undefined) return
+  const headerSeq = event.data.headerSeq
+  const headerEvent = canonicalIndex(headerSeq) ? eventsBySeq.get(headerSeq) : undefined
+  if (!canonicalIndex(headerSeq)
+    || headerSeq >= event.seq
+    || headerEvent?.type !== 'request/header') {
+    throw new Error(
+      'developer/message headerSeq must reference an earlier request/header',
+    )
+  }
+  const content = eventMessage(event).content
+  if (!Array.isArray(content)) {
+    throw new Error('developer/message with headerSeq must contain message content')
+  }
+  const tools = object(headerEvent.data.header).tools
+  for (const value of content) {
+    const block = object(value)
+    if (block.type !== 'tool-addition') continue
+    const toolName = string(block.toolName)
+    const definitions = asArray(tools).filter((definition) => {
+      const selected = object(definition)
+      return toolName !== undefined && selected.name === toolName
+    })
+    if (toolName === undefined || definitions.length !== 1) {
+      throw new Error(
+        `developer/message tool-addition "${toolName ?? ''}" `
+        + `must name exactly one tool in headerSeq ${headerSeq}`,
+      )
+    }
+    const definition = object(definitions[0])
+    const parameters = definition.parameters
+    if (typeof definition.description !== 'string'
+      || parameters === null
+      || typeof parameters !== 'object'
+      || Array.isArray(parameters)) {
+      throw new Error(
+        `developer/message tool-addition "${toolName}" `
+        + `requires a complete tool definition in headerSeq ${headerSeq}`,
+      )
+    }
+    if (Object.hasOwn(definition, 'deferLoading') && definition.deferLoading !== true) {
+      throw new Error('developer/message referenced tool deferLoading must be true when present')
+    }
+  }
+}
+
+function assertToolResultRewrite(
+  event: SessionEvent,
+  replaced: readonly number[],
+  eventsBySeq: ReadonlyMap<number, SessionEvent>,
+): void {
+  if (event.type !== 'tool/result') return
+  if (replaced.length !== 1) {
+    throw new Error('tool/result surface replacement must rewrite exactly one current node')
+  }
+  const original = eventsBySeq.get(replaced[0]!)
+  if (original?.type !== 'tool/result') {
+    throw new Error('tool/result surface replacement must target a current tool/result')
+  }
+  const originalData = { ...original.data }
+  const replacementData = { ...event.data }
+  originalData.message = { ...eventMessage(original), content: null }
+  replacementData.message = { ...eventMessage(event), content: null }
+  if (!deepJsonEqual(originalData, replacementData)) {
+    throw new Error('tool/result surface replacement may change only content')
+  }
+}
+
+function assertSystemHeadRewrite(
+  event: SessionEvent,
+  nodes: readonly number[],
+  startIndex: number,
+  replaced: readonly number[],
+  eventsBySeq: ReadonlyMap<number, SessionEvent>,
+): void {
+  if (startIndex !== 0 || eventsBySeq.get(nodes[0]!)?.type !== 'system/message') return
+  if (event.type !== 'system/message' || replaced.length !== 1) {
+    throw new Error(
+      'surface replace: node 0 holds the system prompt and may be rewritten '
+      + 'only by a system/message over exactly that node',
+    )
+  }
+}
+
 function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
   const nodes: number[] = []
   const shadowedSeqs = new Set<number>()
@@ -566,25 +742,28 @@ function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
   let hasReplacement = false
 
   for (const event of events) {
+    const operation = surfaceOperation(event)
+    assertDeveloperHeader(event, eventsBySeq)
     if (event.type === 'image/offload') {
-      applyImageOffload(event, nodes, eventsBySeq, projectedMessages)
+      const next = planImageOffload(event, nodes, eventsBySeq, projectedMessages)
+      for (const [seq, message] of next) projectedMessages.set(seq, message)
       continue
     }
-    if (!SURFACE_EVENT_TYPES.has(event.type)) continue
+    if (operation === undefined) continue
     const derivedRelations = sourceRelations(event)
-    if (event.surfaceOp === undefined || event.surfaceOp === 'append') {
+    if (operation === 'append') {
       nodes.push(event.seq)
       transcriptSeqs.add(event.seq)
       relations.push(...derivedRelations)
       continue
     }
 
-    const startIndex = nodes.indexOf(event.surfaceOp.startSeq)
-    const endIndex = nodes.indexOf(event.surfaceOp.endSeq)
+    const startIndex = nodes.indexOf(operation.startSeq)
+    const endIndex = nodes.indexOf(operation.endSeq)
     if (startIndex < 0 || endIndex < 0 || startIndex > endIndex) {
       throw new Error(
         `invalid surface replacement at seq ${event.seq}: `
-        + `${event.surfaceOp.startSeq}..${event.surfaceOp.endSeq} is not current`,
+        + `${operation.startSeq}..${operation.endSeq} is not current`,
       )
     }
     const replaced = nodes.slice(startIndex, endIndex + 1)
@@ -596,6 +775,8 @@ function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
         + `sourceEventSeqs misses ${missingSources.join(', ')}`,
       )
     }
+    assertToolResultRewrite(event, replaced, eventsBySeq)
+    assertSystemHeadRewrite(event, nodes, startIndex, replaced, eventsBySeq)
     nodes.splice(startIndex, endIndex - startIndex + 1, event.seq)
     hasReplacement = true
     replaced.forEach(seq => {

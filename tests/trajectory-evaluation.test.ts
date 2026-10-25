@@ -8,6 +8,7 @@ import {
   aggregateEvaluationResults,
   buildChainResult,
   buildFactsQualityReport,
+  buildRequirementResults,
   evaluateTrajectory,
 } from '../src/trajectory-evaluation'
 import type {
@@ -138,9 +139,13 @@ describe('trajectory evaluation contract', () => {
       schemaVersion: 1,
       evaluatorId: 'local-trajectory',
       evaluatorVersion: '1',
-      factsSchemaVersion: 1,
+      factsSchemaVersion: 3,
       target,
-      factsQuality: { ready: true },
+      factsQuality: {
+        schemaVersion: 3,
+        coveragePolicyVersion: 2,
+        ready: true,
+      },
     })
     expect(evaluation.results.find(result => result.criterionId === 'outcome'))
       .toMatchObject({
@@ -242,6 +247,107 @@ describe('trajectory evaluation contract', () => {
     }))
   })
 
+  it('blocks only dependent criteria for folded and required raw-only coverage gaps', () => {
+    const value = detail([
+      record('user-1', {
+        kind: 'user',
+        title: '用户',
+        summary: '交付并验证结果',
+        input: [{ type: 'text', text: '交付并验证结果' }],
+        output: undefined,
+      }),
+      record('test-1', { seq: 2 }),
+    ])
+    value.projection.coverage = [{
+      type: 'goal/change',
+      total: 2,
+      consumed: 1,
+      disposition: 'folded-state',
+      reason: '1 event failed semantic validation and remains audit-only',
+    }, {
+      type: 'deliverables/presented',
+      total: 1,
+      consumed: 0,
+      disposition: 'raw-only',
+      reason: 'known event is retained for audit but has no semantic projector',
+    }]
+    value.projection.coverageSummary = { total: 3, consumed: 1, gap: 2 }
+
+    const evaluation = evaluateTrajectory(value, analyzeTrajectory(value), {
+      target,
+      sourceStatus: status,
+    })
+    expect(evaluation.factsQuality).toMatchObject({
+      ready: false,
+      coveragePolicyVersion: 2,
+      stats: {
+        coverageTotal: 3,
+        coverageConsumed: 1,
+        coverageGap: 2,
+      },
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          id: 'coverage-gap:goal/change',
+          severity: 'blocking',
+          affectedCriterionIds: ['outcome', 'reliability'],
+        }),
+        expect.objectContaining({
+          id: 'coverage-gap:deliverables/presented',
+          severity: 'blocking',
+          affectedCriterionIds: ['outcome'],
+        }),
+      ]),
+    })
+    expect(evaluation.results.find(result => result.criterionId === 'outcome'))
+      .toMatchObject({
+        verdict: 'insufficient_evidence',
+        blockedBy: expect.arrayContaining([
+          'coverage-gap:goal/change',
+          'coverage-gap:deliverables/presented',
+        ]),
+      })
+    expect(evaluation.results.find(result => result.criterionId === 'efficiency'))
+      .not.toMatchObject({ blockedBy: expect.arrayContaining(['coverage-gap:goal/change']) })
+  })
+
+  it('keeps unrelated raw-only gaps advisory but fails closed on unsupported events', () => {
+    const advisory = detail([record('tool-1')])
+    advisory.projection.coverage = [{
+      type: 'session/title-llm-request',
+      total: 1,
+      consumed: 0,
+      disposition: 'raw-only',
+    }]
+    advisory.projection.coverageSummary = { total: 1, consumed: 0, gap: 1 }
+    const advisoryReport = buildFactsQualityReport(advisory, {
+      target,
+      sourceStatus: status,
+    })
+    expect(advisoryReport.ready).toBe(true)
+    expect(advisoryReport.issues).toContainEqual(expect.objectContaining({
+      id: 'coverage-gap:session/title-llm-request',
+      severity: 'warning',
+    }))
+
+    const unsupported = structuredClone(advisory)
+    unsupported.projection.coverage = [{
+      type: 'future/required',
+      total: 1,
+      consumed: 0,
+      disposition: 'unsupported',
+    }]
+    const unsupportedReport = buildFactsQualityReport(unsupported, {
+      target,
+      sourceStatus: status,
+    })
+    expect(unsupportedReport.ready).toBe(false)
+    expect(unsupportedReport.issues).toContainEqual(expect.objectContaining({
+      id: 'coverage-gap:future/required',
+      severity: 'blocking',
+      affectedCriterionIds: expect.arrayContaining(['outcome', 'observability']),
+    }))
+  })
+
   it('does not infer per-requirement completion from one overall outcome', () => {
     const value = detail([
       record('user-1', {
@@ -271,6 +377,64 @@ describe('trajectory evaluation contract', () => {
     expect(evaluation.requirements.every(result =>
       result.state === 'insufficient_evidence')).toBe(true)
     expect(evaluation.requirements[0]?.reason).toContain('逐项验收证据')
+  })
+
+  it('extracts atomic typed requirements and preserves unrelated constraints on replacement', () => {
+    const value = detail([
+      record('user-1', {
+        seq: 1,
+        turn: 1,
+        kind: 'user',
+        title: '用户',
+        summary: '实现导出，同时保留现有 API；测试必须通过；不要写入外部系统',
+        input: [{
+          type: 'text',
+          text: '实现导出，同时保留现有 API；测试必须通过；不要写入外部系统',
+        }],
+        output: undefined,
+      }),
+      record('user-2', {
+        seq: 2,
+        turn: 2,
+        kind: 'steering',
+        title: '用户补充',
+        summary: '导出改为 CSV',
+        input: [{ type: 'text', text: '导出改为 CSV' }],
+        output: undefined,
+      }),
+    ])
+    const analysis = analyzeTrajectory(value)
+    const quality = buildFactsQualityReport(value, { target, sourceStatus: status })
+    const requirements = buildRequirementResults(value, analysis, quality)
+
+    expect(requirements).toHaveLength(5)
+    expect(requirements.map(item => item.kind)).toEqual([
+      'deliverable',
+      'constraint',
+      'acceptance',
+      'prohibition',
+      'deliverable',
+    ])
+    expect(requirements[0]).toMatchObject({
+      id: 'requirement:user-1:01',
+      introducedTurn: 1,
+      sourceRecordId: 'user-1',
+      state: 'superseded',
+      supersededBy: 'requirement:user-2:01',
+    })
+    expect(requirements[1]).toMatchObject({
+      kind: 'constraint',
+      required: true,
+      state: 'insufficient_evidence',
+    })
+    expect(requirements[2]).toMatchObject({
+      kind: 'acceptance',
+      dependsOn: ['requirement:user-1:01'],
+    })
+    expect(requirements[3]).toMatchObject({
+      kind: 'prohibition',
+      required: true,
+    })
   })
 
   it('separates single-turn N/A, explicit continuity, and reported information loss', () => {
@@ -306,8 +470,47 @@ describe('trajectory evaluation contract', () => {
       }),
     ])
     expect(buildChainResult(continued)).toMatchObject({
+      continuity: 'insufficient_evidence',
+      transitions: [{
+        fromTurn: 1,
+        toTurn: 2,
+        continuity: 'insufficient_evidence',
+        carryover: {
+          input: 'normal',
+          action: 'insufficient_evidence',
+          result: 'insufficient_evidence',
+        },
+      }],
+    })
+
+    const acted = structuredClone(continued)
+    acted.projection.records.push(record('action-1', {
+      seq: 3,
+      turn: 2,
+      step: 1,
+      kind: 'tool',
+      title: 'apply_patch',
+    }))
+    expect(buildChainResult(acted, [{
+      id: 'requirement:user-1:01',
+      text: '先设计方案',
+      kind: 'deliverable',
+      introducedTurn: 1,
+      sourceRecordId: 'user-1',
+      required: true,
+      state: 'insufficient_evidence',
+      dependsOn: [],
+      evidenceRecordIds: ['user-1'],
+      reason: '待验证',
+    }])).toMatchObject({
       continuity: 'normal',
-      transitions: [{ fromTurn: 1, toTurn: 2, continuity: 'normal' }],
+      transitions: [{
+        fromTurn: 1,
+        toTurn: 2,
+        continuity: 'normal',
+        requirementIds: ['requirement:user-1:01'],
+        carryover: { input: 'normal', action: 'normal', result: 'normal' },
+      }],
     })
 
     const lost = structuredClone(continued)

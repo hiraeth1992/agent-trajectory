@@ -2,19 +2,22 @@ import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import path from 'node:path'
-import type {
-  SessionDetail,
-  SessionDetailResponse,
-  SessionSummary,
-  SourceId,
-  SourceStatus,
-  TransportSessionDetail,
-  TransportTrajectoryRecord,
+import {
+  isSourceId,
+  type SessionDetail,
+  type SessionDetailResponse,
+  type SessionSummary,
+  type SourceId,
+  type SourceStatus,
+  type TransportSessionDetail,
+  type TransportTrajectoryRecord,
 } from '../src/types'
 import type { AiSummaryGenerationEvent } from '../src/ai-summary-types'
 import type {
   AnnotationReviewer,
   AnnotationSaveRequest,
+  EvaluationRunRequest,
+  PrepareEvaluationDatasetRequest,
 } from '../src/annotation-types'
 import type { TrajectoryDiagnosisPromptRequest } from '../src/diagnosis-types'
 import { redactSensitive } from '../src/projector-utils'
@@ -24,9 +27,18 @@ import {
 } from './diagnosis/service'
 import { jsonWeight, WeightedLruCache } from './lru'
 import { hasAllowedLocalRequest } from './security'
-import type { SummaryEngine } from './summary/engine'
+import {
+  SessionFormatError,
+  sourceApplicationIcons,
+} from './sources/types'
+import {
+  SummaryRequestError,
+  type SummaryEngine,
+} from './summary/engine'
 import {
   AnnotationConflictError,
+  AnnotationInputError,
+  AnnotationNotFoundError,
   type AnnotationWorkspaceStore,
 } from './evaluation/annotation-workspace'
 
@@ -35,6 +47,7 @@ export interface ApiRegistry {
   listSessions(source?: SourceId | 'all'): Promise<SessionSummary[]>
   load(source: SourceId, sourceSessionId: string): Promise<SessionDetail | undefined>
   fingerprint(source: SourceId, sourceSessionId: string): Promise<string | undefined>
+  metrics?(): unknown
   raw?(
     source: SourceId,
     sourceSessionId: string,
@@ -50,8 +63,20 @@ export interface ApiOptions {
   annotations?: AnnotationWorkspaceStore
   diagnosis?: TrajectoryDiagnosisService
   registry: ApiRegistry
+  state?: ApiSessionState
   summary?: SummaryEngine
   streamIntervalMs?: number
+}
+
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: 400 | 404 | 409 | 413 | 500 | 503,
+    readonly code: string,
+  ) {
+    super(message)
+    this.name = 'HttpError'
+  }
 }
 
 function annotationReviewer(value: string | undefined): AnnotationReviewer | undefined {
@@ -68,20 +93,11 @@ export function sendJson(response: ServerResponse, status: number, payload: unkn
   response.end(body)
 }
 
-const SOURCE_ICON_CANDIDATES: Partial<Record<SourceId, string[]>> = {
-  dsh: [
-    '/Applications/DeepSeek Harness.app/Contents/Resources/icon.png',
-  ],
-  zcode: [
-    '/Applications/ZCode.app/Contents/Resources/icon.png',
-  ],
-}
-
 async function sendSourceIcon(
   response: ServerResponse,
   source: SourceId,
 ): Promise<void> {
-  for (const file of SOURCE_ICON_CANDIDATES[source] ?? []) {
+  for (const file of sourceApplicationIcons(source)) {
     try {
       const body = await fs.readFile(file)
       response.writeHead(200, {
@@ -115,15 +131,15 @@ function sendDownloadJson(
 }
 
 export function sendError(response: ServerResponse, status: number, error: unknown): void {
-  sendJson(response, status, {
+  const selectedStatus = error instanceof HttpError ? error.status : status
+  sendJson(response, selectedStatus, {
     error: error instanceof Error ? error.message : String(error),
+    ...(error instanceof HttpError ? { code: error.code } : {}),
   })
 }
 
 export function sourceId(value: string | null): SourceId | undefined {
-  return value === 'dsh' || value === 'codex' || value === 'zcode'
-    ? value
-    : undefined
+  return isSourceId(value) ? value : undefined
 }
 
 function decodePathSegment(value: string): string | undefined {
@@ -138,25 +154,31 @@ function readJsonBody(request: IncomingMessage, maxBytes = 256 * 1024): Promise<
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let bytes = 0
+    let failed = false
     request.on('data', (chunk: Buffer) => {
       bytes += chunk.length
       if (bytes > maxBytes) {
-        reject(new Error('request body too large'))
-        request.destroy()
+        if (!failed) {
+          failed = true
+          reject(new HttpError('request body too large', 413, 'request_body_too_large'))
+        }
         return
       }
-      chunks.push(chunk)
+      if (!failed) chunks.push(chunk)
     })
     request.on('end', () => {
+      if (failed) return
       try {
         resolve(chunks.length === 0
           ? {}
           : JSON.parse(Buffer.concat(chunks).toString('utf8')))
       } catch {
-        reject(new Error('invalid JSON body'))
+        reject(new HttpError('invalid JSON body', 400, 'invalid_json'))
       }
     })
-    request.on('error', reject)
+    request.on('error', error => {
+      if (!failed) reject(error)
+    })
   })
 }
 
@@ -164,6 +186,85 @@ function object(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {}
+}
+
+function annotationSaveRequest(value: unknown): AnnotationSaveRequest {
+  const source = object(value)
+  if (typeof source.datasetHash !== 'string'
+    || typeof source.revision !== 'string'
+    || source.annotation === null
+    || typeof source.annotation !== 'object'
+    || Array.isArray(source.annotation)) {
+    throw new HttpError(
+      'invalid annotation save request',
+      400,
+      'invalid_annotation_request',
+    )
+  }
+  return {
+    datasetHash: source.datasetHash,
+    revision: source.revision,
+    annotation: source.annotation as AnnotationSaveRequest['annotation'],
+  }
+}
+
+function evaluationRunRequest(value: unknown): EvaluationRunRequest {
+  const source = object(value)
+  if (source.split !== 'calibration'
+    && source.split !== 'regression'
+    && source.split !== 'independent') {
+    throw new HttpError(
+      'invalid evaluation split',
+      400,
+      'invalid_evaluation_request',
+    )
+  }
+  if (source.baselineRunId !== undefined
+    && (typeof source.baselineRunId !== 'string'
+      || !/^[A-Za-z0-9_-]{20,80}$/.test(source.baselineRunId))) {
+    throw new HttpError(
+      'invalid baseline run id',
+      400,
+      'invalid_evaluation_request',
+    )
+  }
+  if (source.confirmIndependent !== undefined
+    && typeof source.confirmIndependent !== 'boolean') {
+    throw new HttpError(
+      'invalid independent confirmation',
+      400,
+      'invalid_evaluation_request',
+    )
+  }
+  return {
+    split: source.split,
+    baselineRunId: source.baselineRunId,
+    confirmIndependent: source.confirmIndependent,
+  }
+}
+
+function prepareEvaluationDatasetRequest(
+  value: unknown,
+): PrepareEvaluationDatasetRequest {
+  const source = object(value)
+  if (typeof source.directoryId !== 'string'
+    || typeof source.datasetId !== 'string'
+    || typeof source.datasetVersion !== 'string'
+    || !Number.isInteger(source.count)
+    || typeof source.allowPartial !== 'boolean') {
+    throw new HttpError(
+      'invalid evaluation dataset preparation request',
+      400,
+      'invalid_evaluation_dataset_request',
+    )
+  }
+  return {
+    directoryId: source.directoryId,
+    datasetId: source.datasetId,
+    datasetVersion: source.datasetVersion,
+    count: source.count as number,
+    allowPartial: source.allowPartial,
+  }
 }
 
 function diagnosisRequest(value: unknown): TrajectoryDiagnosisPromptRequest | undefined {
@@ -194,12 +295,37 @@ interface DetailRevision {
   recordOrder: string[]
 }
 
-const detailRevisions = new WeightedLruCache<string, DetailRevision[]>({
-  maxEntries: DETAIL_REVISION_CACHE_ENTRIES,
-  maxWeight: DETAIL_REVISION_CACHE_BYTES,
-  weight: jsonWeight,
-})
-const preparedDetails = new WeakMap<SessionDetail, DetailRevision>()
+export class ApiSessionState {
+  readonly detailRevisions = new WeightedLruCache<string, DetailRevision[]>({
+    maxEntries: DETAIL_REVISION_CACHE_ENTRIES,
+    maxWeight: DETAIL_REVISION_CACHE_BYTES,
+    weight: jsonWeight,
+  })
+
+  preparedDetails = new WeakMap<SessionDetail, DetailRevision>()
+
+  clear(): void {
+    this.detailRevisions.clear()
+    this.preparedDetails = new WeakMap()
+  }
+
+  metrics() {
+    return {
+      detailRevisions: this.detailRevisions.metrics(),
+    }
+  }
+}
+
+const fallbackStates = new WeakMap<ApiRegistry, ApiSessionState>()
+
+function apiSessionState(options: ApiOptions): ApiSessionState {
+  if (options.state !== undefined) return options.state
+  const current = fallbackStates.get(options.registry)
+  if (current !== undefined) return current
+  const created = new ApiSessionState()
+  fallbackStates.set(options.registry, created)
+  return created
+}
 
 function boundedPreview(value: unknown): unknown {
   if (value === undefined) return undefined
@@ -279,19 +405,23 @@ function downloadFilename(source: SourceId, id: string): string {
   return `${source}-${safeId}.audit.json`
 }
 
-function revisionHistory(key: string): DetailRevision[] {
-  return detailRevisions.get(key) ?? []
+function revisionHistory(state: ApiSessionState, key: string): DetailRevision[] {
+  return state.detailRevisions.get(key) ?? []
 }
 
-function rememberRevision(key: string, revision: DetailRevision): void {
-  const history = revisionHistory(key)
+function rememberRevision(
+  state: ApiSessionState,
+  key: string,
+  revision: DetailRevision,
+): void {
+  const history = revisionHistory(state, key)
   if (history.at(-1)?.revision === revision.revision) return
   const current = history.filter(entry => entry.revision !== revision.revision)
-  detailRevisions.set(key, [...current, revision].slice(-DETAIL_REVISION_HISTORY))
+  state.detailRevisions.set(key, [...current, revision].slice(-DETAIL_REVISION_HISTORY))
 }
 
-function preparedDetail(detail: SessionDetail): DetailRevision {
-  const cached = preparedDetails.get(detail)
+function preparedDetail(state: ApiSessionState, detail: SessionDetail): DetailRevision {
+  const cached = state.preparedDetails.get(detail)
   if (cached !== undefined) return cached
   const transport = transportDetail(detail)
   const revision = createHash('sha256')
@@ -309,7 +439,7 @@ function preparedDetail(detail: SessionDetail): DetailRevision {
     projection,
     recordOrder: transport.projection.records.map(record => record.id),
   }
-  preparedDetails.set(detail, prepared)
+  state.preparedDetails.set(detail, prepared)
   return prepared
 }
 
@@ -327,19 +457,20 @@ function emptyDelta(current: DetailRevision): SessionDetailResponse {
 }
 
 function detailResponse(
+  state: ApiSessionState,
   key: string,
   detail: SessionDetail,
   requestedRevision: string | null,
 ): SessionDetailResponse {
-  const current = preparedDetail(detail)
+  const current = preparedDetail(state, detail)
   if (requestedRevision === current.revision) {
-    rememberRevision(key, current)
+    rememberRevision(state, key, current)
     return emptyDelta(current)
   }
   const previous = requestedRevision === null
     ? undefined
-    : revisionHistory(key).find(entry => entry.revision === requestedRevision)
-  rememberRevision(key, current)
+    : revisionHistory(state, key).find(entry => entry.revision === requestedRevision)
+  rememberRevision(state, key, current)
   if (previous === undefined) {
     return { kind: 'snapshot', revision: current.revision, detail: current.detail }
   }
@@ -361,7 +492,7 @@ function detailResponse(
   }
 }
 
-export async function handleApi(
+async function routeApi(
   request: IncomingMessage,
   response: ServerResponse,
   url: URL,
@@ -373,6 +504,13 @@ export async function handleApi(
   }
   if (url.pathname === '/api/health') {
     sendJson(response, 200, { ok: true })
+    return true
+  }
+  if (url.pathname === '/api/metrics') {
+    sendJson(response, 200, {
+      registry: options.registry.metrics?.() ?? null,
+      api: options.state?.metrics() ?? null,
+    })
     return true
   }
   if (url.pathname === '/api/sources') {
@@ -407,11 +545,151 @@ export async function handleApi(
       sendJson(response, 503, { error: 'annotation workspace is unavailable' })
       return true
     }
+    if (request.method === 'GET') {
+      sendJson(response, 200, await options.annotations.listDatasets())
+      return true
+    }
+    if (request.method === 'POST') {
+      const body = prepareEvaluationDatasetRequest(
+        await readJsonBody(request, 16 * 1024),
+      )
+      sendJson(response, 201, await options.annotations.prepareDataset(body))
+      return true
+    }
+    sendJson(response, 405, { error: 'method not allowed' })
+    return true
+  }
+  const evaluationRunDetailMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/workflow\/runs\/([^/]+)$/,
+  )
+  if (evaluationRunDetailMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
     if (request.method !== 'GET') {
       sendJson(response, 405, { error: 'method not allowed' })
       return true
     }
-    sendJson(response, 200, await options.annotations.listDatasets())
+    const directoryId = decodePathSegment(evaluationRunDetailMatch[1])
+    const runId = decodePathSegment(evaluationRunDetailMatch[2])
+    if (directoryId === undefined || runId === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    sendJson(
+      response,
+      200,
+      await options.annotations.evaluationRunDetails(directoryId, runId),
+    )
+    return true
+  }
+  const evaluationRunMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/workflow\/run$/,
+  )
+  if (evaluationRunMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    if (request.method !== 'POST') {
+      sendJson(response, 405, { error: 'method not allowed' })
+      return true
+    }
+    const directoryId = decodePathSegment(evaluationRunMatch[1])
+    if (directoryId === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    const body = evaluationRunRequest(await readJsonBody(request, 16 * 1024))
+    sendJson(
+      response,
+      201,
+      await options.annotations.runEvaluation(directoryId, body),
+    )
+    return true
+  }
+  const evaluationStatusMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/workflow$/,
+  )
+  if (evaluationStatusMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    if (request.method !== 'GET') {
+      sendJson(response, 405, { error: 'method not allowed' })
+      return true
+    }
+    const directoryId = decodePathSegment(evaluationStatusMatch[1])
+    if (directoryId === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    sendJson(response, 200, await options.annotations.workflowStatus(directoryId))
+    return true
+  }
+  const adjudicationCaseMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/adjudicator\/cases\/([^/]+)$/,
+  )
+  if (adjudicationCaseMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    const directoryId = decodePathSegment(adjudicationCaseMatch[1])
+    const caseId = decodePathSegment(adjudicationCaseMatch[2])
+    if (directoryId === undefined || caseId === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    if (request.method === 'GET') {
+      sendJson(
+        response,
+        200,
+        await options.annotations.case(directoryId, 'adjudicator', caseId),
+      )
+      return true
+    }
+    if (request.method === 'PUT') {
+      const body = annotationSaveRequest(await readJsonBody(request, 512 * 1024))
+      sendJson(
+        response,
+        200,
+        await options.annotations.saveCase(
+          directoryId,
+          'adjudicator',
+          caseId,
+          body,
+        ),
+      )
+      return true
+    }
+    sendJson(response, 405, { error: 'method not allowed' })
+    return true
+  }
+  const adjudicationOverviewMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/adjudicator$/,
+  )
+  if (adjudicationOverviewMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    if (request.method !== 'GET') {
+      sendJson(response, 405, { error: 'method not allowed' })
+      return true
+    }
+    const directoryId = decodePathSegment(adjudicationOverviewMatch[1])
+    if (directoryId === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    sendJson(
+      response,
+      200,
+      await options.annotations.adjudicationOverview(directoryId),
+    )
     return true
   }
   const annotationRecordMatch = url.pathname.match(
@@ -466,17 +744,12 @@ export async function handleApi(
       return true
     }
     if (request.method === 'PUT') {
-      try {
-        const body = await readJsonBody(request, 512 * 1024) as AnnotationSaveRequest
-        sendJson(
-          response,
-          200,
-          await options.annotations.saveCase(directoryId, reviewer, caseId, body),
-        )
-      } catch (error) {
-        if (!(error instanceof AnnotationConflictError)) throw error
-        sendJson(response, 409, { error: error.message })
-      }
+      const body = annotationSaveRequest(await readJsonBody(request, 512 * 1024))
+      sendJson(
+        response,
+        200,
+        await options.annotations.saveCase(directoryId, reviewer, caseId, body),
+      )
       return true
     }
     sendJson(response, 405, { error: 'method not allowed' })
@@ -594,6 +867,9 @@ export async function handleApi(
       ? await readJsonBody(request) as Record<string, unknown>
       : {}
     const key = typeof body.apiKey === 'string' ? body.apiKey : undefined
+    if (request.method === 'PUT' && key === undefined) {
+      throw new HttpError('missing apiKey', 400, 'invalid_summary_credential')
+    }
     await options.summary.setCredential(adapterId, request.method === 'DELETE' ? undefined : key)
     sendJson(response, 200, { ok: true })
     return true
@@ -775,6 +1051,7 @@ export async function handleApi(
       sendJson(response, 404, { error: 'session not found' })
     } else {
       sendJson(response, 200, detailResponse(
+        apiSessionState(options),
         `${source}:${id}`,
         detail,
         url.searchParams.get('revision'),
@@ -850,4 +1127,45 @@ export async function handleApi(
     return true
   }
   return false
+}
+
+export async function handleApi(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  options: ApiOptions,
+): Promise<boolean> {
+  try {
+    return await routeApi(request, response, url, options)
+  } catch (error) {
+    if (error instanceof HttpError) {
+      sendError(response, error.status, error)
+      return true
+    }
+    if (error instanceof AnnotationConflictError) {
+      sendError(response, 409, new HttpError(error.message, 409, 'annotation_conflict'))
+      return true
+    }
+    if (error instanceof AnnotationInputError) {
+      sendError(response, 400, new HttpError(error.message, 400, 'invalid_annotation'))
+      return true
+    }
+    if (error instanceof AnnotationNotFoundError) {
+      sendError(response, 404, new HttpError(error.message, 404, 'annotation_not_found'))
+      return true
+    }
+    if (error instanceof SessionFormatError) {
+      sendError(response, 409, new HttpError(error.message, 409, error.code))
+      return true
+    }
+    if (error instanceof SummaryRequestError) {
+      sendError(
+        response,
+        error.status,
+        new HttpError(error.message, error.status, error.code),
+      )
+      return true
+    }
+    throw error
+  }
 }

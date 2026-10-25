@@ -12,6 +12,9 @@ import { EvaluationCenter } from '../src/components/EvaluationCenter'
 import type {
   AnnotationDatasetSummary,
   AnnotationWorkspaceOverview,
+  EvaluationRunDetails,
+  EvaluationRunResult,
+  EvaluationWorkflowStatus,
 } from '../src/annotation-types'
 
 function response(value: unknown, status = 200): Response {
@@ -28,9 +31,21 @@ const dataset: AnnotationDatasetSummary = {
   datasetHash: 'a'.repeat(64),
   description: 'Private real dataset',
   cases: 30,
+  requestedCases: 30,
+  skippedCases: 0,
+  allowPartial: false,
   sources: { dsh: 10, codex: 10, zcode: 10 },
   splits: { calibration: 15, regression: 6, independent: 9 },
   privacyAuditPassed: true,
+}
+
+const workflow: EvaluationWorkflowStatus = {
+  datasetHash: dataset.datasetHash,
+  reviewersComplete: false,
+  adjudication: { exists: false, complete: false },
+  runs: [],
+  diffs: [],
+  casebook: { total: 0, open: 0, resolved: 0, accepted: 0, retested: 0 },
 }
 
 function overview(
@@ -58,6 +73,7 @@ function overview(
 
 afterEach(() => {
   cleanup()
+  localStorage.clear()
   vi.restoreAllMocks()
 })
 
@@ -73,8 +89,96 @@ describe('EvaluationCenter', () => {
     expect(screen.queryByText('尚未准备评测数据集')).toBeNull()
   })
 
+  it('prepares a private dataset from the empty state after explicit confirmation', async () => {
+    let prepared = false
+    const requests: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets' && init?.method === 'POST') {
+        requests.push(JSON.parse(String(init.body)))
+        prepared = true
+        return response({ dataset, skipped: 0 }, 201)
+      }
+      if (url === '/api/annotations/datasets') {
+        return response(prepared ? [dataset] : [])
+      }
+      if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
+        return response(overview('reviewer-a', 0))
+      }
+      if (url === '/api/annotations/datasets/private-v1/reviewer-b') {
+        return response(overview('reviewer-b', 0))
+      }
+      if (url === '/api/annotations/datasets/private-v1/workflow') {
+        return response(workflow)
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<EvaluationCenter onWorkspaceChange={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: '准备数据集' }))
+
+    expect(screen.getByRole('dialog', {
+      name: '准备真实轨迹评测数据集',
+    })).toBeTruthy()
+    expect(screen.getByText(/读取本机 DSH、Codex 和 ZCode/)).toBeTruthy()
+    expect(screen.getByText(/原始会话保持只读/)).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('目录标识'), {
+      target: { value: 'private-v1' },
+    })
+    fireEvent.change(screen.getByLabelText('数据集 ID'), {
+      target: { value: 'private-real' },
+    })
+    fireEvent.change(screen.getByLabelText('样本数'), {
+      target: { value: '30' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '确认并开始准备' }))
+
+    expect(await screen.findByRole('heading', { name: 'private-real' })).toBeTruthy()
+    expect(requests).toEqual([{
+      directoryId: 'private-v1',
+      datasetId: 'private-real',
+      datasetVersion: '1',
+      count: 30,
+      allowPartial: false,
+    }])
+    expect(localStorage.getItem('trajectory.evaluationDataset')).toBe('private-v1')
+  })
+
+  it('keeps the preparation dialog open when strict sampling cannot finish', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets' && init?.method === 'POST') {
+        return response({
+          code: 'annotation_conflict',
+          error: 'not enough stable source sessions: requested 30, produced 3',
+        }, 409)
+      }
+      if (url === '/api/annotations/datasets') return response([])
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<EvaluationCenter onWorkspaceChange={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: '准备数据集' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认并开始准备' }))
+
+    expect((await screen.findByRole('alert')).textContent)
+      .toContain('not enough stable source sessions')
+    expect(screen.getByRole('dialog', {
+      name: '准备真实轨迹评测数据集',
+    })).toBeTruthy()
+  })
+
   it('shows the evaluation workflow and independent reviewer progress', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
       const url = String(input)
       if (url === '/api/annotations/datasets') return response([dataset])
       if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
@@ -82,6 +186,9 @@ describe('EvaluationCenter', () => {
       }
       if (url === '/api/annotations/datasets/private-v1/reviewer-b') {
         return response(overview('reviewer-b', 0))
+      }
+      if (url === '/api/annotations/datasets/private-v1/workflow') {
+        return response(workflow)
       }
       throw new Error(`unexpected request: ${url}`)
     }))
@@ -107,7 +214,10 @@ describe('EvaluationCenter', () => {
   })
 
   it('enters one locked reviewer workspace and returns to the center', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
       const url = String(input)
       if (url === '/api/annotations/datasets') return response([dataset])
       if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
@@ -115,6 +225,9 @@ describe('EvaluationCenter', () => {
       }
       if (url === '/api/annotations/datasets/private-v1/reviewer-b') {
         return response(overview('reviewer-b', 0))
+      }
+      if (url === '/api/annotations/datasets/private-v1/workflow') {
+        return response(workflow)
       }
       if (url === '/api/annotations/datasets/private-v1/reviewer-a/cases/case-1') {
         return response({
@@ -164,5 +277,248 @@ describe('EvaluationCenter', () => {
     expect(screen.queryByText('Reviewer B')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '返回评测中心' }))
     expect(await screen.findByRole('heading', { name: 'private-real' })).toBeTruthy()
+  })
+
+  it('advances workflow stages from agreement, adjudication, and matching runs', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets') return response([dataset])
+      if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
+        return response(overview('reviewer-a', 30))
+      }
+      if (url === '/api/annotations/datasets/private-v1/reviewer-b') {
+        return response(overview('reviewer-b', 30))
+      }
+      if (url === '/api/annotations/datasets/private-v1/workflow') {
+        return response({
+          datasetHash: dataset.datasetHash,
+          reviewersComplete: true,
+          agreement: {
+            completeCasesA: 30,
+            completeCasesB: 30,
+            totalCases: 30,
+            criterionExactAgreement: 0.9,
+            criterionKappa: 0.8,
+            disagreements: 4,
+          },
+          adjudication: { exists: true, complete: true },
+          runs: [{
+            file: 'run.json',
+            runId: 'run-1',
+            createdAt: '2026-10-25T00:00:00.000Z',
+            evaluatorId: 'local-trajectory',
+            evaluatorBuildHash: 'build-1',
+            split: 'calibration',
+            assertionAgreement: 0.95,
+            exactAgreement: 0.9,
+            evaluatorError: 0,
+          }],
+          diffs: [],
+          casebook: { total: 3, open: 1, resolved: 2, accepted: 1, retested: 2 },
+        } satisfies EvaluationWorkflowStatus)
+      }
+      if (url === '/api/annotations/datasets/private-v1/workflow/runs/run-1') {
+        return response({
+          run: {
+            runId: 'run-1',
+            createdAt: '2026-10-25T00:00:00.000Z',
+            split: 'calibration',
+            assertionAgreement: 0.95,
+            exactAgreement: 0.9,
+            evaluatorError: 0,
+            cases: [{
+              caseId: 'case-1',
+              assertionsPassed: 4,
+              assertionsTotal: 5,
+              exact: false,
+              criteria: [{
+                criterionId: 'outcome',
+                verdict: 'warning',
+                attribution: 'agent',
+                evidenceRecordIds: ['record-baseline'],
+              }],
+              mismatches: [{
+                criterionId: 'outcome',
+                expected: 'pass',
+                actual: 'warning',
+              }],
+            }],
+          },
+          diffs: [],
+        } satisfies EvaluationRunDetails)
+      }
+      if (url === '/api/annotations/datasets/private-v1/workflow/run'
+        && init?.method === 'POST') {
+        return response({
+          run: {
+            runId: 'run-new',
+            createdAt: '2026-10-25T00:01:00.000Z',
+            split: 'calibration',
+            assertionAgreement: 1,
+            exactAgreement: 1,
+            evaluatorError: 0,
+            cases: [{
+              caseId: 'case-1',
+              assertionsPassed: 5,
+              assertionsTotal: 5,
+              exact: true,
+              criteria: [{
+                criterionId: 'outcome',
+                verdict: 'pass',
+                attribution: 'agent',
+                evidenceRecordIds: ['record-001'],
+              }],
+              mismatches: [],
+            }],
+          },
+          diff: {
+            baselineRunId: 'run-1',
+            candidateRunId: 'run-new',
+            comparable: true,
+            gateDecision: 'pass',
+            gateReasons: [],
+            improved: 0,
+            regressed: 0,
+            mixed: 0,
+            inconclusive: 0,
+            caseDirections: [{ caseId: 'case-1', direction: 'unchanged' }],
+            changedCriteria: [],
+          },
+        } satisfies EvaluationRunResult)
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<EvaluationCenter onWorkspaceChange={vi.fn()} />)
+
+    expect(await screen.findByText('双方标注已完成')).toBeTruthy()
+    expect(screen.getByText('完整裁决已通过校验')).toBeTruthy()
+    expect(screen.getByText('1 个 EvaluationRun')).toBeTruthy()
+    expect(screen.getByText('90%')).toBeTruthy()
+    expect(screen.getByText('0.800')).toBeTruthy()
+    expect(screen.getByText('calibration · local-trajectory')).toBeTruthy()
+    expect(screen.getByText('Badcase Casebook')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '查看详情' }))
+    expect(await screen.findByText('warning · agent')).toBeTruthy()
+    expect(document.querySelector('.evaluation-mismatch-list')?.textContent
+      ?.replace(/\s+/g, ''))
+      .toContain('outcome：期望pass，实际warning')
+    fireEvent.click(screen.getByRole('button', { name: '运行 EvaluationRun' }))
+    expect(await screen.findByText('calibration · 完成')).toBeTruthy()
+    expect(screen.getByText(/assertion 100% · gate pass/)).toBeTruthy()
+    expect(screen.getByText('Run 详情 · calibration')).toBeTruthy()
+    expect(screen.getByText('baseline run-1 · gate pass')).toBeTruthy()
+    expect(screen.getByText('case-1')).toBeTruthy()
+    expect(screen.getByText('pass · agent')).toBeTruthy()
+    expect(screen.getByText('证据 record-001')).toBeTruthy()
+  })
+
+  it('enters the gated adjudication workspace with reviewer comparison', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets') return response([dataset])
+      if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
+        return response(overview('reviewer-a', 30))
+      }
+      if (url === '/api/annotations/datasets/private-v1/reviewer-b') {
+        return response(overview('reviewer-b', 30))
+      }
+      if (url === '/api/annotations/datasets/private-v1/workflow') {
+        return response({
+          datasetHash: dataset.datasetHash,
+          reviewersComplete: true,
+          agreement: {
+            completeCasesA: 30,
+            completeCasesB: 30,
+            totalCases: 30,
+            criterionExactAgreement: 0.9,
+            disagreements: 1,
+          },
+          adjudication: { exists: true, complete: false },
+          runs: [],
+          diffs: [],
+          casebook: { total: 0, open: 0, resolved: 0, accepted: 0, retested: 0 },
+        } satisfies EvaluationWorkflowStatus)
+      }
+      if (url === '/api/annotations/datasets/private-v1/adjudicator') {
+        return response({
+          ...overview('reviewer-a', 0),
+          reviewer: 'adjudicator',
+        })
+      }
+      if (url === '/api/annotations/datasets/private-v1/adjudicator/cases/case-1') {
+        return response({
+          datasetHash: dataset.datasetHash,
+          reviewer: 'adjudicator',
+          revision: 'adjudicator-revision',
+          candidate: {
+            id: 'case-1',
+            source: 'dsh',
+            split: 'calibration',
+            traits: [],
+            description: 'Private case',
+          },
+          annotation: {
+            caseId: 'case-1',
+            criteria: [
+              'outcome',
+              'reliability',
+              'recovery',
+              'efficiency',
+              'observability',
+            ].map(criterionId => ({
+              criterionId,
+              evidenceRecordIds: [],
+              notes: '',
+            })),
+            requirements: [],
+            chain: { evidenceRecordIds: [], notes: '' },
+            notes: '',
+          },
+          records: [],
+          requirementSuggestions: [],
+          userTurns: [],
+          comparison: {
+            criteria: [{
+              criterionId: 'outcome',
+              reviewerA: {
+                verdict: 'pass',
+                attribution: 'agent',
+                evidenceRecordIds: ['record-001'],
+              },
+              reviewerB: {
+                verdict: 'warning',
+                attribution: 'agent',
+                evidenceRecordIds: ['record-002'],
+              },
+            }],
+            requirements: [],
+            chain: {
+              reviewerA: {
+                continuity: 'normal',
+                evidenceRecordIds: ['record-001'],
+              },
+              reviewerB: {
+                continuity: 'missing',
+                evidenceRecordIds: ['record-002'],
+              },
+            },
+          },
+        })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<EvaluationCenter onWorkspaceChange={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: /进入分歧裁决/ }))
+
+    expect(await screen.findByText('Reviewer 分歧对照')).toBeTruthy()
+    expect(screen.getByText(/A · pass \/agent · 证据 record-001/)).toBeTruthy()
+    expect(screen.getByText(/B · warning \/agent · 证据 record-002/)).toBeTruthy()
+    expect(screen.getByText(/A · normal · 证据 record-001/)).toBeTruthy()
+    expect(screen.getByText(/B · missing · 证据 record-002/)).toBeTruthy()
   })
 })

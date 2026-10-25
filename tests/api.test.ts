@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { handleApi, sendError, type ApiRegistry } from '../server/api'
 import { capabilities, sessionKey } from '../server/sources/types'
 import type { SummaryEngine } from '../server/summary/engine'
+import { SummaryRequestError } from '../server/summary/engine'
 import type { SessionDetail, SessionSummary, SourceStatus } from '../src/types'
 
 const summary: SessionSummary = {
@@ -362,6 +363,74 @@ describe('multi-source API', () => {
     })
   })
 
+  it('maps typed summary input, missing-resource, and conflict errors', async () => {
+    const summaryEngine = {
+      readSettings: vi.fn(async () => ({})),
+      updateSettings: vi.fn(async () => {
+        throw new SummaryRequestError(
+          'invalid summary settings',
+          400,
+          'invalid_summary_settings',
+        )
+      }),
+      options: vi.fn(async () => {
+        throw new SummaryRequestError(
+          'session not found',
+          404,
+          'summary_session_not_found',
+        )
+      }),
+      preview: vi.fn(),
+      generate: vi.fn(async () => {
+        throw new SummaryRequestError(
+          'selected summary model is unavailable',
+          409,
+          'summary_model_unavailable',
+        )
+      }),
+    } as unknown as SummaryEngine
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => detail,
+      fingerprint: async () => 'v1',
+    }, summaryEngine)
+
+    const invalid = await fetch(`${base}/api/summary/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: '[]',
+    })
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toEqual({
+      error: 'invalid summary settings',
+      code: 'invalid_summary_settings',
+    })
+
+    const missing = await fetch(`${base}/api/sessions/dsh/missing/ai-summary`)
+    expect(missing.status).toBe(404)
+    expect(await missing.json()).toMatchObject({
+      code: 'summary_session_not_found',
+    })
+
+    const conflict = await fetch(
+      `${base}/api/sessions/dsh/session-1/ai-summary/generate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adapterId: 'missing',
+          model: 'missing',
+          modules: ['outcome'],
+        }),
+      },
+    )
+    expect(conflict.status).toBe(409)
+    expect(await conflict.json()).toMatchObject({
+      code: 'summary_model_unavailable',
+    })
+  })
+
   it('rejects API requests with a foreign Host and keeps health output path-free', async () => {
     const listSessions = vi.fn(async () => [summary])
     const base = await start({
@@ -378,6 +447,41 @@ describe('multi-source API', () => {
     const health = await fetch(`${base}/api/health`)
     expect(health.status).toBe(200)
     expect(await health.json()).toEqual({ ok: true })
+  })
+
+  it('exposes anonymous local cache and worker metrics', async () => {
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => detail,
+      fingerprint: async () => 'v1',
+      metrics: () => ({
+        detailCache: {
+          entries: 1,
+          weight: 100,
+          hits: 2,
+          misses: 1,
+          sets: 1,
+          evictions: 0,
+        },
+        projectionWorker: {
+          requests: 3,
+          payloadBytes: 1234,
+        },
+      }),
+    })
+
+    const response = await fetch(`${base}/api/metrics`)
+    const body = await response.json()
+    expect(response.status).toBe(200)
+    expect(body).toMatchObject({
+      registry: {
+        detailCache: { entries: 1, hits: 2, misses: 1 },
+        projectionWorker: { requests: 3, payloadBytes: 1234 },
+      },
+    })
+    expect(JSON.stringify(body)).not.toContain('session-1')
+    expect(JSON.stringify(body)).not.toContain('/tmp')
   })
 
   it('isolates source routes and rejects the removed legacy DSH detail route', async () => {

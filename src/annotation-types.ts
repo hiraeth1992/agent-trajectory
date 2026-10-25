@@ -1,5 +1,9 @@
 import type {
+  AnnotationAgreementReport,
   ChainContinuity,
+  EvaluationCaseDirection,
+  EvaluationRun,
+  EvaluationRunDiff,
   EvaluationAttribution,
   EvaluationSplit,
   EvaluationVerdict,
@@ -18,6 +22,7 @@ import type {
 } from './types'
 
 export type AnnotationReviewer = 'reviewer-a' | 'reviewer-b'
+export type AnnotationActor = AnnotationReviewer | 'adjudicator'
 
 export interface AnnotationDatasetSummary {
   directoryId: string
@@ -26,9 +31,25 @@ export interface AnnotationDatasetSummary {
   datasetHash: string
   description: string
   cases: number
+  requestedCases: number
+  skippedCases: number
+  allowPartial: boolean
   sources: Record<SourceId, number>
   splits: Record<EvaluationSplit, number>
   privacyAuditPassed: boolean
+}
+
+export interface PrepareEvaluationDatasetRequest {
+  directoryId: string
+  datasetId: string
+  datasetVersion: string
+  count: number
+  allowPartial: boolean
+}
+
+export interface PrepareEvaluationDatasetResult {
+  dataset: AnnotationDatasetSummary
+  skipped: number
 }
 
 export interface AnnotationProgress {
@@ -50,10 +71,128 @@ export interface AnnotationCaseListItem {
 
 export interface AnnotationWorkspaceOverview {
   dataset: AnnotationDatasetSummary
-  reviewer: AnnotationReviewer
+  reviewer: AnnotationActor
   revision: string
   progress: AnnotationProgress
   cases: AnnotationCaseListItem[]
+}
+
+export interface EvaluationWorkflowStatus {
+  datasetHash: string
+  reviewersComplete: boolean
+  agreement?: Pick<
+    AnnotationAgreementReport,
+    | 'completeCasesA'
+    | 'completeCasesB'
+    | 'totalCases'
+    | 'criterionExactAgreement'
+    | 'criterionKappa'
+    | 'requirementDetectionAgreement'
+    | 'requirementStateAgreement'
+    | 'chainExactAgreement'
+    | 'chainKappa'
+  > & {
+    disagreements: number
+  }
+  adjudication: {
+    exists: boolean
+    complete: boolean
+    error?: string
+  }
+  runs: Array<{
+    file: string
+    runId: string
+    createdAt: string
+    evaluatorId: string
+    evaluatorBuildHash: string
+    split?: EvaluationSplit | 'all'
+    assertionAgreement: number
+    exactAgreement?: number
+    evaluatorError: number
+  }>
+  diffs: Array<{
+    file: string
+    baselineRunId: string
+    candidateRunId: string
+    comparable: boolean
+    gateDecision: EvaluationRunDiff['gateDecision']
+    improved: number
+    regressed: number
+    mixed: number
+    inconclusive: number
+  }>
+  latestRun?: Pick<
+    EvaluationRun,
+    | 'runId'
+    | 'createdAt'
+    | 'evaluatorId'
+    | 'evaluatorBuildHash'
+    | 'evaluatorCalibrationStatus'
+    | 'evaluatorGateLevel'
+  >
+  casebook: {
+    total: number
+    open: number
+    resolved: number
+    accepted: number
+    retested: number
+  }
+}
+
+export interface EvaluationRunRequest {
+  split: EvaluationSplit
+  baselineRunId?: string
+  confirmIndependent?: boolean
+}
+
+export interface EvaluationRunResult {
+  run: {
+    runId: string
+    createdAt: string
+    split: EvaluationSplit | 'all'
+    assertionAgreement: number
+    exactAgreement?: number
+    evaluatorError: number
+    cases: Array<{
+      caseId: string
+      assertionsPassed: number
+      assertionsTotal: number
+      exact?: boolean
+      error?: string
+      criteria: Array<{
+        criterionId: string
+        verdict: EvaluationVerdict
+        attribution: EvaluationAttribution
+        evidenceRecordIds: string[]
+      }>
+      mismatches: Array<{
+        criterionId: string
+        expected: string
+        actual?: string
+      }>
+    }>
+  }
+  diff?: {
+    baselineRunId: string
+    candidateRunId: string
+    comparable: boolean
+    gateDecision: 'pass' | 'fail' | 'inconclusive'
+    gateReasons: string[]
+    improved: number
+    regressed: number
+    mixed: number
+    inconclusive: number
+    caseDirections: Array<{
+      caseId: string
+      direction: EvaluationCaseDirection
+    }>
+    changedCriteria: EvaluationRunDiff['changedCriteria']
+  }
+}
+
+export interface EvaluationRunDetails {
+  run: EvaluationRunResult['run']
+  diffs: Array<NonNullable<EvaluationRunResult['diff']>>
 }
 
 export interface AnnotationRecordSummary {
@@ -81,7 +220,7 @@ export interface AnnotationRequirementSuggestion {
 
 export interface AnnotationCaseWorkspace {
   datasetHash: string
-  reviewer: AnnotationReviewer
+  reviewer: AnnotationActor
   revision: string
   candidate: {
     id: string
@@ -94,6 +233,46 @@ export interface AnnotationCaseWorkspace {
   records: AnnotationRecordSummary[]
   requirementSuggestions: AnnotationRequirementSuggestion[]
   userTurns: number[]
+  comparison?: {
+    criteria: Array<{
+      criterionId: LocalTrajectoryCriterionId
+      reviewerA?: {
+        verdict?: EvaluationVerdict
+        attribution?: EvaluationAttribution
+        evidenceRecordIds: string[]
+      }
+      reviewerB?: {
+        verdict?: EvaluationVerdict
+        attribution?: EvaluationAttribution
+        evidenceRecordIds: string[]
+      }
+    }>
+    requirements: Array<{
+      id: string
+      reviewerA?: {
+        text: string
+        required: boolean
+        state?: RequirementState
+        evidenceRecordIds: string[]
+      }
+      reviewerB?: {
+        text: string
+        required: boolean
+        state?: RequirementState
+        evidenceRecordIds: string[]
+      }
+    }>
+    chain: {
+      reviewerA?: {
+        continuity?: ChainContinuity
+        evidenceRecordIds: string[]
+      }
+      reviewerB?: {
+        continuity?: ChainContinuity
+        evidenceRecordIds: string[]
+      }
+    }
+  }
 }
 
 export interface AnnotationRecordDetail extends AnnotationRecordSummary {

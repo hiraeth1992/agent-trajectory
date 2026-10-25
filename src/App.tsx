@@ -32,15 +32,16 @@ import { VirtualLedger } from './components/VirtualLedger'
 import {
   type AppWorkspace,
 } from './components/WorkspaceNav'
-import type {
-  SessionDetail,
-  SessionDetailDelta,
-  SessionDetailResponse,
-  SessionSummary,
-  SourceId,
-  SourceStatus,
-  TransportSessionDetail,
-  TransportTrajectoryRecord,
+import {
+  isSourceId,
+  type SessionDetail,
+  type SessionDetailDelta,
+  type SessionDetailResponse,
+  type SessionSummary,
+  type SourceId,
+  type SourceStatus,
+  type TransportSessionDetail,
+  type TransportTrajectoryRecord,
 } from './types'
 import { recordSearchText } from './projector-utils'
 import { analyzeTrajectory } from './trajectory-analysis'
@@ -68,9 +69,7 @@ export function workspaceFromLocation(
 }
 
 function sourceId(value: string | null): SourceId | undefined {
-  return value === 'codex' || value === 'dsh' || value === 'zcode'
-    ? value
-    : undefined
+  return isSourceId(value) ? value : undefined
 }
 
 export function sessionTargetFromLocation(location: Pick<Location, 'search'>): SessionTarget | undefined {
@@ -173,9 +172,12 @@ export function App() {
     const onPopState = () => {
       setWorkspaceMode(workspaceFromLocation(window.location))
       const target = sessionTargetFromLocation(window.location)
+      setSessionTarget(target)
       if (target !== undefined) {
         setSourceFilter(target.source)
-        setSessionTarget(target)
+      } else {
+        setSourceFilter('all')
+        setWaitingForSession(false)
       }
     }
     window.addEventListener('popstate', onPopState)
@@ -212,17 +214,20 @@ export function App() {
       : result.find(session =>
           session.source === sessionTarget.source
           && session.sourceSessionId === sessionTarget.sessionId)
+    const loadable = (session: SessionSummary) =>
+      session.formatStatus === undefined || session.formatStatus === 'current'
     setWaitingForSession(sessionTarget !== undefined && targeted === undefined)
     setSessionKey((current) => {
       const remembered = selectedSessionByFilter.current[sourceFilter]
       const next = targeted?.id
         ?? (sessionTarget !== undefined
           ? ''
-          : remembered !== undefined && result.some(session => session.id === remembered)
+          : remembered !== undefined && result.some(session =>
+              session.id === remembered && loadable(session))
             ? remembered
-            : result.some(session => session.id === current)
+            : result.some(session => session.id === current && loadable(session))
               ? current
-              : result[0]?.id ?? '')
+              : result.find(loadable)?.id ?? '')
       if (next !== '') selectedSessionByFilter.current[sourceFilter] = next
       return next
     })
@@ -335,11 +340,13 @@ export function App() {
   useEffect(() => () => detailRequest.current?.controller.abort(), [])
 
   useEffect(() => {
+    if (workspaceMode !== 'sessions') return
     void loadSources().catch(caught =>
       setError(caught instanceof Error ? caught.message : String(caught)))
-  }, [loadSources])
+  }, [loadSources, workspaceMode])
 
   useEffect(() => {
+    if (workspaceMode !== 'sessions') return
     const controller = new AbortController()
     setLoading(true)
     void loadSessions(controller.signal).catch(caught => {
@@ -348,10 +355,12 @@ export function App() {
       setLoading(false)
     })
     return () => controller.abort()
-  }, [loadSessions])
+  }, [loadSessions, workspaceMode])
 
   useEffect(() => {
-    if (!waitingForSession || sessionTarget === undefined) return
+    if (workspaceMode !== 'sessions'
+      || !waitingForSession
+      || sessionTarget === undefined) return
     const timer = window.setInterval(() => {
       const controller = new AbortController()
       void loadSessions(controller.signal).catch(caught => {
@@ -361,9 +370,10 @@ export function App() {
       })
     }, 500)
     return () => window.clearInterval(timer)
-  }, [loadSessions, sessionTarget, waitingForSession])
+  }, [loadSessions, sessionTarget, waitingForSession, workspaceMode])
 
   useEffect(() => {
+    if (workspaceMode !== 'sessions') return
     let stream: EventSource
     try {
       stream = new EventSource('/api/integrations/activations')
@@ -403,7 +413,7 @@ export function App() {
       window.history.replaceState(null, '', url)
     })
     return () => stream.close()
-  }, [])
+  }, [workspaceMode])
 
   const currentSession = sessions.find(session => session.id === sessionKey)
   const currentSessionKey = currentSession?.id
@@ -430,13 +440,16 @@ export function App() {
     setRawError(undefined)
     detailRevision.current = undefined
     detailRef.current = undefined
-    if (currentSource !== undefined && currentSourceSessionId !== undefined) {
+    if (workspaceMode === 'sessions'
+      && currentSource !== undefined
+      && currentSourceSessionId !== undefined) {
       void loadDetail(currentSource, currentSourceSessionId)
     }
-  }, [currentSource, currentSourceSessionId, loadDetail])
+  }, [currentSource, currentSourceSessionId, loadDetail, workspaceMode])
 
   useEffect(() => {
-    if (currentSource === undefined
+    if (workspaceMode !== 'sessions'
+      || currentSource === undefined
       || currentSourceSessionId === undefined
       || currentSessionKey === undefined
       || currentSession?.capabilities.live !== true) return
@@ -471,6 +484,7 @@ export function App() {
     currentSource,
     currentSourceSessionId,
     loadDetail,
+    workspaceMode,
   ])
 
   const timelineRecords = useMemo(() => {
@@ -672,8 +686,19 @@ export function App() {
             >
               {sessions.length === 0 && <option value="">无可用会话</option>}
               {sessions.map(session => (
-                <option value={session.id} key={session.id}>
-                  [{sourceLabel(session.source)}] {session.title}
+                <option
+                  value={session.id}
+                  key={session.id}
+                  disabled={session.formatStatus !== undefined
+                    && session.formatStatus !== 'current'}
+                >
+                  [{sourceLabel(session.source)}] {session.title}{
+                    session.formatStatus === 'migration-required'
+                      ? ' · 需要迁移'
+                      : session.formatStatus === 'unsupported-future'
+                        ? ' · 版本过新'
+                        : session.formatStatus === 'corrupt' ? ' · 文件损坏' : ''
+                  }
                 </option>
               ))}
             </select>

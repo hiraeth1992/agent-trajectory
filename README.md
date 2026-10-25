@@ -7,7 +7,7 @@ ZCode 的本地会话投影到同一套时间线、虚拟账本和检查器中�
 
 | 来源 | 当前支持 | 本地事实源 |
 | --- | --- | --- |
-| DeepSeek Harness | 可用 | `~/.dsh/sessions/**/session.v4.jsonl.zstd` |
+| DeepSeek Harness | 可用 | `~/.dsh/sessions/**/session.vN.jsonl[.zst\|.zstd]`；v4 可读 |
 | Codex | 可用 | `~/.codex/sessions/**/rollout-*.jsonl` |
 | ZCode | 可用 | `~/.zcode/cli/db/db.sqlite` |
 
@@ -46,7 +46,8 @@ npx --yes ./agent-trajectory-0.1.0.tgz
 agent-trajectory                     # 启动或复用现有实例并打开页面
 agent-trajectory start --no-open     # 只启动服务
 agent-trajectory doctor              # 检查三类来源的路径、状态和会话数
-agent-trajectory evaluate            # 运行内置脱敏 Gold benchmark 并生成本地报告
+agent-trajectory evaluate            # 运行内置脱敏 contract regression 并生成本地报告
+agent-trajectory casebook list       # 查看本地 badcase、采纳状态和复测次数
 agent-trajectory calibrate prepare --dataset ~/.agent-trajectory/calibration/real-v1 --count 30
 agent-trajectory setup               # 交互式保存自定义来源路径
 agent-trajectory install-hooks       # 安装三类 Agent 的新会话联动
@@ -58,6 +59,10 @@ agent-trajectory uninstall-hooks     # 只移除本项目安装的联动项
 为 DSH 添加独立插件和带标记的配置块，并为被修改的配置创建一次
 `.agent-trajectory.bak` 备份。Codex 会要求用户通过 `/hooks` 检查并信任新增 Hook；
 DSH 和 ZCode 需要重启后加载配置。
+
+普通启动、浏览、投影、评测和诊断始终只读；只有用户显式执行 `install-hooks` 或
+`uninstall-hooks` 才会修改三类 Agent 的标记 Hook 配置。跨来源配置和 installation record
+使用同一文件事务，任一步失败会恢复安装前内容，避免命令失败后留下部分安装状态。
 
 Hook 是当前机器的本地生成物：命令中包含安装时的 Node、轻量运行时和数据目录绝对路径。
 `install-hooks` 可重复执行，并会用当前环境刷新这些路径和
@@ -164,13 +169,19 @@ Prompt 显式调用发行包内的 `$trajectory-diagnosis` Skill，并只携带 
   真实文件与修改位置并给出最小草案，属于 Agent 行为时给出可直接加入 `AGENTS.md` 的完整
   规则，最后写明预期改善和可核查的通过条件。证据不足时只标记候选位置并给出最小补证步骤。
 
+专用证据命令会在私有快照目录追加最小 access ledger，只记录 snapshot、view、时间和可选
+record ID，不记录查询文本或证据内容。报告完成后，Skill 使用同一命令的 `process-check`
+生成 advisory ProcessEvaluationRun，验证 frozen target、overview/findings 优先、按需取证
+和四段报告。由于 ledger 无法监控诊断 Agent 的其他工具，`no-live-source-read` 在缺少完整
+外部监控时保持 `insufficient_evidence`，不会被伪报为 pass。
+
 复制 Prompt 不会读取或保存 Agent 凭证，也不会调用 Agent 的会话创建接口。冻结证据和只读
 命令都位于当前运行 Agent Trajectory 的本机，因此 Prompt 需要在能够访问该本机路径的新
 会话中执行。
 
 ### 本地评测基线
 
-`agent-trajectory evaluate` 运行内置的 12 条脱敏冻结 Gold case，覆盖 DSH、Codex 和
+`agent-trajectory evaluate` 运行内置的 12 条脱敏冻结 contract case，覆盖 DSH、Codex 和
 ZCode 的成功正控、未验证、失败与恢复、运行中、截断、缺少工具结果、未知事件、多要求和
 跨轮承接场景。命令不扫描真实会话、不执行 Agent，也不调用模型；默认在
 `~/.agent-trajectory/evaluations/` 写入权限为 `0600` 的 JSON 与 Markdown：
@@ -181,11 +192,32 @@ agent-trajectory evaluate --output-dir ./evaluation-reports
 agent-trajectory evaluate --baseline ./evaluation-reports/baseline.json
 ```
 
-报告保留逐 criterion verdict、证据边界、归因、N/A、证据不足和 Evaluator 错误，不合成
-虚假精确总分。baseline 比较要求 dataset/version、evaluator/version、facts schema 和每个
-Target fingerprint 完全一致；否则拒绝给出改善或退化结论。
+内置数据集是 synthetic partial contract，只报告已声明断言的 agreement，不宣称整条 case
+与完整 Gold exact。只有完成双标和裁决、覆盖全部 criterion、Requirement 与 Chain 的真实
+数据集才报告 full-Gold exact。报告保留逐 criterion verdict、证据边界、归因、N/A、证据
+不足和 Evaluator 错误，不合成虚假精确总分。Run 绑定 dataset、Gold、evaluator build、
+contract 和 context policy hash；baseline 比较只允许在 dataset/Gold/contract/context 和
+Target 完全一致时进行，允许不同 evaluator build 做 A/B，并按 verdict 风险方向判断
+improved、regressed、mixed 或 inconclusive。
+
+每次 `evaluate` 还会把 mismatch 和 Evaluator error 按 dataset/Gold/case/subject 身份写入
+`~/.agent-trajectory/evaluations/casebook.json`。账本不复制轨迹正文或证据内容；相同问题
+重复出现时累加 observation，后续兼容 Run 通过时自动标为 resolved。人工采纳和复测使用：
+
+```bash
+agent-trajectory casebook decide --entry <badcase-id> --decision accepted --note "采用原因"
+agent-trajectory casebook retest --entry <badcase-id> --run <evaluation-run.json>
+```
+
+决策可为 `accepted / rejected / deferred`；复测结果显式区分
+`fixed / not-fixed / inconclusive`，Gold 或 dataset 身份不同不会被误写为修复。
 
 真实轨迹校准采用显式、私有的三阶段流程：
+
+首次进入空的评测中心时，可以点击“准备数据集”，在弹窗中确认目录标识、数据集 ID、版本、
+样本数和 partial 策略。页面只允许写入当前 `<data-dir>/calibration/<目录标识>`，不能提交
+任意绝对路径；同名目录不会覆盖。确认后调用的仍是下述同一条冻结、脱敏和隐私审计流水线。
+需要自动化或精确脚本化时，也可以直接使用 CLI：
 
 ```bash
 # 1. 从三来源均衡抽取并冻结本机真实候选；这是唯一读取 live source 的阶段
@@ -211,28 +243,51 @@ record、event、call、trace/span 标识、替换 Home/工作区路径并再次
 为 `0700`，文件为 `0600`，且自带忽略全部内容的 `.gitignore`。候选仍可能包含完成评测所
 必需的真实业务文本，因此只能留在本机私有目录，不能提交或上传。
 
+`--count` 默认是严格契约：稳定候选不足时命令失败且不会留下半成品目录。确需降级时必须
+显式传 `--allow-partial`，manifest 会记录 requested/produced/skipped。抽样先冻结候选池，
+只使用来源、轮次、记录数、工具密度、运行/错误状态和 coverage 等结构特征；每来源先用
+固定 seed 从最多 `quota × 4` 条候选中抽取，避免最新会话偏差和无界全量加载。候选池 hash、
+group hash 和 group-aware split policy 都写入 manifest，同一 parent/workspace 组不会跨
+split。`independent` 在协议中标为 restricted；它仍是本地文件，不等同于加密封存。
+
 两个 Reviewer 模板不包含本地 Evaluator 的预测，避免标注锚定；`agreement` 要求两份完整
-且 reviewer ID 不同的标注，输出 exact agreement、Cohen's Kappa 和逐项分歧。Reviewer
-原文件保持不变，所有分歧在独立 adjudication 中裁决。manifest/case hash、字段 schema、
-枚举值、Target identity 和 evidence record ID 均 fail closed；未完成或证据悬空的裁决
-不能编译为 Gold。
+且 reviewer ID 不同的标注，分别输出每个 criterion 的 verdict/attribution agreement、
+Kappa、确定性 95% bootstrap CI、Reviewer marginal，Requirement detection/state 和 Chain
+统计。单类别或空样本的 Kappa 明确为不可解释。agreement 同时绑定 manifest 和两份
+Reviewer 内容 hash；Reviewer 原文件保持不变，所有分歧在独立 adjudication 中裁决。
+manifest/case/audit hash、字段 schema、枚举值、Target identity、Chain transition 和 evidence
+record ID 均 fail closed；未完成或证据悬空的裁决不能编译为 Gold。
 
 启动 Agent Trajectory 后，顶层提供两个同级工作区：
 
 - `会话分析`：单条会话的对话、模型上下文、轨迹、过程评测和诊断；
 - `评测中心`：跨会话数据集、人工双标、分歧裁决和批量 EvaluationRun。
 
-评测中心首页先展示数据集概览、隐私审计、四阶段流程、样本 split 和 Reviewer A/B 独立
-进度。点击“开始/继续标注”才进入内部中文标注工作台。标注人身份进入后锁定，页面不会
-加载或展示另一位 Reviewer 的内容，也不会展示 Evaluator 预测。工作台以中文表单显示固定
-枚举，保存时自动写回协议要求的英文值；支持：
+评测中心首页展示数据集概览、manifest-bound 隐私审计、四阶段真实状态、样本 split、
+Reviewer A/B 独立进度、一致性/裁决状态，以及与当前 manifest、split dataset 和裁决
+Gold hash 全部匹配的本地 EvaluationRun。陈旧 Gold 的历史文件仍保留在本地，但不会混入
+当前工作流或 baseline 选项。双方双标并生成 agreement 后，可进入独立 Adjudicator 工作台对照 A/B
+verdict、attribution、Requirement、Chain 和 evidence IDs；裁决只写独立 adjudication，
+Reviewer 原文件保持不变。完整裁决后可从页面按 split 启动 Run、选择 baseline 并查看
+diff/gate，并按 case 下钻 assertion、criterion verdict/attribution、证据 ID 和 mismatch；
+不同 split 的 Run 不能互作 baseline，同一 candidate 对不同 baseline 的 diff 分别保存。
+运行 independent 时必须再次显式确认。点击“开始/继续标注”才进入内部中文标注工作台。标注人身份进入后锁定，
+页面不会加载或展示另一位 Reviewer 的内容，也不会展示 Evaluator 预测。工作台以中文表单
+显示固定枚举，保存时自动写回协议要求的英文值；支持：
 
 - case 进度、来源和 split 列表；
 - 按摘要浏览轨迹，点击后按需读取单条输入/输出；
 - 点击记录直接加入当前 criterion、requirement 或 chain 的证据；
 - 从 user/steering 记录生成待确认的要求候选；
 - revision 乐观锁、原子保存和未保存离开提示；
+- case/record/save request lease，旧异步响应不会覆盖当前案例；
 - 长记录输入/输出最多传输 256 KiB，并明确显示截断元数据。
+
+`/api/metrics` 只在本地服务上返回匿名运行计数，包括 LRU entries/weight/hit/miss/eviction、
+Worker snapshot/append/fallback、queue/round-trip/worker-execution p50/p95、payload bytes 和
+Worker state bytes、IPC/structured-clone 近似开销及进程 RSS，不包含 session ID、路径、
+请求正文或记录内容。这些指标用于决定是否需要真增量 reducer、zstd frame scanner 或
+Worker 池；没有真实负载证据前不为这些架构优化预设门禁。
 
 工作台只发现 `<data-dir>/calibration/*` 下通过隐私审计的数据集，不接受任意文件路径；
 manifest、隐私审计、Reviewer 和 case 文件必须是真实文件而非符号链接。CLI 和 JSON
@@ -257,6 +312,8 @@ npm start
 
 - 统一 `SessionSource` 契约、来源 Registry、安全 opaque ID 路由和指纹缓存。
 - DSH v4 header、连续 `seq`、未知 required event 与 torn tail 校验。
+- DSH 按会话目录选择最高 canonical generation；v4 正常读取，旧版、未来版和损坏文件
+  保留在列表中并分别标记 migration-required、unsupported-future 或 corrupt，不自动迁移。
 - DSH turn/step、assistant、tool、PTC subtool、compaction、TTFT 与 Token 投影。
 - DSH model surface replacement fold：append-origin transcript、当前模型上下文和完整
   audit 轨迹分层展示；记录标记 `current / shadowed`，并保留 append/replace 的完整
@@ -322,9 +379,10 @@ npm start
   Evaluation 和 AI summary facts hash。
 - 新增保守的 RequirementResult 与 ChainResult：只有逐项或显式承接证据足够时才下结论，
   多要求不会由整体成功冒充逐项完成，单轮承接明确为 `not_applicable`。
-- 内置 12-case calibration/regression Gold dataset、本地 EvaluationRun、JSON/Markdown
-  报告和严格 baseline diff；重复运行结果稳定并统计 exact、precision/recall、FP/FN、
-  N/A、证据不足、Evaluator 错误、耗时和逐 case 变化。
+- 内置 12-case calibration/regression synthetic contract dataset、本地 EvaluationRun、
+  JSON/Markdown 报告和严格 baseline diff；partial contract 统计 assertion agreement，
+  full Gold 才统计 exact；precision/recall 的分母排除 abstain/error，并单列 N/A、证据
+  不足、Evaluator 错误、耗时和逐 case 变化。
 - 支持从真实三来源准备私有校准候选，按来源配额和结构多样性抽样；支持独立双标模板、
   exact/Kappa 一致性报告、分歧裁决以及裁决后外部 frozen dataset 运行。未经裁决的候选
   不能作为 Gold，独立集和 calibration/regression split 在冻结时固定。

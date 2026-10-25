@@ -35,8 +35,8 @@ import {
   type SourcePathOverrides,
 } from './source-paths'
 import { createSourceRegistry } from './sources/registry'
-import type { SourceId, SourceStatus } from '../src/types'
-import { MINIMAL_GOLD_DATASET } from './evaluation/gold-dataset'
+import { isSourceId, type SourceId, type SourceStatus } from '../src/types'
+import { SYNTHETIC_CONTRACT_DATASET } from './evaluation/gold-dataset'
 import {
   compareHumanAnnotations,
   createAdjudicationTemplate,
@@ -50,6 +50,7 @@ import {
   evaluationRunMarkdown,
   runEvaluationDataset,
 } from './evaluation/runner'
+import { createEvaluationDataset } from './evaluation/identity'
 import type {
   EvaluationDataset,
   EvaluationRun,
@@ -60,9 +61,17 @@ import {
   writePrivateJsonExclusive,
   writePrivateText,
 } from './summary/file-transaction'
+import {
+  defaultCasebookFile,
+  EvaluationCasebookStore,
+} from './evaluation/casebook'
+import type {
+  BadcaseDecision,
+} from '../src/evaluation-types'
 
 type Command =
   | 'calibrate'
+  | 'casebook'
   | 'doctor'
   | 'evaluate'
   | 'hook'
@@ -76,7 +85,13 @@ interface CliArguments {
   adjudication?: string
   command: Command
   baseline?: string
+  allowPartial: boolean
   calibrateAction?: 'agreement' | 'prepare'
+  casebookAction?: 'list' | 'decide' | 'retest'
+  casebookEntry?: string
+  casebookDecision?: BadcaseDecision
+  casebookNote?: string
+  casebookRun?: string
   count: number
   dataRoot: string
   datasetDirectory?: string
@@ -116,9 +131,7 @@ function value(arguments_: readonly string[], index: number, option: string): st
 }
 
 function sourceId(value: string): SourceId | undefined {
-  return value === 'codex' || value === 'dsh' || value === 'zcode'
-    ? value
-    : undefined
+  return isSourceId(value) ? value : undefined
 }
 
 export function parseCliArguments(
@@ -129,6 +142,7 @@ export function parseCliArguments(
   const positionals: string[] = []
   const sourcePaths: SourcePathOverrides = {}
   let adjudication: string | undefined
+  let allowPartial = false
   let baseline: string | undefined
   let count = 30
   let countProvided = false
@@ -142,6 +156,10 @@ export function parseCliArguments(
   let reviewerA: string | undefined
   let reviewerB: string | undefined
   let split: EvaluationSplit | 'all' | undefined
+  let casebookEntry: string | undefined
+  let casebookDecision: BadcaseDecision | undefined
+  let casebookNote: string | undefined
+  let casebookRun: string | undefined
   for (let index = 0; index < arguments_.length; index++) {
     const argument = arguments_[index]!
     if (!argument.startsWith('--')) {
@@ -150,6 +168,10 @@ export function parseCliArguments(
     }
     if (argument === '--no-open') {
       noOpen = true
+      continue
+    }
+    if (argument === '--allow-partial') {
+      allowPartial = true
       continue
     }
     const selected = value(arguments_, index, argument)
@@ -170,6 +192,15 @@ export function parseCliArguments(
     else if (argument === '--adjudication') adjudication = path.resolve(selected)
     else if (argument === '--reviewer-a') reviewerA = path.resolve(selected)
     else if (argument === '--reviewer-b') reviewerB = path.resolve(selected)
+    else if (argument === '--entry') casebookEntry = selected
+    else if (argument === '--decision') {
+      if (selected !== 'accepted' && selected !== 'rejected' && selected !== 'deferred') {
+        throw new Error('--decision must be accepted, rejected, or deferred')
+      }
+      casebookDecision = selected
+    }
+    else if (argument === '--note') casebookNote = selected
+    else if (argument === '--run') casebookRun = path.resolve(selected)
     else if (argument === '--split') {
       if (selected !== 'all'
         && selected !== 'calibration'
@@ -193,6 +224,7 @@ export function parseCliArguments(
   const commandValue = positionals[0] ?? 'start'
   if (![
     'calibrate',
+    'casebook',
     'doctor',
     'evaluate',
     'hook',
@@ -209,8 +241,39 @@ export function parseCliArguments(
     && (positionals[1] === 'prepare' || positionals[1] === 'agreement')
     ? positionals[1]
     : undefined
+  const casebookAction = command === 'casebook'
+    && (positionals[1] === 'list'
+      || positionals[1] === 'decide'
+      || positionals[1] === 'retest')
+    ? positionals[1]
+    : undefined
   if (command === 'calibrate' && calibrateAction === undefined) {
     throw new Error('calibrate requires prepare or agreement')
+  }
+  if (command === 'casebook' && casebookAction === undefined) {
+    throw new Error('casebook requires list, decide, or retest')
+  }
+  if (command !== 'casebook'
+    && (casebookEntry !== undefined
+      || casebookDecision !== undefined
+      || casebookNote !== undefined
+      || casebookRun !== undefined)) {
+    throw new Error('--entry, --decision, --note, and --run are only valid with casebook')
+  }
+  if (casebookAction === 'decide'
+    && (casebookEntry === undefined || casebookDecision === undefined)) {
+    throw new Error('casebook decide requires --entry and --decision')
+  }
+  if (casebookAction === 'retest'
+    && (casebookEntry === undefined || casebookRun === undefined)) {
+    throw new Error('casebook retest requires --entry and --run')
+  }
+  if (casebookAction === 'list'
+    && (casebookEntry !== undefined
+      || casebookDecision !== undefined
+      || casebookNote !== undefined
+      || casebookRun !== undefined)) {
+    throw new Error('casebook list does not accept entry options')
   }
   if (command !== 'evaluate' && (baseline !== undefined || adjudication !== undefined)) {
     throw new Error('--baseline and --adjudication are only valid with evaluate')
@@ -232,6 +295,9 @@ export function parseCliArguments(
   }
   if (calibrateAction === 'agreement' && countProvided) {
     throw new Error('--count is only valid with calibrate prepare')
+  }
+  if (calibrateAction !== 'prepare' && allowPartial) {
+    throw new Error('--allow-partial is only valid with calibrate prepare')
   }
   if (calibrateAction === 'prepare' && (reviewerA !== undefined || reviewerB !== undefined)) {
     throw new Error('reviewer files are only valid with calibrate agreement')
@@ -262,9 +328,15 @@ export function parseCliArguments(
   }
   return {
     adjudication,
+    allowPartial,
     command,
     baseline,
     calibrateAction,
+    casebookAction,
+    casebookEntry,
+    casebookDecision,
+    casebookNote,
+    casebookRun,
     count,
     dataRoot,
     datasetDirectory,
@@ -583,7 +655,10 @@ async function calibrate(arguments_: CliArguments): Promise<void> {
       const prepared = await prepareCalibrationCandidates(
         registry,
         datasetDirectory,
-        { count: arguments_.count },
+        {
+          count: arguments_.count,
+          allowPartial: arguments_.allowPartial,
+        },
       )
       console.log(`Calibration manifest: ${prepared.manifestFile}`)
       console.log(`Annotation guide: ${prepared.annotationGuideFile}`)
@@ -631,7 +706,7 @@ async function evaluate(arguments_: CliArguments): Promise<void> {
     ? undefined
     : JSON.parse(await fs.readFile(arguments_.baseline, 'utf8')) as EvaluationRun
   const loadedDataset: EvaluationDataset = arguments_.datasetDirectory === undefined
-    ? MINIMAL_GOLD_DATASET
+    ? SYNTHETIC_CONTRACT_DATASET
     : await loadAdjudicatedDataset(
         arguments_.datasetDirectory,
         arguments_.adjudication!,
@@ -639,11 +714,16 @@ async function evaluate(arguments_: CliArguments): Promise<void> {
   const selectedSplit = arguments_.split ?? 'all'
   const dataset: EvaluationDataset = selectedSplit === 'all'
     ? loadedDataset
-    : {
-        ...loadedDataset,
+    : createEvaluationDataset({
+        schemaVersion: loadedDataset.schemaVersion,
+        id: loadedDataset.id,
+        version: loadedDataset.version,
+        description: loadedDataset.description,
+        goldCompleteness: loadedDataset.goldCompleteness,
+        candidateManifestHash: loadedDataset.candidateManifestHash,
         cases: loadedDataset.cases.filter(testCase =>
           testCase.split === selectedSplit),
-      }
+      })
   if (dataset.cases.length === 0) {
     throw new Error(`dataset has no ${selectedSplit} cases`)
   }
@@ -662,12 +742,29 @@ async function evaluate(arguments_: CliArguments): Promise<void> {
     writePrivateJson(jsonFile, run),
     writePrivateText(markdownFile, evaluationRunMarkdown(run)),
   ])
+  const casebook = await new EvaluationCasebookStore(
+    defaultCasebookFile(arguments_.dataRoot),
+  ).syncRun(run)
   console.log(`Evaluation JSON: ${jsonFile}`)
   console.log(`Evaluation report: ${markdownFile}`)
   console.log(
-    `Exact agreement: ${run.aggregate.exactCases}/${run.aggregate.cases}; `
+    `Casebook: ${casebook.entries.filter(entry => entry.status === 'open').length} open / ${
+      casebook.entries.length
+    } total.`,
+  )
+  console.log(
+    `Assertion agreement: ${run.aggregate.assertionsPassed}/${
+      run.aggregate.assertionsTotal
+    }; `
     + `FP/FN: ${run.aggregate.falsePositives}/${run.aggregate.falseNegatives}`,
   )
+  if (run.aggregate.exactAgreement !== undefined) {
+    console.log(
+      `Full-Gold exact agreement: ${run.aggregate.exactCases}/${
+        run.aggregate.exactEligibleCases
+      }.`,
+    )
+  }
   if (baseline !== undefined) {
     const diff = compareEvaluationRuns(baseline, run)
     const diffFile = path.join(outputDirectory, `${baseName}.diff.json`)
@@ -677,10 +774,54 @@ async function evaluate(arguments_: CliArguments): Promise<void> {
       throw new Error(`baseline is not comparable: ${diff.reasons.join('; ')}`)
     }
     console.log(
-      `Improved/regressed/unchanged: ${diff.improvedCaseIds.length}/${
+      `Improved/regressed/mixed/unchanged/inconclusive: ${diff.improvedCaseIds.length}/${
         diff.regressedCaseIds.length
-      }/${diff.unchangedCaseIds.length}`,
+      }/${diff.mixedCaseIds.length}/${diff.unchangedCaseIds.length}/${
+        diff.inconclusiveCaseIds.length
+      }; gate=${diff.gateDecision}.`,
     )
+  }
+}
+
+async function casebook(arguments_: CliArguments): Promise<void> {
+  const store = new EvaluationCasebookStore(defaultCasebookFile(arguments_.dataRoot))
+  if (arguments_.casebookAction === 'decide') {
+    const result = await store.decide(
+      arguments_.casebookEntry!,
+      arguments_.casebookDecision!,
+      arguments_.casebookNote,
+    )
+    const entry = result.entries.find(candidate =>
+      candidate.id === arguments_.casebookEntry)!
+    console.log(`${entry.id} decision=${entry.decision?.value} status=${entry.status}`)
+    return
+  }
+  if (arguments_.casebookAction === 'retest') {
+    const run = JSON.parse(
+      await fs.readFile(arguments_.casebookRun!, 'utf8'),
+    ) as EvaluationRun
+    const result = await store.recordRetest(arguments_.casebookEntry!, run)
+    const entry = result.entries.find(candidate =>
+      candidate.id === arguments_.casebookEntry)!
+    const retest = entry.retests.find(candidate => candidate.runId === run.runId)!
+    console.log(`${entry.id} retest=${retest.outcome} run=${run.runId}`)
+    return
+  }
+  const result = await store.read()
+  if (result.entries.length === 0) {
+    console.log('Casebook is empty.')
+    return
+  }
+  for (const entry of result.entries) {
+    console.log([
+      entry.id,
+      entry.status,
+      entry.decision?.value ?? 'undecided',
+      `${entry.datasetId}@${entry.datasetVersion}`,
+      entry.caseId,
+      entry.subject,
+      `seen=${entry.observations}`,
+    ].join(' '))
   }
 }
 
@@ -760,6 +901,7 @@ export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> 
   if (parsed.command === 'start') await start(parsed)
   else if (parsed.command === 'doctor') await doctor(parsed)
   else if (parsed.command === 'calibrate') await calibrate(parsed)
+  else if (parsed.command === 'casebook') await casebook(parsed)
   else if (parsed.command === 'evaluate') await evaluate(parsed)
   else if (parsed.command === 'setup') await setup(parsed)
   else if (parsed.command === 'install-hooks') await updateHooks(parsed, false)

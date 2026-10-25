@@ -17,19 +17,31 @@ import type {
   HumanCaseAnnotation,
   HumanEvaluationAnnotations,
   LocalTrajectoryCriterionId,
+  MetricConfidenceInterval,
   RequirementState,
 } from '../../src/evaluation-types'
 import { recordSearchText, redactSensitive } from '../../src/projector-utils'
 import { analyzeTrajectory } from '../../src/trajectory-analysis'
-import type {
-  SessionDetail,
-  SourceId,
-  SourceStatus,
-  TransportSessionDetail,
-  TransportTrajectoryRecord,
-  TrajectoryRecord,
+import {
+  isSourceId,
+  type SessionDetail,
+  type SourceId,
+  type SourceStatus,
+  type TransportSessionDetail,
+  type TransportTrajectoryRecord,
+  type TrajectoryRecord,
 } from '../../src/types'
 import { writePrivateJson } from '../summary/file-transaction'
+import { createEvaluationDataset } from './identity'
+import {
+  candidateGroupKey,
+  candidatePoolHash,
+  groupAwareSplits,
+  rankCandidates,
+  SAMPLING_POLICY_VERSION,
+  seededRank,
+  visibleCandidateTraits,
+} from './sampling'
 
 const CRITERIA: LocalTrajectoryCriterionId[] = [
   'outcome',
@@ -42,6 +54,9 @@ const CASE_FILE = /^cases\/[a-z0-9][a-z0-9._-]*\.json$/
 const DATASET_ID = /^[a-z0-9][a-z0-9._-]{2,80}$/
 const REVIEWER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{1,80}$/
 const RECORD_ID = /^record-\d{3,}$/
+const PRIVACY_AUDIT_VERSION = 2
+const PRIVACY_AUDITOR_ID = 'agent-trajectory-calibration-privacy'
+const PRIVACY_AUDITOR_VERSION = '2'
 const VERDICTS = new Set<EvaluationVerdict>([
   'pass',
   'fail',
@@ -90,6 +105,8 @@ export interface CalibrationSource {
 
 export interface PrepareCalibrationOptions {
   count: number
+  allowPartial?: boolean
+  seed?: string
   createdAt?: string
   datasetId?: string
   datasetVersion?: string
@@ -111,6 +128,11 @@ export interface PreparedCalibration {
 }
 
 export interface CalibrationPrivacyAudit {
+  schemaVersion: typeof PRIVACY_AUDIT_VERSION
+  kind: 'calibration-privacy-audit'
+  manifestHash: string
+  auditorId: typeof PRIVACY_AUDITOR_ID
+  auditorVersion: typeof PRIVACY_AUDITOR_VERSION
   cases: number
   hashesVerified: number
   forbiddenRecordFields: number
@@ -192,6 +214,7 @@ function manifestContentHash(
     id: manifest.id,
     version: manifest.version,
     description: manifest.description,
+    preparation: manifest.preparation,
     cases: manifest.cases,
   }))
 }
@@ -559,74 +582,8 @@ function hydrateCalibrationDetail(detail: TransportSessionDetail): SessionDetail
   }
 }
 
-function visibleCandidateTraits(detail: SessionDetail): string[] {
-  const records = detail.projection.records
-  const userRecords = records.filter(record =>
-    record.kind === 'user' || record.kind === 'steering')
-  return [
-    records.some(record => record.status === 'running') ? 'running' : undefined,
-    records.some(record => record.status === 'error') ? 'error-present' : undefined,
-    detail.projection.turns.length >= 4 ? 'long-multiturn' : undefined,
-    records.length >= 50 ? 'long-records' : undefined,
-    records.filter(record =>
-      record.kind === 'tool' || record.kind === 'subtool').length >= 10
-      ? 'tool-dense'
-      : undefined,
-    userRecords.length >= 2 ? 'multiple-user-messages' : undefined,
-    detail.projection.unknownEventTypes.length > 0 ? 'coverage-gap' : undefined,
-    detail.projection.modelContextRecordIds !== undefined ? 'model-context' : undefined,
-    detail.projection.usage !== undefined ? 'usage-visible' : undefined,
-  ].filter((value): value is string => value !== undefined)
-}
-
-function selectionTraits(detail: SessionDetail): string[] {
-  const analysis = analyzeTrajectory(detail)
-  return [
-    ...visibleCandidateTraits(detail),
-    analysis.corrections.some(item => item.status === 'recovered') ? 'recovered' : undefined,
-    analysis.corrections.some(item => item.status === 'unresolved') ? 'unresolved' : undefined,
-    analysis.outcome.tone === 'positive' ? 'verified-or-positive' : undefined,
-    analysis.outcome.tone === 'warning' ? 'warning-outcome' : undefined,
-    analysis.outcome.tone === 'negative' ? 'negative-outcome' : undefined,
-  ].filter((value): value is string => value !== undefined)
-}
-
-function splitFor(index: number, total: number): EvaluationSplit {
-  const calibrationEnd = Math.ceil(total * 0.5)
-  const regressionEnd = calibrationEnd + Math.floor(total * 0.2)
-  return index < calibrationEnd
-    ? 'calibration'
-    : index < regressionEnd ? 'regression' : 'independent'
-}
-
 function caseId(source: SourceId, fingerprint: string): string {
   return `real-${source}-${sha256(fingerprint).slice(0, 12)}`
-}
-
-function rankCandidates<T extends {
-  detail: SessionDetail
-  summary: SessionDetail['summary']
-}>(values: T[], count: number): T[] {
-  const selected: T[] = []
-  const remaining = [...values]
-  const seenTraits = new Set<string>()
-  while (selected.length < count && remaining.length > 0) {
-    remaining.sort((left, right) => {
-      const leftNew = selectionTraits(left.detail).filter(
-        trait => !seenTraits.has(trait),
-      ).length
-      const rightNew = selectionTraits(right.detail).filter(
-        trait => !seenTraits.has(trait),
-      ).length
-      return rightNew - leftNew
-        || right.detail.projection.records.length - left.detail.projection.records.length
-        || right.summary.updatedAt - left.summary.updatedAt
-    })
-    const next = remaining.shift()!
-    selected.push(next)
-    selectionTraits(next.detail).forEach(trait => seenTraits.add(trait))
-  }
-  return selected
 }
 
 async function stableLoad(
@@ -738,16 +695,20 @@ export async function prepareCalibrationCandidates(
   const datasetId = options.datasetId ?? 'agent-trajectory-private-real'
   if (!DATASET_ID.test(datasetId)) throw new Error('invalid calibration dataset id')
   const version = options.datasetVersion ?? '1'
+  const seed = options.seed ?? `${datasetId}@${version}:sampling-v${SAMPLING_POLICY_VERSION}`
   const statuses = await source.listSources(true)
   const byStatus = new Map(statuses.map(status => [status.source, status]))
   const enabled = statuses.filter(status => status.availability !== 'blocked')
   const quota = Math.ceil(options.count / Math.max(1, enabled.length))
-  const multiplier = Math.max(1, options.candidateMultiplier ?? 2)
+  const multiplier = Math.max(1, options.candidateMultiplier ?? 4)
   const summaries = await source.listSessions('all')
   const skipped: PreparedCalibration['skipped'] = []
   const selectedBySource = await Promise.all(enabled.map(async (status) => {
     const candidates = summaries
       .filter(summary => summary.source === status.source)
+      .sort((left, right) =>
+        seededRank(seed, `${left.source}:${left.sourceSessionId}`)
+          .localeCompare(seededRank(seed, `${right.source}:${right.sourceSessionId}`)))
       .slice(0, quota * multiplier)
     const loaded = []
     for (const summary of candidates) {
@@ -774,13 +735,18 @@ export async function prepareCalibrationCandidates(
         })
       }
     }
-    return rankCandidates(loaded, loaded.length)
+    return {
+      pool: loaded,
+      selected: rankCandidates(loaded, loaded.length, seed),
+    }
   }))
+  const stablePool = selectedBySource.flatMap(group => group.pool)
+  const poolHash = candidatePoolHash(stablePool)
   const interleaved = []
   for (let index = 0; interleaved.length < options.count; index++) {
     let added = false
     for (const group of selectedBySource) {
-      const candidate = group[index]
+      const candidate = group.selected[index]
       if (candidate !== undefined && interleaved.length < options.count) {
         interleaved.push(candidate)
         added = true
@@ -788,9 +754,17 @@ export async function prepareCalibrationCandidates(
     }
     if (!added) break
   }
-  if (interleaved.length < Math.min(options.count, enabled.length)) {
-    throw new Error('not enough stable source sessions to prepare calibration candidates')
+  if (interleaved.length < options.count && options.allowPartial !== true) {
+    throw new Error(
+      `not enough stable source sessions: requested ${options.count}, produced ${
+        interleaved.length
+      }; pass --allow-partial to create a smaller dataset explicitly`,
+    )
   }
+  if (interleaved.length < Math.min(options.count, enabled.length)) {
+    throw new Error('not enough stable source sessions to represent enabled sources')
+  }
+  const splits = groupAwareSplits(interleaved, seed)
 
   await assertEmptyDirectory(root)
   await privateDirectory(root)
@@ -817,7 +791,8 @@ export async function prepareCalibrationCandidates(
     const traits = visibleCandidateTraits(candidate.detail)
     refs.push({
       id,
-      split: splitFor(index, interleaved.length),
+      split: splits.get(candidate)!,
+      groupHash: sha256(candidateGroupKey(candidate.detail)),
       description: `Private ${candidate.summary.source.toUpperCase()} trajectory; traits: ${
         traits.join(', ') || 'general'
       }.`,
@@ -836,13 +811,26 @@ export async function prepareCalibrationCandidates(
   }
   const createdAt = options.createdAt ?? new Date().toISOString()
   const manifestWithoutHash: Omit<EvaluationCandidateManifest, 'contentHash'> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'evaluation-candidates',
     id: datasetId,
     version,
     createdAt,
     description: options.description
       ?? 'Private redacted real trajectories for independent human calibration.',
+    preparation: {
+      requested: options.count,
+      produced: refs.length,
+      skipped: skipped.length,
+      allowPartial: options.allowPartial === true,
+      candidatePoolHash: poolHash,
+      candidateMultiplier: multiplier,
+      samplingPolicyVersion: SAMPLING_POLICY_VERSION,
+      seed,
+      groupPolicy: 'source-parent-workspace',
+      splitPolicy: 'group-aware-50-20-30',
+      independentAccess: 'restricted',
+    },
     cases: refs,
   }
   const manifest: EvaluationCandidateManifest = {
@@ -920,6 +908,11 @@ export async function auditCalibrationCandidates(
     && credentialShapes === 0
     && identityMismatches === 0
   return {
+    schemaVersion: PRIVACY_AUDIT_VERSION,
+    kind: 'calibration-privacy-audit',
+    manifestHash: manifest.contentHash,
+    auditorId: PRIVACY_AUDITOR_ID,
+    auditorVersion: PRIVACY_AUDITOR_VERSION,
     cases: manifest.cases.length,
     hashesVerified,
     forbiddenRecordFields,
@@ -928,6 +921,73 @@ export async function auditCalibrationCandidates(
     identityMismatches,
     passed,
   }
+}
+
+export function parseCalibrationPrivacyAudit(
+  value: unknown,
+  manifest: EvaluationCandidateManifest,
+): CalibrationPrivacyAudit {
+  const source = object(value, 'calibration privacy audit')
+  exactKeys(source, [
+    'schemaVersion',
+    'kind',
+    'manifestHash',
+    'auditorId',
+    'auditorVersion',
+    'cases',
+    'hashesVerified',
+    'forbiddenRecordFields',
+    'homePathShapes',
+    'credentialShapes',
+    'identityMismatches',
+    'passed',
+  ], 'calibration privacy audit')
+  if (source.schemaVersion !== PRIVACY_AUDIT_VERSION
+    || source.kind !== 'calibration-privacy-audit'
+    || source.auditorId !== PRIVACY_AUDITOR_ID
+    || source.auditorVersion !== PRIVACY_AUDITOR_VERSION) {
+    throw new Error('unsupported calibration privacy audit')
+  }
+  if (source.manifestHash !== manifest.contentHash) {
+    throw new Error('calibration privacy audit manifest hash mismatch')
+  }
+  const countKeys = [
+    'cases',
+    'hashesVerified',
+    'forbiddenRecordFields',
+    'homePathShapes',
+    'credentialShapes',
+    'identityMismatches',
+  ] as const
+  if (countKeys.some(key =>
+    !Number.isInteger(source[key]) || (source[key] as number) < 0)
+    || typeof source.passed !== 'boolean') {
+    throw new Error('invalid calibration privacy audit counts')
+  }
+  const audit: CalibrationPrivacyAudit = {
+    schemaVersion: PRIVACY_AUDIT_VERSION,
+    kind: 'calibration-privacy-audit',
+    manifestHash: manifest.contentHash,
+    auditorId: PRIVACY_AUDITOR_ID,
+    auditorVersion: PRIVACY_AUDITOR_VERSION,
+    cases: source.cases as number,
+    hashesVerified: source.hashesVerified as number,
+    forbiddenRecordFields: source.forbiddenRecordFields as number,
+    homePathShapes: source.homePathShapes as number,
+    credentialShapes: source.credentialShapes as number,
+    identityMismatches: source.identityMismatches as number,
+    passed: source.passed,
+  }
+  if (!audit.passed
+    || audit.cases !== manifest.cases.length
+    || audit.hashesVerified !== manifest.cases.length
+    || audit.forbiddenRecordFields !== 0
+    || audit.homePathShapes !== 0
+    || audit.credentialShapes !== 0
+    || audit.identityMismatches !== 0) {
+    throw new Error('calibration privacy audit failed')
+  }
+  return audit
 }
 
 function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
@@ -940,9 +1000,10 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
     'contentHash',
     'createdAt',
     'description',
+    'preparation',
     'cases',
   ], 'candidate manifest')
-  if (source.schemaVersion !== 1 || source.kind !== 'evaluation-candidates') {
+  if (source.schemaVersion !== 2 || source.kind !== 'evaluation-candidates') {
     throw new Error('unsupported candidate manifest')
   }
   const id = string(source.id, 'manifest id')
@@ -957,6 +1018,7 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
     exactKeys(candidate, [
       'id',
       'split',
+      'groupHash',
       'description',
       'target',
       'file',
@@ -972,6 +1034,10 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
       && candidate.split !== 'independent') {
       throw new Error(`invalid split for candidate ${candidateId}`)
     }
+    const groupHash = string(candidate.groupHash, `candidate ${candidateId} groupHash`)
+    if (!/^[a-f0-9]{64}$/.test(groupHash)) {
+      throw new Error(`invalid groupHash for candidate ${candidateId}`)
+    }
     const file = normalizedRelativeFile(string(candidate.file, `candidate ${candidateId} file`))
     const digest = string(candidate.sha256, `candidate ${candidateId} sha256`)
     if (!/^[a-f0-9]{64}$/.test(digest)) {
@@ -985,7 +1051,7 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
       'fingerprint',
       'snapshotId',
     ], `candidate ${candidateId} target`)
-    if (target.source !== 'dsh' && target.source !== 'codex' && target.source !== 'zcode') {
+    if (!isSourceId(target.source)) {
       throw new Error(`invalid source for candidate ${candidateId}`)
     }
     if (target.mode !== 'frozen') {
@@ -1004,6 +1070,7 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
     return {
       id: candidateId,
       split: candidate.split,
+      groupHash,
       description: string(candidate.description, `candidate ${candidateId} description`),
       target: {
         source: target.source,
@@ -1024,14 +1091,80 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
       ),
     } as EvaluationCandidateRef
   })
+  const preparation = object(source.preparation, 'manifest preparation')
+  exactKeys(
+    preparation,
+    [
+      'requested',
+      'produced',
+      'skipped',
+      'allowPartial',
+      'candidatePoolHash',
+      'candidateMultiplier',
+      'samplingPolicyVersion',
+      'seed',
+      'groupPolicy',
+      'splitPolicy',
+      'independentAccess',
+    ],
+    'manifest preparation',
+  )
+  if (!Number.isInteger(preparation.requested)
+    || !Number.isInteger(preparation.produced)
+    || !Number.isInteger(preparation.skipped)
+    || !Number.isInteger(preparation.samplingPolicyVersion)
+    || !Number.isInteger(preparation.candidateMultiplier)
+    || (preparation.requested as number) < 3
+    || (preparation.produced as number) < 3
+    || (preparation.skipped as number) < 0
+    || (preparation.candidateMultiplier as number) < 1
+    || typeof preparation.allowPartial !== 'boolean') {
+    throw new Error('invalid manifest preparation counts')
+  }
+  const poolHash = string(preparation.candidatePoolHash, 'candidate pool hash')
+  const seed = string(preparation.seed, 'sampling seed')
+  if (!/^[a-f0-9]{64}$/.test(poolHash)
+    || preparation.samplingPolicyVersion !== SAMPLING_POLICY_VERSION
+    || preparation.groupPolicy !== 'source-parent-workspace'
+    || preparation.splitPolicy !== 'group-aware-50-20-30'
+    || preparation.independentAccess !== 'restricted') {
+    throw new Error('invalid manifest sampling policy')
+  }
+  if (preparation.produced !== cases.length
+    || (preparation.produced as number) > (preparation.requested as number)
+    || preparation.allowPartial !== true
+      && preparation.produced !== preparation.requested) {
+    throw new Error('manifest preparation counts do not match cases')
+  }
+  const splitByGroup = new Map<string, EvaluationSplit>()
+  for (const candidate of cases) {
+    const previous = splitByGroup.get(candidate.groupHash)
+    if (previous !== undefined && previous !== candidate.split) {
+      throw new Error(`candidate group crosses splits: ${candidate.groupHash}`)
+    }
+    splitByGroup.set(candidate.groupHash, candidate.split)
+  }
   const manifest: EvaluationCandidateManifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'evaluation-candidates',
     id,
     version: string(source.version, 'manifest version'),
     contentHash,
     createdAt: string(source.createdAt, 'manifest createdAt'),
     description: string(source.description, 'manifest description'),
+    preparation: {
+      requested: preparation.requested as number,
+      produced: preparation.produced as number,
+      skipped: preparation.skipped as number,
+      allowPartial: preparation.allowPartial,
+      candidatePoolHash: poolHash,
+      candidateMultiplier: preparation.candidateMultiplier as number,
+      samplingPolicyVersion: preparation.samplingPolicyVersion as number,
+      seed,
+      groupPolicy: 'source-parent-workspace',
+      splitPolicy: 'group-aware-50-20-30',
+      independentAccess: 'restricted',
+    },
     cases,
   }
   const { contentHash: _contentHash, ...hashable } = manifest
@@ -1112,6 +1245,34 @@ function validateAnnotationEvidence(
       `adjudication ${annotation.caseId} references missing records: ${missing.join(', ')}`,
     )
   }
+  const turns = new Set(detail.projection.turns.map(turn => turn.number))
+  const transition = annotation.chain.failedTransition
+  const failure = annotation.chain.continuity === 'missing'
+    || annotation.chain.continuity === 'incorrect'
+  if (failure && transition === undefined) {
+    throw new Error(
+      `annotation ${annotation.caseId} requires failedTransition for ${
+        annotation.chain.continuity
+      } chain`,
+    )
+  }
+  if (!failure && transition !== undefined) {
+    throw new Error(
+      `annotation ${annotation.caseId} forbids failedTransition for ${
+        annotation.chain.continuity ?? 'unset'
+      } chain`,
+    )
+  }
+  if (transition !== undefined
+    && (transition.fromTurn >= transition.toTurn
+      || !turns.has(transition.fromTurn)
+      || !turns.has(transition.toTurn))) {
+    throw new Error(
+      `annotation ${annotation.caseId} has invalid chain transition ${
+        transition.fromTurn
+      } -> ${transition.toTurn}`,
+    )
+  }
 }
 
 export function validateCaseAnnotation(
@@ -1181,6 +1342,39 @@ function parseAnnotationCase(
   if (complete && criteria.some(item =>
     item.verdict === undefined || item.attribution === undefined)) {
     throw new Error(`annotation ${candidate.id} has incomplete criteria`)
+  }
+  for (const criterion of criteria) {
+    if (criterion.verdict === 'evaluator_error'
+      && criterion.attribution !== undefined
+      && criterion.attribution !== 'evaluator') {
+      throw new Error(
+        `criterion ${candidate.id}:${criterion.criterionId} evaluator_error must attribute evaluator`,
+      )
+    }
+    if (criterion.attribution === 'evaluator'
+      && criterion.verdict !== undefined
+      && criterion.verdict !== 'evaluator_error') {
+      throw new Error(
+        `criterion ${candidate.id}:${criterion.criterionId} evaluator attribution requires evaluator_error`,
+      )
+    }
+    if ((criterion.verdict === 'not_applicable' || criterion.verdict === 'out_of_scope')
+      && criterion.attribution !== undefined
+      && criterion.attribution !== 'not_applicable') {
+      throw new Error(
+        `criterion ${candidate.id}:${criterion.criterionId} ${
+          criterion.verdict
+        } must attribute not_applicable`,
+      )
+    }
+    if (criterion.attribution === 'not_applicable'
+      && criterion.verdict !== undefined
+      && criterion.verdict !== 'not_applicable'
+      && criterion.verdict !== 'out_of_scope') {
+      throw new Error(
+        `criterion ${candidate.id}:${criterion.criterionId} not_applicable attribution is inconsistent`,
+      )
+    }
   }
   if (complete && criteria.some(item =>
     (item.verdict === 'pass' || item.verdict === 'fail' || item.verdict === 'warning')
@@ -1357,23 +1551,43 @@ export async function loadHumanAnnotations(
   )
 }
 
-function annotationLabels(
+export function annotationContentHash(
   annotations: HumanEvaluationAnnotations,
-): Map<string, string> {
-  return new Map(annotations.cases.flatMap(testCase => [
-    ...testCase.criteria.map(item => [
-      `${testCase.caseId}:criterion:${item.criterionId}`,
-      `${item.verdict ?? ''}|${item.attribution ?? ''}`,
-    ] as const),
-    ...testCase.requirements.map(item => [
-      `${testCase.caseId}:requirement:${item.id}`,
-      item.state ?? '',
-    ] as const),
-    [
-      `${testCase.caseId}:chain`,
-      testCase.chain.continuity ?? '',
-    ] as const,
-  ]))
+): string {
+  return sha256(JSON.stringify({
+    schemaVersion: annotations.schemaVersion,
+    kind: annotations.kind,
+    datasetId: annotations.datasetId,
+    datasetVersion: annotations.datasetVersion,
+    datasetHash: annotations.datasetHash,
+    reviewerId: annotations.reviewerId,
+    createdAt: annotations.createdAt,
+    cases: annotations.cases.map(testCase => ({
+      caseId: testCase.caseId,
+      criteria: testCase.criteria.map(criterion => ({
+        criterionId: criterion.criterionId,
+        verdict: criterion.verdict ?? null,
+        attribution: criterion.attribution ?? null,
+        evidenceRecordIds: criterion.evidenceRecordIds,
+        notes: criterion.notes,
+      })),
+      requirements: testCase.requirements.map(requirement => ({
+        id: requirement.id,
+        text: requirement.text,
+        required: requirement.required,
+        state: requirement.state ?? null,
+        evidenceRecordIds: requirement.evidenceRecordIds,
+        notes: requirement.notes,
+      })),
+      chain: {
+        continuity: testCase.chain.continuity ?? null,
+        failedTransition: testCase.chain.failedTransition ?? null,
+        evidenceRecordIds: testCase.chain.evidenceRecordIds,
+        notes: testCase.chain.notes,
+      },
+      notes: testCase.notes,
+    })),
+  }))
 }
 
 function agreement(values: Array<[string, string]>): number | undefined {
@@ -1385,13 +1599,63 @@ function agreement(values: Array<[string, string]>): number | undefined {
 function cohenKappa(values: Array<[string, string]>): number | undefined {
   if (values.length === 0) return undefined
   const labels = new Set(values.flatMap(value => value))
+  if (labels.size < 2) return undefined
   const observed = agreement(values)!
   const expected = [...labels].reduce((total, label) => {
     const left = values.filter(value => value[0] === label).length / values.length
     const right = values.filter(value => value[1] === label).length / values.length
     return total + left * right
   }, 0)
-  return expected === 1 ? observed === 1 ? 1 : 0 : (observed - expected) / (1 - expected)
+  return expected === 1 ? undefined : (observed - expected) / (1 - expected)
+}
+
+function marginals(
+  values: Array<[string, string]>,
+): { reviewerA: Record<string, number>; reviewerB: Record<string, number> } {
+  const count = (index: 0 | 1) => Object.fromEntries(
+    [...new Set(values.map(value => value[index]))]
+      .sort()
+      .map(label => [
+        label,
+        values.filter(value => value[index] === label).length,
+      ]),
+  )
+  return { reviewerA: count(0), reviewerB: count(1) }
+}
+
+function seededRandom(seed: string): () => number {
+  let state = Number.parseInt(sha256(seed).slice(0, 8), 16) || 1
+  return () => {
+    state = (state * 1_664_525 + 1_013_904_223) >>> 0
+    return state / 0x1_0000_0000
+  }
+}
+
+function bootstrapCi(
+  values: Array<[string, string]>,
+  metric: (sample: Array<[string, string]>) => number | undefined,
+  seed: string,
+  samples = 1_000,
+): MetricConfidenceInterval | undefined {
+  if (values.length < 2) return undefined
+  const random = seededRandom(seed)
+  const estimates: number[] = []
+  for (let iteration = 0; iteration < samples; iteration++) {
+    const sample = Array.from({ length: values.length }, () =>
+      values[Math.floor(random() * values.length)]!)
+    const estimate = metric(sample)
+    if (estimate !== undefined && Number.isFinite(estimate)) estimates.push(estimate)
+  }
+  if (estimates.length < 20) return undefined
+  estimates.sort((left, right) => left - right)
+  const selected = (quantile: number) =>
+    estimates[Math.min(estimates.length - 1, Math.floor((estimates.length - 1) * quantile))]!
+  return {
+    confidence: 0.95,
+    lower: selected(0.025),
+    upper: selected(0.975),
+    samples: estimates.length,
+  }
 }
 
 export function compareHumanAnnotations(
@@ -1409,27 +1673,132 @@ export function compareHumanAnnotations(
   if (left.reviewerId === right.reviewerId) {
     throw new Error('agreement requires two different reviewers')
   }
-  const leftLabels = annotationLabels(left)
-  const rightLabels = annotationLabels(right)
   const disagreements: AnnotationDisagreement[] = []
-  const criterionPairs: Array<[string, string]> = []
+  const allCriterionPairs: Array<[string, string]> = []
+  const criterionAgreement: AnnotationAgreementReport['criterionAgreement'] = {}
   const chainPairs: Array<[string, string]> = []
-  for (const key of new Set([...leftLabels.keys(), ...rightLabels.keys()])) {
-    const leftValue = leftLabels.get(key)
-    const rightValue = rightLabels.get(key)
-    if (key.includes(':criterion:') && leftValue !== undefined && rightValue !== undefined) {
-      criterionPairs.push([leftValue, rightValue])
+  const requirementDetectionPairs: Array<[string, string]> = []
+  const requirementStatePairs: Array<[string, string]> = []
+  const rightByCase = new Map(right.cases.map(testCase => [testCase.caseId, testCase]))
+  for (const leftCase of left.cases) {
+    const rightCase = rightByCase.get(leftCase.caseId)
+    if (rightCase === undefined) continue
+    const rightCriteria = new Map(rightCase.criteria.map(item => [item.criterionId, item]))
+    for (const criterionId of CRITERIA) {
+      const leftCriterion = leftCase.criteria.find(item => item.criterionId === criterionId)
+      const rightCriterion = rightCriteria.get(criterionId)
+      if (leftCriterion === undefined || rightCriterion === undefined) continue
+      const verdictPair: [string, string] = [
+        leftCriterion.verdict ?? '',
+        rightCriterion.verdict ?? '',
+      ]
+      const attributionPair: [string, string] = [
+        leftCriterion.attribution ?? '',
+        rightCriterion.attribution ?? '',
+      ]
+      allCriterionPairs.push([
+        `${verdictPair[0]}|${attributionPair[0]}`,
+        `${verdictPair[1]}|${attributionPair[1]}`,
+      ])
+      const current = criterionAgreement[criterionId] ?? {
+        sampleSize: 0,
+        verdictPairs: [] as Array<[string, string]>,
+        attributionPairs: [] as Array<[string, string]>,
+      }
+      const internal = current as typeof current & {
+        verdictPairs: Array<[string, string]>
+        attributionPairs: Array<[string, string]>
+      }
+      internal.sampleSize++
+      internal.verdictPairs.push(verdictPair)
+      internal.attributionPairs.push(attributionPair)
+      criterionAgreement[criterionId] = internal
+      if (verdictPair[0] !== verdictPair[1] || attributionPair[0] !== attributionPair[1]) {
+        disagreements.push({
+          caseId: leftCase.caseId,
+          subject: `criterion:${criterionId}`,
+          reviewerA: `${verdictPair[0]}|${attributionPair[0]}`,
+          reviewerB: `${verdictPair[1]}|${attributionPair[1]}`,
+        })
+      }
     }
-    if (key.endsWith(':chain') && leftValue !== undefined && rightValue !== undefined) {
-      chainPairs.push([leftValue, rightValue])
+    const leftRequirements = new Map(leftCase.requirements.map(item => [item.id, item]))
+    const rightRequirements = new Map(rightCase.requirements.map(item => [item.id, item]))
+    for (const requirementId of new Set([
+      ...leftRequirements.keys(),
+      ...rightRequirements.keys(),
+    ])) {
+      const leftRequirement = leftRequirements.get(requirementId)
+      const rightRequirement = rightRequirements.get(requirementId)
+      requirementDetectionPairs.push([
+        leftRequirement === undefined ? 'absent' : 'present',
+        rightRequirement === undefined ? 'absent' : 'present',
+      ])
+      if (leftRequirement !== undefined && rightRequirement !== undefined) {
+        requirementStatePairs.push([
+          leftRequirement.state ?? '',
+          rightRequirement.state ?? '',
+        ])
+      }
+      const leftValue = leftRequirement?.state
+      const rightValue = rightRequirement?.state
+      if (leftRequirement === undefined
+        || rightRequirement === undefined
+        || leftValue !== rightValue) {
+        disagreements.push({
+          caseId: leftCase.caseId,
+          subject: `requirement:${requirementId}`,
+          reviewerA: leftValue,
+          reviewerB: rightValue,
+        })
+      }
     }
-    if (leftValue !== rightValue) {
+    const chainPair: [string, string] = [
+      leftCase.chain.continuity ?? '',
+      rightCase.chain.continuity ?? '',
+    ]
+    chainPairs.push(chainPair)
+    if (chainPair[0] !== chainPair[1]) {
       disagreements.push({
-        caseId: key.split(':')[0]!,
-        subject: key.slice(key.indexOf(':') + 1),
-        reviewerA: leftValue,
-        reviewerB: rightValue,
+        caseId: leftCase.caseId,
+        subject: 'chain',
+        reviewerA: chainPair[0],
+        reviewerB: chainPair[1],
       })
+    }
+  }
+  for (const [criterionId, value] of Object.entries(criterionAgreement)) {
+    const internal = value as typeof value & {
+      verdictPairs: Array<[string, string]>
+      attributionPairs: Array<[string, string]>
+    }
+    criterionAgreement[criterionId] = {
+      sampleSize: internal.sampleSize,
+      verdictAgreement: agreement(internal.verdictPairs),
+      verdictKappa: cohenKappa(internal.verdictPairs),
+      verdictAgreementCi: bootstrapCi(
+        internal.verdictPairs,
+        agreement,
+        `${manifest.contentHash}:${criterionId}:verdict-agreement`,
+      ),
+      verdictKappaCi: bootstrapCi(
+        internal.verdictPairs,
+        cohenKappa,
+        `${manifest.contentHash}:${criterionId}:verdict-kappa`,
+      ),
+      attributionAgreement: agreement(internal.attributionPairs),
+      attributionKappa: cohenKappa(internal.attributionPairs),
+      attributionAgreementCi: bootstrapCi(
+        internal.attributionPairs,
+        agreement,
+        `${manifest.contentHash}:${criterionId}:attribution-agreement`,
+      ),
+      attributionKappaCi: bootstrapCi(
+        internal.attributionPairs,
+        cohenKappa,
+        `${manifest.contentHash}:${criterionId}:attribution-kappa`,
+      ),
+      verdictMarginals: marginals(internal.verdictPairs),
     }
   }
   const complete = (annotations: HumanEvaluationAnnotations) =>
@@ -1444,12 +1813,49 @@ export function compareHumanAnnotations(
     datasetHash: manifest.contentHash,
     reviewerA: left.reviewerId,
     reviewerB: right.reviewerId,
+    reviewerAHash: annotationContentHash(left),
+    reviewerBHash: annotationContentHash(right),
     completeCasesA: complete(left),
     completeCasesB: complete(right),
     totalCases: manifest.cases.length,
-    criterionExactAgreement: agreement(criterionPairs),
-    criterionKappa: cohenKappa(criterionPairs),
+    criterionExactAgreement: agreement(allCriterionPairs),
+    criterionKappa: cohenKappa(allCriterionPairs),
+    criterionExactAgreementCi: bootstrapCi(
+      allCriterionPairs,
+      agreement,
+      `${manifest.contentHash}:criterion-agreement`,
+    ),
+    criterionKappaCi: bootstrapCi(
+      allCriterionPairs,
+      cohenKappa,
+      `${manifest.contentHash}:criterion-kappa`,
+    ),
+    criterionAgreement,
+    requirementDetectionAgreement: agreement(requirementDetectionPairs),
+    requirementStateAgreement: agreement(requirementStatePairs),
+    requirementDetectionAgreementCi: bootstrapCi(
+      requirementDetectionPairs,
+      agreement,
+      `${manifest.contentHash}:requirement-detection`,
+    ),
+    requirementStateAgreementCi: bootstrapCi(
+      requirementStatePairs,
+      agreement,
+      `${manifest.contentHash}:requirement-state`,
+    ),
     chainExactAgreement: agreement(chainPairs),
+    chainKappa: cohenKappa(chainPairs),
+    chainExactAgreementCi: bootstrapCi(
+      chainPairs,
+      agreement,
+      `${manifest.contentHash}:chain-agreement`,
+    ),
+    chainKappaCi: bootstrapCi(
+      chainPairs,
+      cohenKappa,
+      `${manifest.contentHash}:chain-kappa`,
+    ),
+    chainMarginals: marginals(chainPairs),
     disagreements,
   }
 }
@@ -1524,16 +1930,25 @@ export async function loadAdjudicatedDataset(
       })),
       expectedRequirements: annotation.requirements.map(item => ({
         id: item.id,
+        text: item.text,
+        required: item.required,
         state: item.state!,
+        evidenceRecordIds: item.evidenceRecordIds,
       })),
-      expectedChainContinuity: annotation.chain.continuity,
+      expectedChain: {
+        continuity: annotation.chain.continuity!,
+        failedTransition: annotation.chain.failedTransition,
+        evidenceRecordIds: annotation.chain.evidenceRecordIds,
+      },
     }
   }))
-  return {
+  return createEvaluationDataset({
     schemaVersion: 1,
     id: manifest.id,
     version: manifest.version,
     description: manifest.description,
+    goldCompleteness: 'full-gold',
+    candidateManifestHash: manifest.contentHash,
     cases,
-  }
+  })
 }

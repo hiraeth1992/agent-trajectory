@@ -21,21 +21,12 @@ import type {
 import {
   capabilities,
   sessionKey,
+  SessionFormatError,
   sourceMetadata,
   type SessionSource,
   type SourceSessionRef,
 } from './types'
 
-const SESSION_FILE_NAMES = new Set([
-  'session.v4.jsonl.zstd',
-  'session.v4.jsonl.zst',
-  'session.v4.jsonl',
-])
-const SESSION_FILE_PRIORITY = new Map([
-  ['session.v4.jsonl', 0],
-  ['session.v4.jsonl.zst', 1],
-  ['session.v4.jsonl.zstd', 2],
-])
 const SESSION_PROTOCOL_FILE = /^session\.v(\d+)\.jsonl(?:\.zst|\.zstd)?$/
 const SUPPORTED_DSH_PROTOCOLS = ['dsh-session-v4']
 const PROBE_ENTRY_LIMIT = 256
@@ -92,7 +83,7 @@ async function walk(directory: string, output: string[]): Promise<void> {
     const absolute = path.join(directory, entry.name)
     if (entry.isDirectory()) {
       await walk(absolute, output)
-    } else if (entry.isFile() && SESSION_FILE_NAMES.has(entry.name)) {
+    } else if (entry.isFile() && SESSION_PROTOCOL_FILE.test(entry.name)) {
       output.push(absolute)
     }
   }))
@@ -253,9 +244,42 @@ export function inferredDshId(file: string, root = sessionsRoot): string {
 
 async function readSourceSessionId(file: string, root: string): Promise<string> {
   const inferred = inferredDshId(file, root)
-  if (path.basename(path.dirname(file)).startsWith('session-')) return inferred
+  if (path.basename(path.dirname(file)).startsWith('session-')) {
+    if (sessionGeneration(file) === 4 && file.endsWith('.jsonl')) {
+      const header = await readPlainHeader(file)
+      if (header.id !== inferred) {
+        throw new Error('DSH session id does not match its canonical directory')
+      }
+    }
+    return inferred
+  }
+  if (sessionGeneration(file) !== 4) return inferred
   const header = parseDshJsonl(await decompress(file)).header
   return header.id
+}
+
+async function readPlainHeader(file: string): Promise<SessionHeader> {
+  const handle = await fs.open(file, 'r')
+  try {
+    const buffer = Buffer.alloc(64 * 1024)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    const text = buffer.subarray(0, bytesRead).toString('utf8')
+    const newline = text.indexOf('\n')
+    if (newline < 0 && bytesRead === buffer.length) {
+      throw new Error('DSH session header exceeds 64 KiB')
+    }
+    const header = JSON.parse((newline < 0 ? text : text.slice(0, newline)).trim()) as SessionHeader
+    if (header.type !== 'session' || header.version !== 4 || typeof header.id !== 'string') {
+      throw new Error('unsupported session file: expected a v4 session header')
+    }
+    return header
+  } catch (error) {
+    throw new Error(
+      `invalid DSH session header: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  } finally {
+    await handle.close()
+  }
 }
 
 function fallbackTitle(sourceSessionId: string): string {
@@ -265,11 +289,47 @@ function fallbackTitle(sourceSessionId: string): string {
   return `DSH · ${distinctive.slice(0, 12)}`
 }
 
+function sessionGeneration(file: string): number {
+  const value = path.basename(file).match(SESSION_PROTOCOL_FILE)?.[1]
+  if (value === undefined) throw new Error('invalid DSH session generation')
+  return Number(value)
+}
+
+function compressionPriority(file: string): number {
+  return file.endsWith('.jsonl') ? 0 : file.endsWith('.zst') ? 1 : 2
+}
+
+function formatStatus(generation: number): NonNullable<SessionSummary['formatStatus']> {
+  return generation === 4
+    ? 'current'
+    : generation < 4 ? 'migration-required' : 'unsupported-future'
+}
+
 function assertRef(ref: SourceSessionRef, root: string): string {
   if (ref.source !== 'dsh') throw new Error('invalid DSH session reference')
+  if (ref.summary.formatStatus === 'corrupt') {
+    throw new SessionFormatError(
+      ref.summary.formatDetail ?? 'DSH session file is corrupt',
+      'session_corrupt',
+    )
+  }
   const file = path.resolve(ref.locator)
-  if (!file.startsWith(`${root}${path.sep}`) || !SESSION_FILE_NAMES.has(path.basename(file))) {
+  if (!file.startsWith(`${root}${path.sep}`)
+    || !SESSION_PROTOCOL_FILE.test(path.basename(file))) {
     throw new Error('invalid DSH session locator')
+  }
+  const generation = sessionGeneration(file)
+  if (generation < 4) {
+    throw new SessionFormatError(
+      `DSH session v${generation} requires a read-only migration adapter before it can be loaded`,
+      'session_migration_required',
+    )
+  }
+  if (generation > 4) {
+    throw new SessionFormatError(
+      `DSH session v${generation} is newer than supported v4`,
+      'session_protocol_unsupported',
+    )
   }
   return file
 }
@@ -291,6 +351,10 @@ export class DshSource implements SessionSource {
     })
   }
 
+  metrics() {
+    return { cache: this.cache.metrics() }
+  }
+
   async probe(): Promise<SourceStatus> {
     try {
       await fs.access(this.sessionsRoot)
@@ -307,19 +371,6 @@ export class DshSource implements SessionSource {
           ? 'dsh:session:none'
           : `dsh:session:v${versions.join(',v')}`,
       }
-      if (versions.length > 0 && !versions.includes(4) && detection.complete) {
-        return {
-          source: this.id,
-          availability: 'blocked',
-          ...sourceMetadata(this.id),
-          version: detected,
-          sessionCount: 0,
-          capabilities: DSH_CAPABILITIES,
-          reason: 'unsupported_dsh_protocol',
-          detail: `检测到 ${detected}；当前仅支持 ${SUPPORTED_DSH_PROTOCOLS.join(', ')}`,
-          protocol,
-        }
-      }
       const bounded = !detection.complete
       return {
         source: this.id,
@@ -328,10 +379,10 @@ export class DshSource implements SessionSource {
         version: 'Session v4',
         sessionCount: 0,
         capabilities: DSH_CAPABILITIES,
-        ...(unsupported.length > 0 && versions.includes(4)
+        ...(unsupported.length > 0
           ? {
-              reason: 'additional_dsh_protocols_ignored',
-              detail: `继续读取 Session v4；已忽略未知版本：${
+              reason: 'additional_dsh_protocols_visible',
+              detail: `Session v4 可读取；其他 generation 会保留在列表中：${
                 unsupported.map(version => `v${version}`).join(', ')
               }`,
             }
@@ -361,31 +412,60 @@ export class DshSource implements SessionSource {
   async list(): Promise<readonly SourceSessionRef[]> {
     const files: string[] = []
     await walk(this.sessionsRoot, files)
-    const discovered = await Promise.all(files.map(async (file): Promise<SourceSessionRef> => {
+    const byDirectory = new Map<string, string[]>()
+    for (const file of files) {
+      const directory = path.dirname(file)
+      const current = byDirectory.get(directory) ?? []
+      current.push(file)
+      byDirectory.set(directory, current)
+    }
+    const selected = [...byDirectory.values()].map((group) => {
+      return [...group].sort((left, right) =>
+        sessionGeneration(right) - sessionGeneration(left)
+        || compressionPriority(left) - compressionPriority(right)
+        || left.localeCompare(right))[0]!
+    })
+    const discovered = await Promise.all(selected.map(async (file): Promise<SourceSessionRef> => {
       const stat = await fs.stat(file)
-      const sourceSessionId = await readSourceSessionId(file, this.sessionsRoot)
+      const generation = sessionGeneration(file)
+      let sourceSessionId: string
+      let selectedStatus = formatStatus(generation)
+      let formatDetail: string | undefined
+      try {
+        sourceSessionId = await readSourceSessionId(file, this.sessionsRoot)
+      } catch (error) {
+        sourceSessionId = inferredDshId(file, this.sessionsRoot)
+        selectedStatus = 'corrupt'
+        formatDetail = error instanceof Error ? error.message : String(error)
+      }
       const cached = this.cache.peek(file)?.detail.summary
       const summary: SessionSummary = {
         ...(cached ?? {
           id: sessionKey(this.id, sourceSessionId),
           source: this.id,
           sourceSessionId,
-          format: 'session-v4',
+          format: `session-v${generation}`,
           capabilities: DSH_CAPABILITIES,
           cwd: '',
           title: fallbackTitle(sourceSessionId),
           createdAt: stat.birthtimeMs || stat.mtimeMs,
-          rawVersion: 4,
+          rawVersion: generation,
         }),
         updatedAt: stat.mtimeMs,
         size: stat.size,
+        formatStatus: selectedStatus,
+        formatDetail: formatDetail
+          ?? (selectedStatus === 'migration-required'
+            ? `Session v${generation} 需要只读迁移适配器`
+            : selectedStatus === 'unsupported-future'
+              ? `Session v${generation} 高于当前支持的 v4`
+              : undefined),
       }
       return { source: this.id, sourceSessionId, locator: file, summary }
     }))
     const bySession = new Map<string, SourceSessionRef>()
     for (const ref of discovered.sort((left, right) =>
-      (SESSION_FILE_PRIORITY.get(path.basename(left.locator)) ?? Number.MAX_SAFE_INTEGER)
-      - (SESSION_FILE_PRIORITY.get(path.basename(right.locator)) ?? Number.MAX_SAFE_INTEGER)
+      sessionGeneration(right.locator) - sessionGeneration(left.locator)
       || right.summary.updatedAt - left.summary.updatedAt
       || left.locator.localeCompare(right.locator))) {
       if (!bySession.has(ref.sourceSessionId)) bySession.set(ref.sourceSessionId, ref)

@@ -1,6 +1,12 @@
 export type JsonObject = Record<string, unknown>
 
-export type SourceId = 'dsh' | 'codex' | 'zcode'
+export const SOURCE_IDS = ['dsh', 'codex', 'zcode'] as const
+export type SourceId = typeof SOURCE_IDS[number]
+
+export function isSourceId(value: unknown): value is SourceId {
+  return typeof value === 'string'
+    && (SOURCE_IDS as readonly string[]).includes(value)
+}
 
 export type SourceAvailability = 'available' | 'degraded' | 'blocked'
 
@@ -293,6 +299,8 @@ export interface SessionSummary {
   size: number
   rawVersion?: number | string
   eventCount?: number
+  formatStatus?: 'current' | 'migration-required' | 'unsupported-future' | 'corrupt'
+  formatDetail?: string
 }
 
 export interface SessionDetail {

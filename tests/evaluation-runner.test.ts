@@ -1,14 +1,32 @@
 import { describe, expect, it } from 'vitest'
 import { MINIMAL_GOLD_DATASET } from '../server/evaluation/gold-dataset'
+import { createEvaluationDataset } from '../server/evaluation/identity'
 import {
   compareEvaluationRuns,
   evaluationRunMarkdown,
   runEvaluationDataset,
 } from '../server/evaluation/runner'
-import type { EvaluationRun } from '../src/evaluation-types'
+import type {
+  EvaluationDataset,
+  EvaluationRun,
+} from '../src/evaluation-types'
+
+function rebuild(
+  dataset: EvaluationDataset,
+  mutate: (draft: EvaluationDataset) => void,
+): EvaluationDataset {
+  const draft = structuredClone(dataset)
+  mutate(draft)
+  const {
+    datasetHash: _datasetHash,
+    goldHash: _goldHash,
+    ...hashable
+  } = draft
+  return createEvaluationDataset(hashable)
+}
 
 describe('local evaluation runner', () => {
-  it('runs the 12-case split Gold dataset with stable exact results', () => {
+  it('runs the synthetic contract dataset with stable assertion results', () => {
     const first = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
@@ -16,6 +34,11 @@ describe('local evaluation runner', () => {
       createdAt: '2026-10-26T00:00:00.000Z',
     })
 
+    expect(MINIMAL_GOLD_DATASET).toMatchObject({
+      goldCompleteness: 'partial-contract',
+      datasetHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      goldHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    })
     expect(MINIMAL_GOLD_DATASET.cases).toHaveLength(12)
     expect(new Set(MINIMAL_GOLD_DATASET.cases.map(item => item.target.source)))
       .toEqual(new Set(['dsh', 'codex', 'zcode']))
@@ -25,13 +48,18 @@ describe('local evaluation runner', () => {
       .toHaveLength(6)
     expect(first.aggregate).toMatchObject({
       cases: 12,
-      exactCases: 12,
-      exactAgreement: 1,
+      assertionsPassed: 31,
+      assertionsTotal: 31,
+      assertionAgreement: 1,
+      exactEligibleCases: 0,
+      exactCases: 0,
+      exactAgreement: undefined,
       falsePositives: 0,
       falseNegatives: 0,
       evaluatorError: 0,
     })
-    expect(first.cases.every(item => item.error === undefined)).toBe(true)
+    expect(first.cases.every(item =>
+      item.error === undefined && item.exact === undefined)).toBe(true)
     expect(second.runId).toBe(first.runId)
     expect(second.cases.map(item => ({
       caseId: item.caseId,
@@ -39,64 +67,180 @@ describe('local evaluation runner', () => {
       results: item.results,
       requirements: item.requirements,
       chain: item.chain,
-      exact: item.exact,
+      assertions: item.assertions,
     }))).toEqual(first.cases.map(item => ({
       caseId: item.caseId,
       factsHash: item.factsHash,
       results: item.results,
       requirements: item.requirements,
       chain: item.chain,
-      exact: item.exact,
+      assertions: item.assertions,
     })))
   })
 
-  it('renders a human-readable report without a synthetic score', () => {
+  it('renders partial assertions without claiming full-Gold exact agreement', () => {
     const run = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
     const report = evaluationRunMarkdown(run)
 
     expect(report).toContain('# EvaluationRun')
-    expect(report).toContain('Exact agreement: 12/12 (100.0%)')
-    expect(report).toContain('FP / FN: 0 / 0')
-    expect(report).toContain('Eligible denominator:')
-    expect(report).toContain('| zcode-verified-success | calibration | yes | 0 |')
+    expect(report).toContain('Assertion agreement: 31/31 (100.0%)')
+    expect(report).toContain('Full-Gold exact agreement: N/A (partial contract)')
+    expect(report).toContain('Dataset hash:')
+    expect(report).toContain('Gold hash:')
+    expect(report).toContain('| zcode-verified-success | calibration | 4/4 | N/A | 0 |')
     expect(report).not.toMatch(/总分|score/i)
   })
 
-  it('rejects incomparable baselines and locates comparable regressions', () => {
+  it('binds run identity and comparability to dataset and Gold contents', () => {
     const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
-    const incompatible: EvaluationRun = {
-      ...structuredClone(baseline),
-      datasetVersion: '2',
-    }
-    expect(compareEvaluationRuns(baseline, incompatible)).toMatchObject({
-      comparable: false,
-      reasons: ['dataset version differs'],
+    const changedGold = rebuild(MINIMAL_GOLD_DATASET, (draft) => {
+      draft.cases[0]!.expected[0]!.verdict = 'fail'
+    })
+    const changedRun = runEvaluationDataset(changedGold, {
+      createdAt: '2026-10-25T00:00:00.000Z',
     })
 
-    const candidate = structuredClone(baseline)
-    candidate.cases[0]!.exact = false
-    candidate.cases[0]!.mismatches.push({
-      criterionId: 'outcome',
-      expected: 'pass',
-      actual: 'warning',
+    expect(changedGold.datasetHash).toBe(MINIMAL_GOLD_DATASET.datasetHash)
+    expect(changedGold.goldHash).not.toBe(MINIMAL_GOLD_DATASET.goldHash)
+    expect(changedRun.runId).not.toBe(baseline.runId)
+    expect(compareEvaluationRuns(baseline, changedRun)).toMatchObject({
+      comparable: false,
+      gateDecision: 'inconclusive',
+      reasons: ['Gold hash differs'],
     })
-    candidate.cases[0]!.results.find(result =>
-      result.criterionId === 'outcome')!.verdict = 'warning'
+
+    const tampered = structuredClone(MINIMAL_GOLD_DATASET)
+    tampered.cases[0]!.description = 'changed without rebuilding identity'
+    expect(() => runEvaluationDataset(tampered)).toThrow(/content hash mismatch/)
+  })
+
+  it('keeps abstentions and evaluator errors out of FP/FN', () => {
+    const abstaining = rebuild(MINIMAL_GOLD_DATASET, (draft) => {
+      const live = draft.cases.find(item => item.id === 'dsh-live-session')!
+      live.expected = [{ criterionId: 'outcome', verdict: 'fail' }]
+    })
+    const abstainingRun = runEvaluationDataset(abstaining)
+    expect(abstainingRun.aggregate).toMatchObject({
+      abstentions: 1,
+      confusionErrors: 0,
+      falseNegatives: 0,
+    })
+
+    const crashing = rebuild(MINIMAL_GOLD_DATASET, (draft) => {
+      draft.cases = [draft.cases[0]!]
+      draft.cases[0]!.expected = [{ criterionId: 'outcome', verdict: 'fail' }]
+      ;(draft.cases[0]!.detail.projection as unknown as { records: unknown }).records = undefined
+    })
+    const crashingRun = runEvaluationDataset(crashing)
+    expect(crashingRun.aggregate).toMatchObject({
+      confusionErrors: 1,
+      falseNegatives: 0,
+      evaluatorError: 1,
+    })
+    expect(crashingRun.cases[0]).toMatchObject({
+      assertionsPassed: 0,
+      assertionsTotal: 1,
+      error: expect.any(String),
+      mismatches: [{ criterionId: 'evaluation-run' }],
+    })
+  })
+
+  it('allows evaluator build experiments and gates directional regressions', () => {
+    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+      evaluatorBuildHash: 'build-a',
+    })
+    const sameOutput = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+      evaluatorBuildHash: 'build-b',
+    })
+    expect(compareEvaluationRuns(baseline, sameOutput)).toMatchObject({
+      comparable: true,
+      gateDecision: 'pass',
+      improvedCaseIds: [],
+      regressedCaseIds: [],
+      mixedCaseIds: [],
+      inconclusiveCaseIds: [],
+      unchangedCaseIds: expect.arrayContaining(['zcode-verified-success']),
+    })
+
+    const candidate = structuredClone(sameOutput)
+    const first = candidate.cases[0]!
+    first.results.find(result => result.criterionId === 'outcome')!.verdict = 'fail'
+    const assertion = first.assertions.find(item => item.subject === 'outcome')!
+    assertion.actual = 'fail|agent|validation-1'
+    assertion.passed = false
+    first.assertionsPassed--
+    first.mismatches.push({
+      criterionId: 'outcome',
+      expected: assertion.expected,
+      actual: assertion.actual,
+    })
 
     expect(compareEvaluationRuns(baseline, candidate)).toMatchObject({
       comparable: true,
-      improvedCaseIds: [],
+      gateDecision: 'fail',
       regressedCaseIds: ['zcode-verified-success'],
-      changedCriteria: [{
+      changedCriteria: [expect.objectContaining({
         caseId: 'zcode-verified-success',
         criterionId: 'outcome',
         baseline: 'pass',
-        candidate: 'warning',
-      }],
+        candidate: 'fail',
+        direction: 'regressed',
+      })],
+    })
+  })
+
+  it('treats evaluator crashes as regressions even when mismatch counts do not grow', () => {
+    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET)
+    const candidate = structuredClone(baseline)
+    const first = candidate.cases[0]!
+    first.error = 'boom'
+    first.results = [{
+      ...first.results[0]!,
+      criterionId: 'evaluation-run',
+      verdict: 'evaluator_error',
+      attribution: 'evaluator',
+    }]
+    first.mismatches = []
+
+    expect(compareEvaluationRuns(baseline, candidate)).toMatchObject({
+      comparable: true,
+      gateDecision: 'fail',
+      regressedCaseIds: ['zcode-verified-success'],
+    })
+  })
+
+  it('gates aggregate classification and coverage regressions', () => {
+    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET)
+    const falsePositive = structuredClone(baseline)
+    falsePositive.aggregate.falsePositives++
+    expect(compareEvaluationRuns(baseline, falsePositive)).toMatchObject({
+      gateDecision: 'fail',
+      gateReasons: ['false positive count increased'],
+    })
+
+    const abstaining = structuredClone(baseline)
+    abstaining.aggregate.abstentions++
+    expect(compareEvaluationRuns(baseline, abstaining)).toMatchObject({
+      gateDecision: 'inconclusive',
+      gateReasons: ['abstention count increased'],
+    })
+  })
+
+  it('rejects old or incompatible run protocols', () => {
+    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET)
+    const incompatible = {
+      ...structuredClone(baseline),
+      schemaVersion: 1,
+    } as unknown as EvaluationRun
+
+    expect(compareEvaluationRuns(baseline, incompatible)).toMatchObject({
+      comparable: false,
+      gateDecision: 'inconclusive',
+      reasons: ['run schema version is not supported'],
     })
   })
 })

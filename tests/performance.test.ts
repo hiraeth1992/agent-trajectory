@@ -97,6 +97,60 @@ describe('large trajectory baseline', () => {
     }
   }, 10_000)
 
+  it('measures a 10k history plus one append before deeper worker optimization', async () => {
+    const header: SessionHeader = {
+      type: 'session',
+      version: 4,
+      id: 'session-append-benchmark',
+      createdAt: 1_000,
+      cwd: '/workspace/benchmark',
+    }
+    const events: SessionEvent[] = Array.from({ length: 10_000 }, (_, seq) => ({
+      type: 'turn/start',
+      seq,
+      time: 1_000 + seq,
+      data: { turn: seq + 1 },
+    }))
+    const appended: SessionEvent = {
+      type: 'turn/start',
+      seq: events.length,
+      time: 1_000 + events.length,
+      data: { turn: events.length + 1 },
+    }
+    const worker = new ProjectionWorkerClient()
+    try {
+      await worker.projectDsh('performance:append', header, events)
+      const started = performance.now()
+      const projection = await worker.projectDsh(
+        'performance:append',
+        header,
+        [...events, appended],
+        [appended],
+      )
+      const duration = performance.now() - started
+      const metrics = worker.metrics()
+
+      expect(projection.eventCount).toBe(10_001)
+      expect(duration).toBeLessThan(3_000)
+      expect(metrics).toMatchObject({
+        requests: 2,
+        snapshots: 1,
+        appends: 1,
+        snapshotFallbacks: 0,
+        payloadBytes: expect.any(Number),
+        queueWaitMs: { p95: expect.any(Number) },
+        roundTripMs: { p95: expect.any(Number) },
+        workerExecutionMs: { p95: expect.any(Number) },
+        ipcOverheadMs: { p95: expect.any(Number) },
+        workerStateEntries: 1,
+        workerStateBytes: expect.any(Number),
+        processRssBytes: expect.any(Number),
+      })
+    } finally {
+      await worker.close()
+    }
+  }, 10_000)
+
   it('redacts long tool outputs without a credential-scanning regression', () => {
     const privateValues = [
       'long-private-token',

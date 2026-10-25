@@ -24,7 +24,8 @@ import type {
 
 export const LOCAL_TRAJECTORY_EVALUATOR_ID = 'local-trajectory'
 export const LOCAL_TRAJECTORY_EVALUATOR_VERSION = '1'
-export const EVALUATION_FACTS_SCHEMA_VERSION = 1
+export const EVALUATION_FACTS_SCHEMA_VERSION = 3
+export const EVALUATION_COVERAGE_POLICY_VERSION = 2
 
 export interface TrajectoryEvaluationOptions {
   target: EvaluationTargetRef
@@ -70,6 +71,40 @@ const ALL_CRITERIA: LocalTrajectoryCriterionId[] = [
   'observability',
 ]
 
+const COVERAGE_DEPENDENCIES: Record<string, LocalTrajectoryCriterionId[]> = {
+  'approval/asked': ['reliability', 'observability'],
+  'approval/decided': ['reliability', 'observability'],
+  'approval/policy': ['reliability', 'observability'],
+  'assistant/attempt': ['reliability', 'recovery'],
+  'command/done': ['outcome', 'observability'],
+  'command/run': ['outcome', 'observability'],
+  'deliverables/presented': ['outcome'],
+  'goal/change': ['outcome', 'reliability'],
+  'image/offload': ['outcome', 'observability'],
+  'llm/retry': ['reliability', 'recovery', 'efficiency'],
+  'permission/preset': ['reliability', 'observability'],
+  'request/context': ['outcome', 'observability'],
+  'request/header': ['outcome', 'observability'],
+  'sandbox/mode': ['reliability', 'observability'],
+  'step/end': ['reliability', 'efficiency', 'observability'],
+  'step/start': ['reliability', 'efficiency', 'observability'],
+  'todo/write': ['outcome', 'reliability'],
+  'turn/end': ['outcome', 'reliability', 'observability'],
+  'turn/start': ['reliability', 'observability'],
+  'workspace/changes': ['outcome', 'observability'],
+}
+
+const REQUIRED_RAW_ONLY_FACTS = new Set([
+  'approval/decided',
+  'command/done',
+  'deliverables/presented',
+  'workspace/changes',
+])
+
+function coverageDependencies(type: string): LocalTrajectoryCriterionId[] {
+  return COVERAGE_DEPENDENCIES[type] ?? ALL_CRITERIA
+}
+
 export function buildFactsQualityReport(
   detail: SessionDetail,
   options: TrajectoryEvaluationOptions,
@@ -90,6 +125,13 @@ export function buildFactsQualityReport(
     record.spanId === undefined ? [] : [record.spanId]))
   const brokenParentSpans = records.filter(record =>
     record.parentSpanId !== undefined && !spanIds.has(record.parentSpanId))
+  const coverage = detail.projection.coverage ?? []
+  const coverageTotal = detail.projection.coverageSummary?.total
+    ?? coverage.reduce((total, item) => total + item.total, 0)
+  const coverageConsumed = detail.projection.coverageSummary?.consumed
+    ?? coverage.reduce((total, item) => total + item.consumed, 0)
+  const coverageGap = detail.projection.coverageSummary?.gap
+    ?? Math.max(0, coverageTotal - coverageConsumed)
   const issues: FactsQualityIssue[] = []
 
   if (options.sourceStatus?.availability === 'blocked') {
@@ -122,6 +164,25 @@ export function buildFactsQualityReport(
         detail.projection.unknownEventTypes.join(', ')
       }。`,
       affectedCriterionIds: ALL_CRITERIA,
+    }))
+  }
+  for (const item of coverage) {
+    const gap = item.total - item.consumed
+    if (gap <= 0) continue
+    const semanticFailure = item.disposition === 'folded-state'
+    const unsupported = item.disposition === 'unsupported'
+    const requiredRawOnly = item.disposition === 'raw-only'
+      && REQUIRED_RAW_ONLY_FACTS.has(item.type)
+    issues.push(issue({
+      id: `coverage-gap:${item.type}`,
+      category: 'coverage',
+      severity: semanticFailure || unsupported || requiredRawOnly
+        ? 'blocking'
+        : 'warning',
+      summary: `${gap}/${item.total} 个 ${item.type} 事件未进入语义事实（${
+        item.disposition
+      }）${item.reason === undefined ? '。' : `：${item.reason}`}`,
+      affectedCriterionIds: coverageDependencies(item.type),
     }))
   }
   if (runningRecords.length > 0) {
@@ -205,6 +266,7 @@ export function buildFactsQualityReport(
     item.severity === 'blocking' ? item.affectedCriterionIds : []))
   return {
     schemaVersion: EVALUATION_FACTS_SCHEMA_VERSION,
+    coveragePolicyVersion: EVALUATION_COVERAGE_POLICY_VERSION,
     source: detail.summary.source,
     sourceCapabilities: detail.summary.capabilities,
     sourceProtocol: options.sourceStatus === undefined
@@ -227,6 +289,9 @@ export function buildFactsQualityReport(
       toolRecordsMissingOutput: toolRecordsMissingOutput.length,
       brokenParentSpans: brokenParentSpans.length,
       unknownEventTypes: detail.projection.unknownEventTypes.length,
+      coverageTotal,
+      coverageConsumed,
+      coverageGap,
     },
     ready: blockedCriterionIds.length === 0,
     issues,
@@ -330,40 +395,129 @@ function supersedesEarlier(text: string): boolean {
   return /(?:改为|改成|不要再|取消|忽略前|替代|instead|rather than)/iu.test(text)
 }
 
+type RequirementKind = RequirementResult['kind']
+
+interface RequirementCandidate {
+  id: string
+  text: string
+  kind: RequirementKind
+  introducedTurn: number
+  sourceRecordId?: string
+  dependsOn: string[]
+  evidenceRecordIds: string[]
+  supersedes: boolean
+}
+
+function requirementKind(text: string): RequirementKind {
+  if (/(?:不要|禁止|不得|避免|must not|do not|never)/iu.test(text)) {
+    return 'prohibition'
+  }
+  if (/(?:验收|通过条件|完成标准|必须通过|验证|测试|acceptance|verify|test)/iu.test(text)) {
+    return 'acceptance'
+  }
+  if (/(?:保留|兼容|只能|必须|需要|限制|不能|不应|constraint|preserve|compatible)/iu.test(text)) {
+    return 'constraint'
+  }
+  return 'deliverable'
+}
+
+function atomicRequirementTexts(text: string): string[] {
+  const normalized = text
+    .replace(/\r\n?/g, '\n')
+    .replace(/^\s*(?:[-*]|\d+[.)、])\s+/gm, '')
+    .trim()
+  if (normalized === '') return []
+  const listParts = normalized.split(/\n+/).map(value => value.trim()).filter(Boolean)
+  const candidates = listParts.length > 1
+    ? listParts
+    : normalized.split(
+        /(?:；|;|，并且|，同时|，另外|，以及|并且|同时|另外|以及|\band\b|\balso\b)/iu,
+      ).map(value => value.trim()).filter(Boolean)
+  return candidates.length <= 12 ? candidates : [normalized]
+}
+
+function requirementCandidates(
+  detail: SessionDetail,
+  analysis: TrajectoryAnalysis,
+): RequirementCandidate[] {
+  const records = requirementRecords(detail)
+  if (records.length === 0) {
+    return [{
+      id: 'requirement:objective:01',
+      text: analysis.objective,
+      kind: 'deliverable',
+      introducedTurn: 0,
+      dependsOn: [],
+      evidenceRecordIds: [],
+      supersedes: false,
+    }]
+  }
+  return records.flatMap(record =>
+    atomicRequirementTexts(recordText(record)).map((text, index) => ({
+      id: `requirement:${record.id}:${String(index + 1).padStart(2, '0')}`,
+      text: compact(text),
+      kind: requirementKind(text),
+      introducedTurn: record.turn,
+      sourceRecordId: record.id,
+      dependsOn: [],
+      evidenceRecordIds: [record.id],
+      supersedes: supersedesEarlier(text),
+    })))
+}
+
+function supersededCandidate(
+  candidates: RequirementCandidate[],
+  selectedIndex: number,
+): number | undefined {
+  const selected = candidates[selectedIndex]!
+  if (!selected.supersedes) return undefined
+  for (let index = selectedIndex - 1; index >= 0; index--) {
+    const candidate = candidates[index]!
+    if (candidate.kind === selected.kind
+      || candidate.kind === 'deliverable' && selected.kind === 'deliverable') {
+      return index
+    }
+  }
+  return undefined
+}
+
 export function buildRequirementResults(
   detail: SessionDetail,
   analysis: TrajectoryAnalysis,
   quality: FactsQualityReport,
 ): RequirementResult[] {
-  const records = requirementRecords(detail)
-  const candidates = records.length > 0
-    ? records.map(record => ({
-        id: `requirement:${record.id}`,
-        text: compact(recordText(record)),
-        evidenceRecordIds: [record.id],
-      }))
-    : [{
-        id: 'requirement:objective',
-        text: analysis.objective,
-        evidenceRecordIds: [],
-      }]
-  const lastSupersedingIndex = candidates.reduce((selected, candidate, index) =>
-    supersedesEarlier(candidate.text) ? index : selected, -1)
-  const active = candidates.filter((_candidate, index) => index >= lastSupersedingIndex)
+  const candidates = requirementCandidates(detail, analysis)
+  const superseded = new Map<number, string>()
+  for (const [index, candidate] of candidates.entries()) {
+    const target = supersededCandidate(candidates, index)
+    if (target !== undefined) superseded.set(target, candidate.id)
+    if (candidate.kind === 'acceptance') {
+      const dependency = [...candidates.slice(0, index)].reverse().find(item =>
+        item.kind === 'deliverable' && !superseded.has(candidates.indexOf(item)))
+      if (dependency !== undefined) candidate.dependsOn.push(dependency.id)
+    }
+  }
+  const active = candidates.filter((_candidate, index) => !superseded.has(index))
   const blocked = quality.blockedCriterionIds.includes('outcome')
 
   return candidates.map((candidate, index) => {
-    if (lastSupersedingIndex > 0 && index < lastSupersedingIndex) {
+    const {
+      supersedes: _supersedes,
+      ...base
+    } = candidate
+    const supersededBy = superseded.get(index)
+    if (supersededBy !== undefined) {
       return {
-        ...candidate,
+        ...base,
         required: false,
         state: 'superseded',
+        supersededBy,
         reason: '后续用户要求明确替代或取消了此前要求。',
       }
     }
     if (blocked) {
       return {
-        ...candidate,
+        ...base,
         required: true,
         state: 'insufficient_evidence',
         reason: '结果判据被事实质量门禁短路。',
@@ -371,7 +525,7 @@ export function buildRequirementResults(
     }
     if (active.length > 1) {
       return {
-        ...candidate,
+        ...base,
         required: true,
         state: 'insufficient_evidence',
         reason: '轨迹没有逐项验收证据，不能把整体结果自动分摊到多个要求。',
@@ -379,7 +533,7 @@ export function buildRequirementResults(
     }
     if (analysis.outcome.tone === 'positive') {
       return {
-        ...candidate,
+        ...base,
         required: true,
         state: 'implemented',
         evidenceRecordIds: unique([
@@ -391,7 +545,7 @@ export function buildRequirementResults(
     }
     if (analysis.outcome.tone === 'negative') {
       return {
-        ...candidate,
+        ...base,
         required: true,
         state: 'understood_unimplemented',
         evidenceRecordIds: unique([
@@ -402,7 +556,7 @@ export function buildRequirementResults(
       }
     }
     return {
-      ...candidate,
+      ...base,
       required: true,
       state: 'insufficient_evidence',
       reason: analysis.outcome.summary,
@@ -413,7 +567,19 @@ export function buildRequirementResults(
 const CONTINUITY_REFERENCE = /(?:继续|按(?:照)?|基于|前述|上述|前面|已确认|方案|计划|建议)/u
 const CONTINUITY_FAILURE = /(?:忘了|遗漏|没有按|没按|未按|前面.+(?:丢|漏|没)|不对|错误继承)/u
 
-export function buildChainResult(detail: SessionDetail): ChainResult {
+function turnActionEvidence(detail: SessionDetail, turn: number): string[] {
+  return detail.projection.records
+    .filter(record => record.turn === turn
+      && (record.kind === 'assistant'
+        || record.kind === 'tool'
+        || record.kind === 'subtool'))
+    .map(record => record.id)
+}
+
+export function buildChainResult(
+  detail: SessionDetail,
+  requirements: RequirementResult[] = [],
+): ChainResult {
   const records = requirementRecords(detail)
   const byTurn = new Map<number, TrajectoryRecord[]>()
   for (const record of records) {
@@ -435,24 +601,54 @@ export function buildChainResult(detail: SessionDetail): ChainResult {
     const [fromTurn, fromRecords] = turns[index - 1]!
     const [toTurn, toRecords] = turns[index]!
     const text = toRecords.map(recordText).join('\n')
+    const actionEvidence = turnActionEvidence(detail, toTurn)
+    const requirementIds = requirements
+      .filter(requirement =>
+        requirement.introducedTurn <= fromTurn && requirement.required)
+      .map(requirement => requirement.id)
     const evidenceRecordIds = [
       ...fromRecords.map(record => record.id),
       ...toRecords.map(record => record.id),
+      ...actionEvidence,
     ]
+    const inputContinuity = CONTINUITY_FAILURE.test(text)
+      ? 'missing'
+      : CONTINUITY_REFERENCE.test(text) ? 'normal' : 'insufficient_evidence'
+    const actionContinuity = inputContinuity === 'missing'
+      ? 'missing'
+      : actionEvidence.length > 0 && inputContinuity === 'normal'
+        ? 'normal'
+        : 'insufficient_evidence'
+    const resultContinuity = detail.projection.turns.find(turn =>
+      turn.number === toTurn)?.status === 'complete'
+      && actionContinuity === 'normal'
+      ? 'normal'
+      : actionContinuity === 'missing' ? 'missing' : 'insufficient_evidence'
+    const continuity = inputContinuity === 'missing'
+      || actionContinuity === 'missing'
+      || resultContinuity === 'missing'
+      ? 'missing'
+      : inputContinuity === 'normal'
+        && actionContinuity === 'normal'
+        && resultContinuity === 'normal'
+        ? 'normal'
+        : 'insufficient_evidence'
     transitions.push({
       fromTurn,
       toTurn,
-      continuity: CONTINUITY_FAILURE.test(text)
-        ? 'missing'
-        : CONTINUITY_REFERENCE.test(text)
-          ? 'normal'
-          : 'insufficient_evidence',
+      continuity,
+      requirementIds,
+      carryover: {
+        input: inputContinuity,
+        action: actionContinuity,
+        result: resultContinuity,
+      },
       evidenceRecordIds,
-      reason: CONTINUITY_FAILURE.test(text)
+      reason: continuity === 'missing'
         ? '用户在后续轮次明确指出前序信息被遗漏或错误继承。'
-        : CONTINUITY_REFERENCE.test(text)
-          ? '后续要求显式引用前序方案、要求或结论。'
-          : '轨迹没有足够的结构化证据判断跨轮信息是否正确承接。',
+        : continuity === 'normal'
+          ? '后续输入、行动和完成边界均有承接证据。'
+          : '后续输入可能引用前序内容，但行动或结果证据不足，保持证据不足。',
     })
   }
   const failed = transitions.find(transition =>
@@ -493,7 +689,7 @@ export function evaluateTrajectory(
 ): TrajectoryEvaluation {
   const factsQuality = buildFactsQualityReport(detail, options)
   const requirements = buildRequirementResults(detail, analysis, factsQuality)
-  const chain = buildChainResult(detail)
+  const chain = buildChainResult(detail, requirements)
   const results = analysis.evaluations.map(evaluation =>
     mapEvaluation(evaluation, factsQuality))
   const factsHash = evaluationFactsHash({

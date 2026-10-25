@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { DiagnosisEvidenceSnapshot } from './evidence-store'
+import { appendDiagnosisEvidenceAccess } from './access-ledger'
 
 const SNAPSHOT_ID = /^[A-Za-z0-9_-]{20,80}$/
 const MAX_LIMIT = 50
@@ -76,7 +77,7 @@ function boundedValue(value: unknown, maxBytes: number): unknown {
   }
 }
 
-export async function queryDiagnosisEvidence(query: DiagnosisEvidenceQuery): Promise<unknown> {
+async function readDiagnosisEvidence(query: DiagnosisEvidenceQuery): Promise<unknown> {
   const snapshot = await readSnapshot(query.root, query.snapshotId)
   if (query.view === 'overview') {
     return {
@@ -144,4 +145,14 @@ export async function queryDiagnosisEvidence(query: DiagnosisEvidenceQuery): Pro
     limit,
     records: records.slice(offset, offset + limit).map(compactRecord),
   }
+}
+
+export async function queryDiagnosisEvidence(query: DiagnosisEvidenceQuery): Promise<unknown> {
+  const result = await readDiagnosisEvidence(query)
+  await appendDiagnosisEvidenceAccess(query.root, {
+    snapshotId: query.snapshotId,
+    view: query.view,
+    recordId: query.view === 'record' ? query.recordId : undefined,
+  })
+  return result
 }

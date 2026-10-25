@@ -81,3 +81,15 @@ List at most five prioritized problem–recommendation pairs. Each pair must con
 If no material problem is evidenced, say so and list only residual uncertainty; do not manufacture advice.
 
 Do not add a fifth heading, raw event dump, chronological transcript, score, or generic closing paragraph. After the report, remain available in the diagnosis conversation for follow-up evidence queries.
+
+## Process check
+
+After the four-section report is final, save that exact report to a local Markdown file and run:
+
+```bash
+<evidence_command> --root <evidence_root> process-check <snapshot_id> --report <report-file>
+```
+
+Read the returned `process-evaluation-run` and report its local file or captured JSON result with the diagnosis. Treat its gate level as `advisory`. A missing `no-live-source-read` proof remains `insufficient_evidence` because the access ledger covers the supplied evidence command, not every tool available to the diagnosing Agent.
+
+The diagnosis is complete when the four-section report is delivered and the process check succeeds. If the environment cannot save the report or run the command, deliver the report and state explicitly that the machine process check was not executed.

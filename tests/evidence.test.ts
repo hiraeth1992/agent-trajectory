@@ -135,7 +135,7 @@ describe('real-source verification evidence', () => {
       selectionMode: 'explicit',
       dsh: {
         sourceSessionSha256: 'ca2478ff98ecaf328c73313ea25848f4ecc0136e1db0e2bfcb2ac99f16f5875a',
-        sha256: 'd809afb986311a4c573410813ab97098b324ee55bf2900ac7cd07ac7c05cbc31',
+        sha256: 'dc727788b1ae859767671013b2e7d3ee1b7679ff447769459d1b7bb8e4668c1c',
         events: 8,
         records: 3,
         kinds: { user: 1, assistant: 1, tool: 1 },

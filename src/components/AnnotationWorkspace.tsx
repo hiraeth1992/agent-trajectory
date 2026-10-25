@@ -22,9 +22,9 @@ import type {
   AnnotationCaseListItem,
   AnnotationCaseWorkspace,
   AnnotationDatasetSummary,
+  AnnotationActor,
   AnnotationRecordDetail,
   AnnotationRecordSummary,
-  AnnotationReviewer,
   AnnotationSaveResult,
   AnnotationWorkspaceOverview,
 } from '../annotation-types'
@@ -59,8 +59,10 @@ function splitLabel(split: AnnotationCaseListItem['split']): string {
     : split === 'regression' ? '回归' : '独立验收'
 }
 
-function reviewerLabel(reviewer: AnnotationReviewer): string {
-  return reviewer === 'reviewer-a' ? 'Reviewer A' : 'Reviewer B'
+function reviewerLabel(reviewer: AnnotationActor): string {
+  return reviewer === 'reviewer-a'
+    ? 'Reviewer A'
+    : reviewer === 'reviewer-b' ? 'Reviewer B' : 'Adjudicator'
 }
 
 function responseError(response: Response, fallback: string): Promise<Error> {
@@ -227,7 +229,7 @@ export function AnnotationWorkspace({
   onExit,
 }: {
   dataset: AnnotationDatasetSummary
-  reviewer: AnnotationReviewer
+  reviewer: AnnotationActor
   onExit: () => void
 }) {
   const directoryId = dataset.directoryId
@@ -246,6 +248,19 @@ export function AnnotationWorkspace({
   const [error, setError] = useState<string>()
   const [mobilePane, setMobilePane] = useState<AnnotationMobilePane>('cases')
   const dirty = useRef(false)
+  const requestId = useRef(0)
+  const recordRequest = useRef<{
+    controller: AbortController
+    id: number
+  }>()
+  const saveRequest = useRef<{
+    caseId: string
+    directoryId: string
+    id: number
+    reviewer: AnnotationActor
+  }>()
+  const context = useRef({ caseId, directoryId, reviewer })
+  context.current = { caseId, directoryId, reviewer }
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
@@ -286,10 +301,14 @@ export function AnnotationWorkspace({
 
   useEffect(() => {
     if (directoryId === '' || caseId === '') {
+      recordRequest.current?.controller.abort()
+      recordRequest.current = undefined
       setWorkspace(undefined)
       setDraft(undefined)
       return
     }
+    recordRequest.current?.controller.abort()
+    recordRequest.current = undefined
     const controller = new AbortController()
     setCaseLoading(true)
     setError(undefined)
@@ -342,6 +361,10 @@ export function AnnotationWorkspace({
 
   const openRecord = useCallback(async (record: AnnotationRecordSummary) => {
     if (directoryId === '' || workspace === undefined) return
+    recordRequest.current?.controller.abort()
+    const controller = new AbortController()
+    const id = ++requestId.current
+    recordRequest.current = { controller, id }
     setRecordLoading(true)
     setError(undefined)
     try {
@@ -349,13 +372,20 @@ export function AnnotationWorkspace({
         `/api/annotations/datasets/${encodeURIComponent(directoryId)}/${reviewer}/cases/${
           encodeURIComponent(workspace.candidate.id)
         }/records/${encodeURIComponent(record.id)}`,
+        { signal: controller.signal },
       )
       if (!response.ok) throw await responseError(response, '证据详情加载失败')
-      setRecordDetail(await response.json() as AnnotationRecordDetail)
+      const result = await response.json() as AnnotationRecordDetail
+      if (recordRequest.current?.id === id) setRecordDetail(result)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
+      if (!controller.signal.aborted && recordRequest.current?.id === id) {
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
     } finally {
-      setRecordLoading(false)
+      if (recordRequest.current?.id === id) {
+        recordRequest.current = undefined
+        setRecordLoading(false)
+      }
     }
   }, [directoryId, reviewer, workspace])
 
@@ -395,13 +425,30 @@ export function AnnotationWorkspace({
   }, [evidenceTarget, mutateDraft])
 
   const save = useCallback(async () => {
-    if (draft === undefined || workspace === undefined || directoryId === '') return
+    if (saving || draft === undefined || workspace === undefined || directoryId === '') return
+    const savedDraft = clone(draft)
+    const savedCaseId = workspace.candidate.id
+    const id = ++requestId.current
+    saveRequest.current = {
+      caseId: savedCaseId,
+      directoryId,
+      id,
+      reviewer,
+    }
+    const isCurrent = () => {
+      const active = saveRequest.current
+      const current = context.current
+      return active?.id === id
+        && current.directoryId === directoryId
+        && current.reviewer === reviewer
+        && current.caseId === savedCaseId
+    }
     setSaving(true)
     setError(undefined)
     try {
       const response = await fetch(
         `/api/annotations/datasets/${encodeURIComponent(directoryId)}/${reviewer}/cases/${
-          encodeURIComponent(workspace.candidate.id)
+          encodeURIComponent(savedCaseId)
         }`,
         {
           method: 'PUT',
@@ -409,15 +456,18 @@ export function AnnotationWorkspace({
           body: JSON.stringify({
             datasetHash: workspace.datasetHash,
             revision: workspace.revision,
-            annotation: draft,
+            annotation: savedDraft,
           }),
         },
       )
       if (!response.ok) throw await responseError(response, '标注保存失败')
       const result = await response.json() as AnnotationSaveResult
+      if (!isCurrent()) return
       setWorkspace(current => current === undefined
         ? current
-        : { ...current, revision: result.revision, annotation: clone(draft) })
+        : current.candidate.id !== savedCaseId
+          ? current
+          : { ...current, revision: result.revision, annotation: clone(savedDraft) })
       setOverview(current => current === undefined
         ? current
         : {
@@ -430,13 +480,17 @@ export function AnnotationWorkspace({
       dirty.current = false
       setSaved(true)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
+      if (isCurrent()) setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
-      setSaving(false)
+      if (saveRequest.current?.id === id) {
+        saveRequest.current = undefined
+        setSaving(false)
+      }
     }
-  }, [directoryId, draft, reviewer, workspace])
+  }, [directoryId, draft, reviewer, saving, workspace])
 
   const selectCase = (next: string) => {
+    if (saving) return
     if (dirty.current && !window.confirm('当前案例有未保存修改，确定切换吗？')) return
     setCaseId(next)
     setMobilePane('evidence')
@@ -448,8 +502,14 @@ export function AnnotationWorkspace({
   const addRequirement = (suggestion?: AnnotationCaseWorkspace['requirementSuggestions'][number]) => {
     mutateDraft((next) => {
       const index = next.requirements.length
+      const used = new Set(next.requirements.map(requirement => requirement.id))
+      let number = 1
+      while (used.has(`requirement-${String(number).padStart(3, '0')}`)) number++
+      const id = suggestion !== undefined && !used.has(suggestion.id)
+        ? suggestion.id
+        : `requirement-${String(number).padStart(3, '0')}`
       next.requirements.push({
-        id: suggestion?.id ?? `requirement-${String(index + 1).padStart(3, '0')}`,
+        id,
         text: suggestion?.text ?? '',
         required: true,
         evidenceRecordIds: suggestion === undefined ? [] : [suggestion.recordId],
@@ -465,7 +525,9 @@ export function AnnotationWorkspace({
         <div>
           <span className="annotation-breadcrumb">评测中心 / 人工双标 / {reviewerLabel(reviewer)}</span>
           <strong>{dataset.datasetId}@{dataset.datasetVersion}</strong>
-          <span>不会展示 Evaluator 预测或另一位 Reviewer 的结果</span>
+          <span>{reviewer === 'adjudicator'
+            ? '只读对照 Reviewer A / B，裁决写入独立 adjudication 文件'
+            : '不会展示 Evaluator 预测或另一位 Reviewer 的结果'}</span>
         </div>
         <div className="annotation-header-controls">
           <div className="annotation-reviewer-lock">
@@ -475,6 +537,7 @@ export function AnnotationWorkspace({
           <button
             type="button"
             className="annotation-exit"
+            disabled={saving}
             onClick={() => {
               if (confirmDiscard('当前案例有未保存修改，确定返回评测中心吗？')) onExit()
             }}
@@ -541,6 +604,7 @@ export function AnnotationWorkspace({
               <button
                 type="button"
                 className={item.id === caseId ? 'active' : ''}
+                disabled={saving}
                 onClick={() => selectCase(item.id)}
                 key={item.id}
               >
@@ -664,6 +728,55 @@ export function AnnotationWorkspace({
           </header>
           {draft !== undefined && workspace !== undefined && (
             <div className="annotation-form-scroll">
+              {workspace.comparison !== undefined && (
+                <section className="annotation-form-section">
+                  <h2>Reviewer 分歧对照</h2>
+                  <p>对照仅供裁决；系统不会自动复制任一 Reviewer 的标签。</p>
+                  <div className="annotation-comparison-grid">
+                    {workspace.comparison.criteria.map(item => (
+                      <article key={item.criterionId}>
+                        <strong>{item.criterionId}</strong>
+                        <span>
+                          A · {item.reviewerA?.verdict ?? '未填'} /
+                          {item.reviewerA?.attribution ?? '未填'}
+                          {' · '}证据 {item.reviewerA?.evidenceRecordIds?.join(', ') || '无'}
+                        </span>
+                        <span>
+                          B · {item.reviewerB?.verdict ?? '未填'} /
+                          {item.reviewerB?.attribution ?? '未填'}
+                          {' · '}证据 {item.reviewerB?.evidenceRecordIds?.join(', ') || '无'}
+                        </span>
+                      </article>
+                    ))}
+                    {workspace.comparison.requirements.map(item => (
+                      <article key={`requirement:${item.id}`}>
+                        <strong>{item.id}</strong>
+                        <span>
+                          A · {item.reviewerA?.state ?? '未填'} ·
+                          {item.reviewerA?.required === false ? '可选' : '必需'} ·
+                          {item.reviewerA?.text ?? '未记录'}
+                        </span>
+                        <span>
+                          B · {item.reviewerB?.state ?? '未填'} ·
+                          {item.reviewerB?.required === false ? '可选' : '必需'} ·
+                          {item.reviewerB?.text ?? '未记录'}
+                        </span>
+                      </article>
+                    ))}
+                    <article>
+                      <strong>chain</strong>
+                      <span>
+                        A · {workspace.comparison.chain.reviewerA?.continuity ?? '未填'} ·
+                        证据 {workspace.comparison.chain.reviewerA?.evidenceRecordIds?.join(', ') || '无'}
+                      </span>
+                      <span>
+                        B · {workspace.comparison.chain.reviewerB?.continuity ?? '未填'} ·
+                        证据 {workspace.comparison.chain.reviewerB?.evidenceRecordIds?.join(', ') || '无'}
+                      </span>
+                    </article>
+                  </div>
+                </section>
+              )}
               <section className="annotation-form-section">
                 <h2>一、五项评测</h2>
                 <p>先选结果和归因，再点击“选择证据”，然后在左侧点击相关记录。</p>
