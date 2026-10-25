@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { handleApi, sendError, type ApiRegistry } from '../server/api'
 import { capabilities, sessionKey } from '../server/sources/types'
+import type { SummaryEngine } from '../server/summary/engine'
 import type { SessionDetail, SessionSummary, SourceStatus } from '../src/types'
 
 const summary: SessionSummary = {
@@ -69,17 +70,29 @@ const status: SourceStatus = {
 
 const servers: ReturnType<typeof createServer>[] = []
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(fulfill => {
+    resolve = fulfill
+  })
+  return { promise, resolve }
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server =>
     new Promise<void>(resolve => server.close(() => resolve()))))
 })
 
-async function start(registry: ApiRegistry): Promise<string> {
+async function start(
+  registry: ApiRegistry,
+  summaryEngine?: SummaryEngine,
+): Promise<string> {
   const server = createServer((request, response) => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://127.0.0.1')
       if (!await handleApi(request, response, url, {
         registry,
+        summary: summaryEngine,
         streamIntervalMs: 10,
       })) {
         response.writeHead(404).end()
@@ -117,6 +130,238 @@ async function getWithHost(base: string, pathname: string, host: string): Promis
 }
 
 describe('multi-source API', () => {
+  it('returns protocol status without waiting for session discovery', async () => {
+    const sessions = deferred<SessionSummary[]>()
+    const base = await start({
+      listSources: async () => [{
+        ...status,
+        sessionCount: 0,
+        sessionCountState: 'pending',
+        protocol: {
+          detected: 'dsh-session-v4',
+          supported: ['dsh-session-v4'],
+          fingerprint: 'dsh:session:v4',
+        },
+      }],
+      listSessions: async () => sessions.promise,
+      load: async () => detail,
+      fingerprint: async () => 'v1',
+    })
+
+    const pendingList = fetch(`${base}/api/sessions?source=dsh`)
+    const sources = await fetch(`${base}/api/sources`)
+
+    expect(sources.status).toBe(200)
+    expect(await sources.json()).toMatchObject([{
+      source: 'dsh',
+      sessionCountState: 'pending',
+      protocol: {
+        detected: 'dsh-session-v4',
+        fingerprint: 'dsh:session:v4',
+      },
+    }])
+
+    sessions.resolve([summary])
+    expect(await (await pendingList).json()).toMatchObject([{
+      source: 'dsh',
+      sourceSessionId: 'session-1',
+    }])
+  })
+
+  it('routes AI summary options, preview, generation, settings, and credentials', async () => {
+    const summaryEngine = {
+      options: vi.fn(async () => ({
+        source: 'dsh',
+        sourceSessionId: 'session-1',
+        adapters: [],
+        selectedReason: 'unavailable',
+        cacheStatus: 'missing',
+        factsHash: 'facts',
+        factStepCount: 1,
+        estimatedInputTokens: 10,
+      })),
+      preview: vi.fn(async () => ({
+        factsHash: 'facts',
+        estimatedInputTokens: 10,
+        facts: { schemaVersion: 1, steps: [] },
+      })),
+      generate: vi.fn(async (...args: unknown[]) => {
+        const progress = args[4] as
+          | ((value: { stage: string; message: string }) => void)
+          | undefined
+        progress?.({ stage: 'preparing', message: '正在准备事实包' })
+        progress?.({ stage: 'generating', message: '正在请求增强模型' })
+        return {
+          modules: {},
+          lastRun: {
+            modules: ['outcome'],
+            generatedAt: 1,
+            adapterId: 'codex-current',
+            model: 'model-a',
+            promptVersion: 3,
+          },
+          durationMs: 10,
+        }
+      }),
+      readSettings: vi.fn(async () => ({
+        mappings: [],
+        openAiCompatible: [],
+      })),
+      updateSettings: vi.fn(async () => ({
+        mappings: [],
+        openAiCompatible: [],
+      })),
+      setCredential: vi.fn(async () => {}),
+      removeModel: vi.fn(async () => ({
+        mappings: [],
+        openAiCompatible: [],
+        hiddenModels: [{
+          adapterId: 'codex-current',
+          model: 'model-a',
+          label: 'Model A',
+          adapterType: 'codex-app-server',
+        }],
+      })),
+      restoreModel: vi.fn(async () => ({
+        mappings: [],
+        openAiCompatible: [],
+        hiddenModels: [],
+      })),
+    } as unknown as SummaryEngine
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => detail,
+      fingerprint: async () => 'v1',
+    }, summaryEngine)
+
+    const options = await fetch(`${base}/api/sessions/dsh/session-1/ai-summary`)
+    expect(options.status).toBe(200)
+    expect(await options.json()).toMatchObject({ factsHash: 'facts' })
+
+    const preview = await fetch(`${base}/api/sessions/dsh/session-1/ai-summary/preview`)
+    expect(preview.status).toBe(200)
+    expect(await preview.json()).toMatchObject({ estimatedInputTokens: 10 })
+
+    const generated = await fetch(
+      `${base}/api/sessions/dsh/session-1/ai-summary/generate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adapterId: 'codex-current',
+          model: 'model-a',
+          remember: true,
+          modules: ['outcome'],
+        }),
+      },
+    )
+    expect(generated.status).toBe(200)
+    expect(await generated.json()).toMatchObject({
+      lastRun: { modules: ['outcome'] },
+    })
+    expect(summaryEngine.generate).toHaveBeenCalledWith(
+      'dsh',
+      'session-1',
+      {
+        adapterId: 'codex-current',
+        model: 'model-a',
+        remember: true,
+        modules: ['outcome'],
+      },
+      expect.any(AbortSignal),
+    )
+
+    const streamed = await fetch(
+      `${base}/api/sessions/dsh/session-1/ai-summary/generate-stream`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adapterId: 'codex-current',
+          model: 'model-a',
+          remember: true,
+          modules: ['outcome'],
+        }),
+      },
+    )
+    expect(streamed.status).toBe(200)
+    expect(streamed.headers.get('content-type')).toContain('application/x-ndjson')
+    const events = (await streamed.text()).trim().split('\n').map(line =>
+      JSON.parse(line) as Record<string, unknown>)
+    expect(events).toEqual([
+      {
+        type: 'progress',
+        stage: 'preparing',
+        message: '正在准备事实包',
+      },
+      {
+        type: 'progress',
+        stage: 'generating',
+        message: '正在请求增强模型',
+      },
+      {
+        type: 'result',
+        summary: expect.objectContaining({
+          lastRun: expect.objectContaining({ modules: ['outcome'] }),
+        }),
+      },
+    ])
+
+    const settings = await fetch(`${base}/api/summary/settings`)
+    expect(settings.status).toBe(200)
+    expect(await settings.json()).toEqual({
+      mappings: [],
+      openAiCompatible: [],
+    })
+
+    const updated = await fetch(`${base}/api/summary/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mappings: [], openAiCompatible: [] }),
+    })
+    expect(updated.status).toBe(200)
+
+    const credential = await fetch(
+      `${base}/api/summary/adapters/custom/credential`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: 'private-key' }),
+      },
+    )
+    expect(credential.status).toBe(200)
+    expect(await credential.text()).not.toContain('private-key')
+    expect(summaryEngine.setCredential).toHaveBeenCalledWith('custom', 'private-key')
+
+    const removed = await fetch(`${base}/api/summary/models`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        adapterId: 'codex-current',
+        adapterType: 'codex-app-server',
+        model: 'model-a',
+        label: 'Model A',
+      }),
+    })
+    expect(removed.status).toBe(200)
+    expect(summaryEngine.removeModel).toHaveBeenCalledWith(expect.objectContaining({
+      adapterId: 'codex-current',
+      model: 'model-a',
+    }))
+
+    const restored = await fetch(`${base}/api/summary/models/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adapterId: 'codex-current', model: 'model-a' }),
+    })
+    expect(restored.status).toBe(200)
+    expect(summaryEngine.restoreModel).toHaveBeenCalledWith({
+      adapterId: 'codex-current',
+      model: 'model-a',
+    })
+  })
+
   it('rejects API requests with a foreign Host and keeps health output path-free', async () => {
     const listSessions = vi.fn(async () => [summary])
     const base = await start({
@@ -163,6 +408,27 @@ describe('multi-source API', () => {
     expect(legacy.status).toBe(404)
     expect(load).toHaveBeenCalledOnce()
     expect(load).toHaveBeenCalledWith('dsh', 'session-1')
+  })
+
+  it('serves only whitelisted source application icons and falls back safely', async () => {
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => detail,
+      fingerprint: async () => 'v1',
+    })
+
+    const dshIcon = await fetch(`${base}/api/sources/dsh/icon`)
+    expect([200, 404]).toContain(dshIcon.status)
+    if (dshIcon.status === 200) {
+      expect(dshIcon.headers.get('content-type')).toBe('image/png')
+      expect((await dshIcon.arrayBuffer()).byteLength).toBeGreaterThan(0)
+    }
+
+    const codexIcon = await fetch(`${base}/api/sources/codex/icon`)
+    expect(codexIcon.status).toBe(404)
+    const invalid = await fetch(`${base}/api/sources/not-real/icon`)
+    expect(invalid.status).toBe(400)
   })
 
   it('returns 400 for malformed path encoding without calling a source', async () => {
@@ -258,13 +524,19 @@ describe('multi-source API', () => {
       listSessions: async () => [summary],
       load: async () => detail,
       fingerprint: async () => 'v1',
+      audit: async () => [{
+        type: 'approval/asked',
+        data: { id: 'approval-1', secret: 'private-approval' },
+      }],
     })
 
     const response = await fetch(`${base}/api/sessions/dsh/session-1/export`)
     const payload = await response.json() as {
       format: string
       version: number
+      complete: boolean
       detail: SessionDetail
+      sourceEvents: unknown[]
     }
 
     expect(response.status).toBe(200)
@@ -272,7 +544,8 @@ describe('multi-source API', () => {
       .toContain('dsh-session-1.audit.json')
     expect(payload).toMatchObject({
       format: 'agent-trajectory-audit',
-      version: 1,
+      version: 2,
+      complete: true,
       detail: {
         summary: { sourceSessionId: 'session-1' },
         projection: {
@@ -283,6 +556,10 @@ describe('multi-source API', () => {
           }],
         },
       },
+      sourceEvents: [{
+        type: 'approval/asked',
+        data: { id: 'approval-1', secret: '<redacted>' },
+      }],
     })
     expect(payload.detail.projection.records[0]).not.toHaveProperty('searchText')
   })
@@ -305,6 +582,10 @@ describe('multi-source API', () => {
         note: 'Authorization: Basic cmF3OnByaXZhdGU=',
         split: ['Authorization:', 'Bearer', 'raw-split-private-token'],
       }],
+      audit: async () => [{
+        type: 'raw-only',
+        authorization: 'Bearer audit-private-token',
+      }],
     })
 
     const rawResponse = await fetch(
@@ -318,8 +599,40 @@ describe('multi-source API', () => {
     const exportBody = await exportResponse.text()
     expect(exportResponse.status).toBe(200)
     expect(exportBody).not.toMatch(
-      /c3VtbWFyeTpwcml2YXRl|raw-private-token|cmF3OnByaXZhdGU/,
+      /c3VtbWFyeTpwcml2YXRl|raw-private-token|cmF3OnByaXZhdGU|audit-private-token/,
     )
+  })
+
+  it('redacts task state at the ordinary detail transport boundary', async () => {
+    const unsafeDetail = structuredClone(detail)
+    unsafeDetail.projection.taskState = {
+      target: {
+        id: 'target-1',
+        objective: 'password=synthetic-private-value',
+        status: 'active',
+        updatedAt: 1,
+      },
+      todos: [{
+        content: 'secret=synthetic-private-todo',
+        status: 'pending',
+        position: 0,
+      }],
+    }
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => unsafeDetail,
+      fingerprint: async () => 'v1',
+    })
+
+    const response = await fetch(`${base}/api/sessions/dsh/session-1`)
+    const body = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(body).not.toContain('synthetic-private-value')
+    expect(body).not.toContain('synthetic-private-todo')
+    expect(body).toContain('password=<redacted>')
+    expect(body).toContain('secret=<redacted>')
   })
 
   it('returns record deltas for a known revision and snapshots for stale revisions', async () => {

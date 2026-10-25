@@ -124,10 +124,10 @@ export function Timeline({
   }, [records])
 
   return (
-    <section className="overview" aria-label="轨迹时间概览">
+    <section className="overview" aria-label="轨迹概览">
       <div className="overview-heading">
         <div>
-          <strong>时间概览</strong>
+          <strong>概览</strong>
           <span>
             {geometry.mode === 'duration'
               ? formatDuration((domain[1] - domain[0]) * geometry.durationMs)

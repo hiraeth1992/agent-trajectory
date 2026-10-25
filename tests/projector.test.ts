@@ -74,6 +74,10 @@ describe('projectTrajectory', () => {
       usage: { inputTokens: 12, outputTokens: 5 },
       metrics: { ttftMs: 40, decodeMs: 100, throughput: 50 },
     })
+    expect(projection.header).toMatchObject({
+      provider: 'deepseek-account',
+      model: 'deepseek-flash',
+    })
     expect(projection.records.find(record => record.kind === 'user')?.summary).toBe('hello')
     expect(projection.turns).toEqual([{
       id: '1',
@@ -348,6 +352,24 @@ describe('projectTrajectory', () => {
     expect(redactSensitive(record)).toEqual(record)
   })
 
+  it('redacts standalone token assignments without hiding token usage metrics', () => {
+    const value = redactSensitive({
+      note: 'run with token=private-token-value',
+      token: 'private-object-token',
+      inputTokens: 120,
+      outputTokens: 30,
+      tokenAllocationCoverage: 0.8,
+    })
+
+    expect(value).toEqual({
+      note: 'run with token=<redacted>',
+      token: '<redacted>',
+      inputTokens: 120,
+      outputTokens: 30,
+      tokenAllocationCoverage: 0.8,
+    })
+  })
+
   it('closes an unanswered tool at the step boundary without inventing live duration', () => {
     const events = [
       event(0, 1_000, 'step/start', { turn: 1, step: 1 }),
@@ -382,6 +404,22 @@ describe('projectTrajectory', () => {
       kind: 'context',
       title: 'clock',
     })
+  })
+
+  it('omits a separate model context when no surface replacement occurred', () => {
+    const appended = {
+      ...event(0, 1_000, 'user/message', {
+        id: 'message',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'original request' }],
+      }),
+      surfaceOp: 'append' as const,
+    }
+
+    const projection = projectTrajectory(header, [appended])
+
+    expect(projection.transcriptRecordIds).toEqual(['user:0'])
+    expect(projection.modelContextRecordIds).toBeUndefined()
   })
 
   it('separates the durable transcript from replaced model context', () => {
@@ -483,7 +521,8 @@ describe('projectTrajectory', () => {
 
     const projection = projectTrajectory(header, [source, derived])
 
-    expect(projection.modelContextRecordIds).toEqual(['user:0', 'context:1'])
+    expect(projection.transcriptRecordIds).toEqual(['user:0', 'context:1'])
+    expect(projection.modelContextRecordIds).toBeUndefined()
     expect(projection.relations).toEqual([{
       type: 'derived-from',
       from: 'event:1',
@@ -508,7 +547,7 @@ describe('projectTrajectory', () => {
       .toThrow(/sourceEventSeqs must not be empty/)
   })
 
-  it('deduplicates surface record ids when one step contains multiple assistant messages', () => {
+  it('deduplicates transcript record ids when one step contains multiple assistant messages', () => {
     const events = [
       {
         ...event(0, 1_000, 'assistant/message', {
@@ -537,7 +576,7 @@ describe('projectTrajectory', () => {
     const projection = projectTrajectory(header, events)
 
     expect(projection.transcriptRecordIds).toEqual(['assistant:1:1'])
-    expect(projection.modelContextRecordIds).toEqual(['assistant:1:1'])
+    expect(projection.modelContextRecordIds).toBeUndefined()
   })
 
   it('folds complete goal snapshots and clear tombstones into current task state', () => {

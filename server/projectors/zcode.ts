@@ -185,6 +185,20 @@ function recordStatus(status: string | undefined): RecordStatus {
   return 'running'
 }
 
+function messageStatus(
+  finish: unknown,
+  startTime: number,
+  endTime: number,
+): RecordStatus {
+  const value = string(finish)
+  if (value === 'completed' || value === 'stop' || value === 'tool-calls') {
+    return 'complete'
+  }
+  if (value === 'error' || value === 'failed') return 'error'
+  if (value === 'cancelled' || value === 'interrupted') return 'interrupted'
+  return endTime > startTime ? 'complete' : 'running'
+}
+
 function searchable(
   record: Omit<TrajectoryRecord, 'searchText' | 'source'>,
 ): TrajectoryRecord {
@@ -329,9 +343,9 @@ export function projectZcodeTrajectory(input: ZcodeProjectionInput): TrajectoryP
     const text = content.filter(block => block.type === 'text').map(block => block.text).join('\n')
     const reasoning = content.filter(block => block.type === 'reasoning').map(block => block.text).join('\n')
     const toolParts = parts.filter(part => part.data.type === 'tool')
-    const status = recordStatus(modelUsage?.status ?? (
-      endTime > startTime ? 'completed' : 'running'
-    ))
+    const status = modelUsage === undefined
+      ? messageStatus(data.finish, startTime, endTime)
+      : recordStatus(modelUsage.status)
     records.push(searchable({
       id: `message:${message.id}`,
       sourceEventIds: [
@@ -529,6 +543,13 @@ export function projectZcodeTrajectory(input: ZcodeProjectionInput): TrajectoryP
     }
   })
 
+  const latestModelUsage = [...input.modelUsage]
+    .sort((left, right) =>
+      right.started_at - left.started_at
+      || right.id.localeCompare(left.id))
+  const latestModelRecord = latestModelUsage.find(row => row.model_id !== '')
+  const latestProviderRecord = latestModelRecord
+    ?? latestModelUsage.find(row => row.provider_id !== '')
   return {
     header: {
       source: 'zcode',
@@ -538,8 +559,8 @@ export function projectZcodeTrajectory(input: ZcodeProjectionInput): TrajectoryP
       cwd: input.session.directory,
       parentSessionId: input.session.parent_id ?? undefined,
       traceId: input.session.trace_id ?? undefined,
-      model: input.modelUsage.find(row => row.model_id !== '')?.model_id,
-      provider: input.modelUsage.find(row => row.provider_id !== '')?.provider_id,
+      model: latestModelRecord?.model_id,
+      provider: latestProviderRecord?.provider_id || undefined,
       rawVersion: input.session.version,
     },
     records,

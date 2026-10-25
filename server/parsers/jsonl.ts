@@ -48,9 +48,29 @@ export async function readJsonlRowsFrom<T>(
     }
     const buffer = Buffer.alloc(stat.size - offset)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
-    const available = buffer.subarray(0, bytesRead)
+    const loaded = buffer.subarray(0, bytesRead)
+    let skippedTerminator = 0
+    if (offset > 0 && loaded.length > 0) {
+      const previous = Buffer.alloc(1)
+      await handle.read(previous, 0, 1, offset - 1)
+      if (previous[0] !== 0x0a) {
+        if (loaded[0] === 0x0a) skippedTerminator = 1
+        else if (loaded[0] === 0x0d && loaded[1] === 0x0a) skippedTerminator = 2
+      }
+    }
+    const available = loaded.subarray(skippedTerminator)
     const lastNewline = available.lastIndexOf(0x0a)
-    const completeBytes = lastNewline + 1
+    const trailing = available.subarray(lastNewline + 1)
+    let acceptedTrailingRow = false
+    if (trailing.toString('utf8').trim() !== '') {
+      try {
+        JSON.parse(trailing.toString('utf8'))
+        acceptedTrailingRow = true
+      } catch {
+        // Preserve the incomplete tail for the next incremental read.
+      }
+    }
+    const completeBytes = acceptedTrailingRow ? available.length : lastNewline + 1
     const complete = available.subarray(0, completeBytes).toString('utf8')
     const rows = complete === ''
       ? []
@@ -62,8 +82,8 @@ export async function readJsonlRowsFrom<T>(
       .reduce((count, byte) => count + (byte === 0x0a ? 1 : 0), 0)
     return {
       rows,
-      nextOffset: offset + completeBytes,
-      nextLine: startingLine + newlineCount,
+      nextOffset: offset + skippedTerminator + completeBytes,
+      nextLine: startingLine + newlineCount + (acceptedTrailingRow ? 1 : 0),
     }
   } finally {
     await handle.close()

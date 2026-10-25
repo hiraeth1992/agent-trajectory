@@ -98,6 +98,7 @@ interface ZcodeFeatureSupport {
 interface SchemaInfo {
   columns: ReadonlyMap<string, ReadonlySet<string>>
   features: ZcodeFeatureSupport
+  fingerprint: string
 }
 
 type SqlRow = Record<string, null | number | bigint | string | Uint8Array>
@@ -160,6 +161,20 @@ function hasColumns(
   return available !== undefined && required.every(column => available.has(column))
 }
 
+function schemaFingerprint(
+  columns: ReadonlyMap<string, ReadonlySet<string>>,
+): string {
+  const descriptor = [...columns]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([table, tableColumns]) => [
+      table,
+      [...tableColumns].sort((left, right) => left.localeCompare(right)),
+    ])
+  return `zcode:sqlite:sha256:${
+    createHash('sha256').update(JSON.stringify(descriptor)).digest('hex')
+  }`
+}
+
 function inspectSchema(db: DatabaseSync): SchemaInfo {
   const found = new Set(rows(db.prepare(
     `SELECT name FROM sqlite_master WHERE type = 'table'`,
@@ -183,11 +198,19 @@ function inspectSchema(db: DatabaseSync): SchemaInfo {
       .filter(column => !tableColumns.has(column))
       .map(column => `${table}.${column}`))
   }
+  const fingerprint = schemaFingerprint(columns)
   if (missing.length > 0) {
-    throw new Error(`unsupported ZCode database schema: missing ${missing.join(', ')}`)
+    throw Object.assign(
+      new Error(`unsupported ZCode database schema: missing ${missing.join(', ')}`),
+      {
+        protocolFingerprint: fingerprint,
+        protocolMissing: missing,
+      },
+    )
   }
   return {
     columns,
+    fingerprint,
     features: {
       trace: hasColumns(columns, 'session', ['trace_id'])
         && hasColumns(columns, 'model_usage', [
@@ -265,6 +288,20 @@ function projectedFactsFingerprint(
     hash.update(JSON.stringify(facts, (_key, value: unknown) =>
       typeof value === 'bigint' ? value.toString() : value))
   }
+  append('session', rows(db.prepare(
+    `SELECT id, directory, title, version, time_created, time_updated, last_outcome,
+       ${featureColumn(schema, 'lineage', 'session', 'parent_id')},
+       ${featureColumn(schema, 'trace', 'session', 'trace_id')}
+     FROM session WHERE id = ? AND time_deleted IS NULL`,
+  ), sessionId))
+  append('messages', rows(db.prepare(
+    `SELECT id, sequence, time_created, time_updated, data
+     FROM message WHERE session_id = ? ORDER BY sequence, time_created, id`,
+  ), sessionId))
+  append('parts', rows(db.prepare(
+    `SELECT id, message_id, sequence, time_created, time_updated, data
+     FROM part WHERE session_id = ? ORDER BY sequence, time_created, id`,
+  ), sessionId))
   append('model-usage', rows(db.prepare(
     `SELECT id, turn_id, assistant_message_id, status, provider_id, model_id,
        started_at, first_token_at, completed_at, duration_ms, time_to_first_token_ms,
@@ -313,6 +350,23 @@ function projectedFactsFingerprint(
     ), sessionId))
   }
   return hash.digest('hex')
+}
+
+function projectedRowsFingerprint(
+  db: DatabaseSync,
+  sessionId: string,
+): string {
+  const messages = rows(db.prepare(
+    `SELECT id, sequence, time_created, time_updated, data
+     FROM message WHERE session_id = ? ORDER BY sequence, time_created, id`,
+  ), sessionId).map(messageRow)
+  const parts = rows(db.prepare(
+    `SELECT id, message_id, sequence, time_created, time_updated, data
+     FROM part WHERE session_id = ? ORDER BY sequence, time_created, id`,
+  ), sessionId).map(partRow)
+  return createHash('sha256')
+    .update(JSON.stringify({ messages, parts }))
+    .digest('hex')
 }
 
 function sessionRow(row: SqlRow) {
@@ -441,7 +495,12 @@ function query(database: string, request: WorkerRequest): unknown {
   })
   try {
     const schema = inspectSchema(db)
-    if (request.operation === 'probe') return schema.features
+    if (request.operation === 'probe') {
+      return {
+        features: schema.features,
+        schemaFingerprint: schema.fingerprint,
+      }
+    }
     if (request.operation === 'list') {
       return {
         features: schema.features,
@@ -519,6 +578,7 @@ function query(database: string, request: WorkerRequest): unknown {
       partCount: numeric(rows(db.prepare(
         'SELECT COUNT(*) AS count FROM part WHERE session_id = ?',
       ), request.sessionId)[0]?.count ?? 0),
+      rowFingerprint: projectedRowsFingerprint(db, request.sessionId),
       messages: rows(db.prepare(
         `SELECT id, sequence, time_created, time_updated, data
          FROM message WHERE session_id = ?
@@ -627,6 +687,12 @@ port.on('message', (request: WorkerRequest) => {
         message: error.message,
         stack: error.stack,
         code: (error as NodeJS.ErrnoException).code,
+        protocolFingerprint: (error as Error & {
+          protocolFingerprint?: string
+        }).protocolFingerprint,
+        protocolMissing: (error as Error & {
+          protocolMissing?: string[]
+        }).protocolMissing,
       },
     })
   }

@@ -183,4 +183,6 @@ export class ProjectionWorkerClient {
   }
 }
 
+// Compatibility default for sources constructed directly by callers. Production registries
+// inject and own a dedicated worker so their lifetimes remain independent.
 export const projectionWorker = new ProjectionWorkerClient()

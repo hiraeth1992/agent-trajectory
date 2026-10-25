@@ -23,6 +23,12 @@ export type SourceCapability =
 
 export type SourceCapabilities = Record<SourceCapability, boolean>
 
+export interface SourceProtocolDiagnostic {
+  detected: string
+  supported: string[]
+  fingerprint: string
+}
+
 export interface SourceStatus {
   source: SourceId
   availability: SourceAvailability
@@ -31,9 +37,11 @@ export interface SourceStatus {
   iconToken: SourceIconToken
   version?: string
   sessionCount: number
+  sessionCountState?: 'pending' | 'ready'
   capabilities: SourceCapabilities
   reason?: string
   detail?: string
+  protocol?: SourceProtocolDiagnostic
 }
 
 export interface SessionHeader {

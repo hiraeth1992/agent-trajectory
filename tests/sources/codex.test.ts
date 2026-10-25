@@ -51,6 +51,32 @@ describe('Codex JSONL parser', () => {
       await fs.rm(root, { recursive: true, force: true })
     }
   })
+
+  it('advances past a valid final row without a newline and skips its later terminator', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-tail-'))
+    const file = path.join(root, 'rollout-session.jsonl')
+    try {
+      const first = JSON.stringify(row(0, 'session_meta', { id: 'session-1' }))
+      const second = JSON.stringify(row(1, 'event_msg', { type: 'task_complete' }))
+      await fs.writeFile(file, first)
+
+      const initial = await readJsonlRowsFrom<CodexEnvelope>(file)
+      expect(initial.rows.map(entry => entry.value.ordinal)).toEqual([0])
+      expect(initial.nextOffset).toBe(Buffer.byteLength(first))
+      expect(initial.nextLine).toBe(2)
+
+      await fs.appendFile(file, `\n${second}\n`)
+      const appended = await readJsonlRowsFrom<CodexEnvelope>(
+        file,
+        initial.nextOffset,
+        initial.nextLine,
+      )
+      expect(appended.rows.map(entry => entry.value.ordinal)).toEqual([1])
+      expect(appended.rows.map(entry => entry.line)).toEqual([2])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('Codex projector', () => {
@@ -109,6 +135,39 @@ describe('Codex projector', () => {
       }),
     ]))
     expect(projection.records.filter(record => record.kind === 'user')).toHaveLength(1)
+  })
+
+  it('uses the latest turn model for the session header', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'session_meta', {
+        id: 'session-model-switch',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }),
+      row(1, 'turn_context', { turn_id: 'turn-1', model: 'first-model' }),
+      row(2, 'turn_context', { turn_id: 'turn-2', model: 'latest-model' }),
+    ])
+
+    expect(projection.header.model).toBe('latest-model')
+  })
+
+  it('sums the latest per-turn usage when thread usage is absent', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'session_meta', { id: 'session-usage-fallback' }),
+      row(1, 'token_usage_record', {
+        turn_id: 'turn-1',
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+      }),
+      row(2, 'token_usage_record', {
+        turn_id: 'turn-2',
+        usage: { input_tokens: 20, output_tokens: 4, total_tokens: 24 },
+      }),
+    ])
+
+    expect(projection.usage).toEqual({
+      inputTokens: 30,
+      outputTokens: 6,
+      totalTokens: 36,
+    })
   })
 
   it('keeps message timing separate from model-call usage and turn totals', () => {
@@ -257,6 +316,96 @@ describe('Codex projector', () => {
     expect(projection.usage).toMatchObject({ totalTokens: 30 })
   })
 
+  it('derives logical steps from model response boundaries and resets each turn', () => {
+    const firstTurn = 'turn-steps-1'
+    const secondTurn = 'turn-steps-2'
+    const attributed = (turnId: string) => ({
+      internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    })
+    const usage = (turnId: string, responseId: string, ordinal: number) => row(
+      ordinal,
+      'token_usage_record',
+      {
+        turn_id: turnId,
+        response_id: responseId,
+        usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+      },
+    )
+    const projection = projectCodexTrajectory([
+      row(0, 'session_meta', { id: 'session-steps' }),
+      row(1, 'response_item', {
+        type: 'message',
+        id: 'user-1',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'first turn' }],
+        ...attributed(firstTurn),
+      }),
+      row(2, 'response_item', {
+        type: 'reasoning',
+        id: 'reasoning-1',
+        summary: [{ type: 'summary_text', text: 'inspect first' }],
+        ...attributed(firstTurn),
+      }),
+      row(3, 'response_item', {
+        type: 'function_call',
+        id: 'function-1',
+        call_id: 'call-1',
+        name: 'exec_command',
+        arguments: '{"cmd":"pwd"}',
+        ...attributed(firstTurn),
+      }),
+      row(4, 'response_item', {
+        type: 'function_call_output',
+        id: 'output-1',
+        call_id: 'call-1',
+        output: '/workspace',
+        ...attributed(firstTurn),
+      }),
+      usage(firstTurn, 'response-1', 5),
+      row(6, 'response_item', {
+        type: 'reasoning',
+        id: 'reasoning-2',
+        summary: [{ type: 'summary_text', text: 'finish next' }],
+        ...attributed(firstTurn),
+      }),
+      row(7, 'response_item', {
+        type: 'message',
+        id: 'assistant-2',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'done' }],
+        ...attributed(firstTurn),
+      }),
+      usage(firstTurn, 'response-2', 8),
+      row(9, 'response_item', {
+        type: 'message',
+        id: 'user-2',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'second turn' }],
+        ...attributed(secondTurn),
+      }),
+      row(10, 'response_item', {
+        type: 'message',
+        id: 'assistant-3',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'second done' }],
+        ...attributed(secondTurn),
+      }),
+      usage(secondTurn, 'response-3', 11),
+    ])
+    const byId = new Map(projection.records.map(record => [record.id, record]))
+
+    expect(byId.get('user:user-1')?.step).toBe(0)
+    expect(byId.get('reasoning:reasoning-1')?.step).toBe(1)
+    expect(byId.get('tool:call-1')?.step).toBe(1)
+    expect(byId.get('model:response-1')?.step).toBe(1)
+    expect(byId.get('reasoning:reasoning-2')?.step).toBe(2)
+    expect(byId.get('assistant:assistant-2')?.step).toBe(2)
+    expect(byId.get('model:response-2')?.step).toBe(2)
+    expect(byId.get('user:user-2')?.step).toBe(0)
+    expect(byId.get('assistant:assistant-3')?.step).toBe(1)
+    expect(byId.get('model:response-3')?.step).toBe(1)
+  })
+
   it('derives write_stdin process failures from textual exit output', () => {
     const turnId = 'turn-write-stdin'
     const projection = projectCodexTrajectory([
@@ -322,6 +471,75 @@ describe('Codex projector', () => {
     const reasoning = projection.records.find(record => record.id === 'reasoning:reasoning-1')
     expect(reasoning?.summary).toBe('加密推理内容')
     expect(JSON.stringify(reasoning?.raw)).not.toContain('ciphertext')
+  })
+})
+
+describe('Codex source protocol detection', () => {
+  it('blocks a well-formed rollout with an unknown header protocol', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-protocol-'))
+    const sessionsRoot = path.join(root, 'sessions')
+    await fs.mkdir(sessionsRoot, { recursive: true })
+    try {
+      await fs.writeFile(
+        path.join(sessionsRoot, 'rollout-future.jsonl'),
+        `${JSON.stringify(row(0, 'session_header', {
+          id: 'future-session',
+          cli_version: '99.0.0',
+        }))}\n`,
+      )
+
+      expect(await new CodexSource({
+        sessionsRoot,
+        sessionIndexFile: path.join(root, 'session_index.jsonl'),
+      }).probe()).toMatchObject({
+        availability: 'blocked',
+        reason: 'unsupported_codex_protocol',
+        protocol: {
+          detected: 'codex-rollout-header:session_header',
+          supported: ['codex-rollout-v1'],
+          fingerprint: 'codex:rollout:session_header',
+        },
+      })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps supported rollouts available when unknown headers are also present', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-mixed-protocol-'))
+    const sessionsRoot = path.join(root, 'sessions')
+    await fs.mkdir(sessionsRoot, { recursive: true })
+    try {
+      await fs.writeFile(
+        path.join(sessionsRoot, 'rollout-00-future.jsonl'),
+        `${JSON.stringify(row(0, 'session_header', {
+          id: 'future-session',
+          cli_version: '99.0.0',
+        }))}\n`,
+      )
+      await fs.writeFile(
+        path.join(sessionsRoot, 'rollout-01-supported.jsonl'),
+        `${JSON.stringify(row(0, 'session_meta', {
+          id: 'supported-session',
+          cli_version: '1.0.0',
+        }))}\n`,
+      )
+
+      expect(await new CodexSource({
+        sessionsRoot,
+        sessionIndexFile: path.join(root, 'session_index.jsonl'),
+      }).probe()).toMatchObject({
+        availability: 'degraded',
+        reason: 'additional_codex_protocols_ignored',
+        protocol: {
+          detected: 'codex-rollout-v1,codex-rollout-header:session_header',
+          supported: ['codex-rollout-v1'],
+          fingerprint: 'codex:rollout:session_meta,session_header',
+        },
+      })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
   })
 })
 
@@ -410,6 +628,48 @@ describe('Codex source incremental loading', () => {
     }
   })
 
+  it('orders same-time continuation pages by numeric suffix', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-page-order-'))
+    const sessionsRoot = path.join(root, 'sessions')
+    await fs.mkdir(sessionsRoot, { recursive: true })
+    const sessionMeta = row(0, 'session_meta', {
+      id: 'session-same-time-pages',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      cwd: '/tmp/work',
+    }, '2026-01-01T00:00:00.000Z')
+    const page = (id: string, text: string) => [
+      sessionMeta,
+      row(1, 'response_item', {
+        type: 'message',
+        id,
+        role: 'user',
+        content: [{ type: 'input_text', text }],
+      }),
+    ].map(value => JSON.stringify(value)).join('\n') + '\n'
+    try {
+      await fs.writeFile(
+        path.join(sessionsRoot, 'rollout-session_10.jsonl'),
+        page('user-10', 'page 10'),
+      )
+      await fs.writeFile(
+        path.join(sessionsRoot, 'rollout-session_2.jsonl'),
+        page('user-2', 'page 2'),
+      )
+      const source = new CodexSource({
+        sessionsRoot,
+        sessionIndexFile: path.join(root, 'session_index.jsonl'),
+      })
+
+      const [ref] = await source.list()
+      const detail = await source.load(ref!)
+
+      expect(detail.projection.records.map(record => record.summary))
+        .toEqual(['page 2', 'page 10'])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('keeps prior events and projects only newly appended JSONL rows', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-source-'))
     const sessionsRoot = path.join(root, 'sessions')
@@ -445,6 +705,49 @@ describe('Codex source incremental loading', () => {
       await fs.appendFile(file, `${JSON.stringify(assistant)}\n`)
 
       expect((await source.load(ref!)).projection.records.map(record => record.summary))
+        .toEqual(['first', 'second'])
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not duplicate a valid final row when its newline is appended later', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-valid-tail-'))
+    const sessionsRoot = path.join(root, 'sessions')
+    const file = path.join(sessionsRoot, 'rollout-session.jsonl')
+    await fs.mkdir(sessionsRoot, { recursive: true })
+    const sessionMeta = row(0, 'session_meta', {
+      id: 'session-valid-tail',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      cwd: '/tmp/work',
+    })
+    const user = row(1, 'response_item', {
+      type: 'message',
+      id: 'user-1',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'first' }],
+    })
+    const assistant = row(2, 'response_item', {
+      type: 'message',
+      id: 'assistant-1',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'second' }],
+    })
+    try {
+      await fs.writeFile(file, `${JSON.stringify(sessionMeta)}\n${JSON.stringify(user)}`)
+      const source = new CodexSource({
+        sessionsRoot,
+        sessionIndexFile: path.join(root, 'session_index.jsonl'),
+      })
+      const [ref] = await source.list()
+      expect((await source.load(ref!)).projection.records.map(record => record.summary))
+        .toEqual(['first'])
+
+      await fs.appendFile(file, `\n${JSON.stringify(assistant)}\n`)
+
+      const updated = await source.load(ref!)
+      expect(updated.projection.eventCount).toBe(3)
+      expect(updated.projection.records.map(record => record.summary))
         .toEqual(['first', 'second'])
     } finally {
       await fs.rm(root, { recursive: true, force: true })

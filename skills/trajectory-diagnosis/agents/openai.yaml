@@ -1,0 +1,6 @@
+interface:
+  display_name: "Trajectory Diagnosis"
+  short_description: "Diagnose a frozen agent trajectory with evidence"
+  default_prompt: "Use $trajectory-diagnosis to diagnose the supplied frozen trajectory."
+policy:
+  allow_implicit_invocation: false

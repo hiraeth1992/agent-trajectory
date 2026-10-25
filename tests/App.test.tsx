@@ -2,7 +2,10 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { App } from '../src/App'
+import {
+  App,
+  sessionTargetFromLocation,
+} from '../src/App'
 import { capabilities, sessionKey } from '../server/sources/types'
 import type {
   SessionDetail,
@@ -111,14 +114,210 @@ beforeEach(() => {
   })
 })
 
+function openTrajectory(): void {
+  fireEvent.click(screen.getByRole('tab', { name: '轨迹' }))
+}
+
+async function chooseSource(name: string): Promise<void> {
+  fireEvent.click(await screen.findByRole('button', { name: '筛选来源' }))
+  fireEvent.click(await screen.findByRole('option', { name: new RegExp(`^${name}`) }))
+}
+
+async function waitForLoadedSession(source: string, id: string): Promise<void> {
+  await waitFor(() => {
+    expect(screen.getByRole('link', { name: '完整审计导出' }).getAttribute('href'))
+      .toBe(`/api/sessions/${source}/${id}/export`)
+  })
+}
+
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   localStorage.clear()
+  window.history.replaceState(null, '', '/')
 })
 
 describe('App request ordering', () => {
+  it('shows a portable protocol diagnosis for a blocked source', async () => {
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') {
+        return response([{
+          ...statuses[0],
+          availability: 'blocked',
+          sessionCount: 0,
+          sessionCountState: 'ready',
+          reason: 'unsupported_dsh_protocol',
+          detail: '检测到 dsh-session-v5；当前仅支持 dsh-session-v4',
+          protocol: {
+            detected: 'dsh-session-v5',
+            supported: ['dsh-session-v4'],
+            fingerprint: 'dsh:session:v5',
+          },
+        } satisfies SourceStatus])
+      }
+      if (url === '/api/sessions?source=all') return response([])
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+
+    expect(await screen.findByText('DSH API：协议暂不兼容')).toBeTruthy()
+    expect(screen.getByText(
+      '检测到 dsh-session-v5 · 支持 dsh-session-v4',
+    )).toBeTruthy()
+    expect(screen.getByText('dsh:session:v5')).toBeTruthy()
+  })
+
+  it('updates a pending source count after session discovery completes', async () => {
+    const dshSession = summary('dsh', 'discovered-session', 'Discovered session')
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') {
+        return response([{
+          ...statuses[0],
+          sessionCount: 0,
+          sessionCountState: 'pending',
+        } satisfies SourceStatus])
+      }
+      if (url === '/api/sessions?source=all') return response([dshSession])
+      if (url === '/api/sessions/dsh/discovered-session') {
+        return response(detail(dshSession))
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+    await screen.findByRole('option', { name: '[DSH API] Discovered session' })
+    fireEvent.click(screen.getByRole('button', { name: '筛选来源' }))
+
+    expect(screen.getByRole('option', { name: /^DSH API/ }).textContent)
+      .toContain('1 个会话')
+  })
+
+  it('parses a source-qualified session deep link without accepting invalid sources', () => {
+    expect(sessionTargetFromLocation({
+      search: '?source=codex&session=thread%2Fone',
+    } as Location)).toEqual({
+      source: 'codex',
+      sessionId: 'thread/one',
+    })
+    expect(sessionTargetFromLocation({
+      search: '?source=../../etc&session=thread-one',
+    } as Location)).toBeUndefined()
+  })
+
+  it('copies a diagnosis prompt for the switched trajectory target', async () => {
+    const zcodeSession = summary('zcode', 'trigger-session', 'Trigger session')
+    const dshSession = summary('dsh', 'target-session', 'Target session')
+    const diagnosisRequests: Array<Record<string, unknown>> = []
+    const writeText = vi.fn(async () => {})
+    window.history.replaceState(
+      null,
+      '',
+      '/?source=zcode&session=trigger-session',
+    )
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      clipboard: { writeText },
+    })
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=zcode') return response([zcodeSession])
+      if (url === '/api/sessions?source=all') {
+        return response([zcodeSession, dshSession])
+      }
+      if (url === '/api/sessions/zcode/trigger-session') {
+        return response(detail(zcodeSession))
+      }
+      if (url === '/api/sessions/dsh/target-session') {
+        return response(detail(dshSession))
+      }
+      if (url === '/api/diagnosis/prompt') {
+        diagnosisRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+        return new Response(JSON.stringify({
+          status: 'prepared',
+          protocol: 'trajectory-diagnosis-v1',
+          snapshotId: 'snapshot-codex-diagnosis',
+          prompt: 'app diagnosis prompt',
+        }), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+    await waitForLoadedSession('zcode', 'trigger-session')
+    await chooseSource('全部来源')
+    await screen.findByRole('option', { name: '[DSH API] Target session' })
+    fireEvent.change(screen.getByRole('combobox', { name: '选择会话' }), {
+      target: { value: dshSession.id },
+    })
+    await waitForLoadedSession('dsh', 'target-session')
+    fireEvent.click(screen.getByRole('button', { name: '本地 Agent 诊断' }))
+
+    await waitFor(() => expect(diagnosisRequests).toEqual([{
+      target: { source: 'dsh', sessionId: 'target-session' },
+    }]))
+    expect(writeText).toHaveBeenCalledWith('app diagnosis prompt')
+    expect(await screen.findByRole('dialog', { name: '已复制 Prompt' })).toBeTruthy()
+    expect(window.location.search).not.toContain('initiator=')
+  })
+
+  it('loads the exact deep-linked session instead of the newest session', async () => {
+    const newest = summary('zcode', 'newest-session', 'Newest session')
+    const linked = summary('zcode', 'linked-session', 'Linked session')
+    window.history.replaceState(
+      null,
+      '',
+      '/?source=zcode&session=linked-session',
+    )
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=zcode') return response([newest, linked])
+      if (url === '/api/sessions/zcode/linked-session') return response(detail(linked))
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+
+    await waitForLoadedSession('zcode', 'linked-session')
+    expect((screen.getByRole('combobox', { name: '选择会话' }) as HTMLSelectElement).value)
+      .toBe(linked.id)
+  })
+
   it('keeps the newest source selection when an older session request finishes last', async () => {
     const oldRequest = deferred<Response>()
     const oldSession = summary('dsh', 'old-session', 'Old DSH session')
@@ -138,9 +337,7 @@ describe('App request ordering', () => {
     }))
 
     render(<App />)
-    const sourceSelect = await screen.findByRole('combobox', { name: '筛选来源' })
-    await screen.findByRole('option', { name: 'ZCode API' })
-    fireEvent.change(sourceSelect, { target: { value: 'zcode' } })
+    await chooseSource('ZCode API')
     await screen.findByRole('option', { name: '[ZCode API] Current ZCode session' })
 
     oldRequest.resolve(response([oldSession]))
@@ -175,14 +372,58 @@ describe('App request ordering', () => {
     fireEvent.change(sessionSelect, {
       target: { value: sessionKey('zcode', 'second-session') },
     })
-    await screen.findByText('Second session', { selector: '.session-title' })
+    await waitForLoadedSession('zcode', 'second-session')
 
     firstRequest.resolve(response(detail(firstSession)))
 
     await waitFor(() => {
-      expect(screen.queryByText('First session', { selector: '.session-title' })).toBeNull()
+      expect(screen.getByRole('link', { name: '完整审计导出' }).getAttribute('href'))
+        .toBe('/api/sessions/zcode/second-session/export')
     })
-    expect(screen.getByText('Second session', { selector: '.session-title' })).toBeTruthy()
+  })
+
+  it('remembers the selected session for each source filter', async () => {
+    const first = summary('zcode', 'remember-first', 'Remember first')
+    const second = summary('zcode', 'remember-second', 'Remember second')
+    const dsh = summary('dsh', 'remember-dsh', 'Remember DSH')
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') return response([first, second, dsh])
+      if (url === '/api/sessions?source=zcode') return response([first, second])
+      if (url === '/api/sessions?source=dsh') return response([dsh])
+      if (url === '/api/sessions/zcode/remember-first') return response(detail(first))
+      if (url === '/api/sessions/zcode/remember-second') return response(detail(second))
+      if (url === '/api/sessions/dsh/remember-dsh') return response(detail(dsh))
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '筛选来源' }).textContent)
+        .toContain('3')
+    })
+    const sessionSelect = screen.getByRole('combobox', { name: '选择会话' })
+    fireEvent.click(screen.getByRole('button', { name: '筛选来源' }))
+    expect(screen.getByRole('option', { name: /^全部来源/ })).toBeTruthy()
+    expect(screen.getByRole('option', { name: /^ZCode API/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '筛选来源' }))
+
+    fireEvent.change(sessionSelect, { target: { value: second.id } })
+    await waitForLoadedSession('zcode', 'remember-second')
+    await chooseSource('DSH API')
+    await waitForLoadedSession('dsh', 'remember-dsh')
+    await chooseSource('全部来源')
+
+    await waitFor(() => {
+      expect((screen.getByRole('combobox', { name: '选择会话' }) as HTMLSelectElement).value)
+        .toBe(second.id)
+    })
+    expect(screen.getByRole('tab', { name: '轨迹评测', selected: true })).toBeTruthy()
   })
 
   it('loads raw events only after the inspector raw tab is opened', async () => {
@@ -225,6 +466,7 @@ describe('App request ordering', () => {
     }))
 
     render(<App />)
+    openTrajectory()
     await screen.findByText('Raw record', { selector: '.record-main strong' })
     expect(requested).not.toContain(rawUrl)
 
@@ -285,6 +527,7 @@ describe('App request ordering', () => {
     }))
 
     render(<App />)
+    openTrajectory()
     const sessionSelect = await screen.findByRole('combobox', { name: '选择会话' })
     fireEvent.click(await screen.findByText('First raw record', { selector: '.record-main strong' }))
     fireEvent.click(await screen.findByRole('button', { name: '原始事件' }))
@@ -294,7 +537,7 @@ describe('App request ordering', () => {
     fireEvent.change(sessionSelect, {
       target: { value: sessionKey('zcode', 'second-raw-session') },
     })
-    await screen.findByText('Second raw session', { selector: '.session-title' })
+    await waitForLoadedSession('zcode', 'second-raw-session')
     fireEvent.change(sessionSelect, {
       target: { value: sessionKey('zcode', 'first-raw-session') },
     })
@@ -372,7 +615,7 @@ describe('App live session state', () => {
 
     initialRequest.resolve(response(detail(currentSession)))
 
-    await screen.findByText('Coalesced session', { selector: '.session-title' })
+    await waitForLoadedSession('dsh', 'coalesced-session')
     await waitFor(() => {
       expect(requested.filter(url =>
         url === '/api/sessions/dsh/coalesced-session?revision=revision-2'))
@@ -468,6 +711,7 @@ describe('App live session state', () => {
     }))
 
     render(<App />)
+    openTrajectory()
     fireEvent.click(await screen.findByText('Mutable record', { selector: '.record-main strong' }))
     fireEvent.click(await screen.findByRole('button', { name: '原始事件' }))
     expect(await screen.findByText(/old raw/, { selector: '.raw-inspector' })).toBeTruthy()
@@ -571,6 +815,7 @@ describe('App live session state', () => {
     }))
 
     render(<App />)
+    openTrajectory()
     fireEvent.click(await screen.findByText('Reappearing record', { selector: '.record-main strong' }))
     fireEvent.click(await screen.findByRole('button', { name: '原始事件' }))
     expect(await screen.findByText(/old raw/, { selector: '.raw-inspector' })).toBeTruthy()
@@ -668,6 +913,7 @@ describe('App live session state', () => {
     }))
 
     render(<App />)
+    openTrajectory()
     await screen.findByText('First', { selector: '.record-main strong' })
     for (const listener of listeners.get('update') ?? []) {
       listener(new MessageEvent('update'))
@@ -752,6 +998,7 @@ describe('App live session state', () => {
     }))
 
     render(<App />)
+    openTrajectory()
     await screen.findByText('Initial record', { selector: '.record-main strong' })
     for (const listener of listeners.get('update') ?? []) {
       listener(new MessageEvent('update'))
@@ -800,15 +1047,15 @@ describe('App live session state', () => {
     }))
 
     render(<App />)
-    await screen.findByText('Live session', { selector: '.session-title' })
+    await waitForLoadedSession('dsh', 'live-session')
 
     dispatch('error')
     expect(await screen.findByText('实时刷新失败，正在等待自动重试')).toBeTruthy()
-    expect(screen.getByText('Live session', { selector: '.session-title' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: '完整审计导出' })).toBeTruthy()
 
     dispatch('missing')
     expect(await screen.findByText('会话已被删除或不再可用')).toBeTruthy()
-    expect(screen.queryByText('Live session', { selector: '.session-title' })).toBeNull()
+    expect(screen.queryByRole('link', { name: '完整审计导出' })).toBeNull()
     expect(close).toHaveBeenCalled()
   })
 
@@ -847,13 +1094,12 @@ describe('App live session state', () => {
     }))
 
     render(<App />)
-    await screen.findByText('Removed session', { selector: '.session-title' })
+    await waitForLoadedSession('dsh', 'removed-session')
     for (const listener of listeners.get('missing') ?? []) {
       listener(new MessageEvent('missing'))
     }
 
-    expect(await screen.findByText('Remaining session', { selector: '.session-title' }))
-      .toBeTruthy()
+    await waitForLoadedSession('dsh', 'remaining-session')
     expect((screen.getByRole('combobox', { name: '选择会话' }) as HTMLSelectElement).value)
       .toBe(sessionKey('dsh', 'remaining-session'))
   })
@@ -897,10 +1143,8 @@ describe('App live session state', () => {
     }))
 
     render(<App />)
-    await screen.findByText('Filtered removed', { selector: '.session-title' })
-    fireEvent.change(screen.getByRole('combobox', { name: '筛选来源' }), {
-      target: { value: 'dsh' },
-    })
+    await waitForLoadedSession('dsh', 'filtered-removed')
+    await chooseSource('DSH API')
     await waitFor(() => {
       expect(screen.queryByRole('option', { name: '[ZCode API] Stale candidate' })).toBeNull()
     })
@@ -909,8 +1153,7 @@ describe('App live session state', () => {
       listener(new MessageEvent('missing'))
     }
 
-    expect(await screen.findByText('Filtered remaining', { selector: '.session-title' }))
-      .toBeTruthy()
+    await waitForLoadedSession('dsh', 'filtered-remaining')
     expect((screen.getByRole('combobox', { name: '选择会话' }) as HTMLSelectElement).value)
       .toBe(sessionKey('dsh', 'filtered-remaining'))
   })
@@ -980,14 +1223,86 @@ describe('App conversation view', () => {
 
     render(<App />)
 
-    expect(await screen.findByText('1 / 4 已消费 · 3 gap')).toBeTruthy()
     fireEvent.click(screen.getByRole('tab', { name: '对话' }))
+    expect(await screen.findByText('1 / 4 已消费 · 3 gap')).toBeTruthy()
     expect(screen.getByText('Original transcript message')).toBeTruthy()
     expect(screen.queryByText('Current model context message')).toBeNull()
 
     fireEvent.click(screen.getByRole('tab', { name: '模型上下文' }))
     expect(screen.getByText('Current model context message')).toBeTruthy()
     expect(screen.queryByText('Original transcript message')).toBeNull()
+  })
+
+  it('returns to the conversation when the selected session has no model context view', async () => {
+    const dshSession = summary('dsh', 'surface-session', 'Surface session')
+    const zcodeSession = summary('zcode', 'plain-session', 'Plain session')
+    const dshRecord: TrajectoryRecord = {
+      id: 'user:1',
+      source: 'dsh',
+      sourceEventIds: ['1'],
+      fidelity: 'exact',
+      seq: 1,
+      turn: 1,
+      step: 1,
+      kind: 'user',
+      title: '用户',
+      summary: 'Current model context message',
+      startTime: 1,
+      endTime: 1,
+      status: 'complete',
+      depth: 0,
+      surface: 'current',
+      input: [{ type: 'text', text: 'Current model context message' }],
+      searchText: 'current model context message',
+    }
+    const zcodeRecord: TrajectoryRecord = {
+      id: 'message:user-1',
+      source: 'zcode',
+      sourceEventIds: ['user-1'],
+      fidelity: 'exact',
+      seq: 0,
+      turn: 1,
+      step: 0,
+      kind: 'user',
+      title: '用户消息',
+      summary: 'ZCode conversation message',
+      startTime: 2,
+      endTime: 2,
+      status: 'complete',
+      depth: 0,
+      input: [{ type: 'text', text: 'ZCode conversation message' }],
+      searchText: 'zcode conversation message',
+    }
+    const dshDetail = detailWithRecord(dshSession, dshRecord)
+    dshDetail.projection.transcriptRecordIds = []
+    dshDetail.projection.modelContextRecordIds = [dshRecord.id]
+    const zcodeDetail = detailWithRecord(zcodeSession, zcodeRecord)
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') return response([dshSession, zcodeSession])
+      if (url === '/api/sessions/dsh/surface-session') return response(dshDetail)
+      if (url === '/api/sessions/zcode/plain-session') return response(zcodeDetail)
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+
+    await screen.findByRole('tab', { name: '模型上下文' })
+    fireEvent.click(screen.getByRole('tab', { name: '模型上下文' }))
+    expect(screen.getByText('Current model context message')).toBeTruthy()
+
+    fireEvent.change(screen.getByRole('combobox', { name: '选择会话' }), {
+      target: { value: zcodeSession.id },
+    })
+
+    expect(await screen.findByText('ZCode conversation message')).toBeTruthy()
+    expect(screen.queryByRole('tab', { name: '模型上下文' })).toBeNull()
+    expect(screen.getByRole('tab', { name: '对话', selected: true })).toBeTruthy()
   })
 
   it('shows session statistics and offers distinct projection and audit exports', async () => {
@@ -1045,8 +1360,15 @@ describe('App conversation view', () => {
 
     render(<App />)
 
-    expect(await screen.findByText('20 输入 / 8 输出 / 30 总计')).toBeTruthy()
-    expect(screen.getByText('1 / 2')).toBeTruthy()
+    const metrics = await screen.findByRole('region', { name: '轨迹核心指标' })
+    expect(metrics.textContent).toContain('墙钟耗时 / 活跃耗时1 ms / —')
+    expect(metrics.textContent).toContain('事件 / 记录3 / 02 种事件类型')
+    expect(metrics.textContent).toContain('Token30')
+    expect(metrics.textContent).toContain('输入 20 · 输出 8')
+    expect(metrics.textContent).toContain('轮次 / 步骤2 / 0')
+    expect(metrics.textContent).toContain('1 / 2 轮已完成')
+
+    fireEvent.click(screen.getByRole('tab', { name: '对话' }))
     fireEvent.click(screen.getByText('2 种事件类型'))
     expect(screen.getByText('user/message')).toBeTruthy()
     expect(screen.getByText('assistant/message')).toBeTruthy()
@@ -1137,6 +1459,7 @@ describe('App conversation view', () => {
     }))
 
     render(<App />)
+    openTrajectory()
 
     expect(await screen.findByRole('region', { name: '任务状态' })).toBeTruthy()
     expect(screen.getByText('Ship verified trajectory improvements')).toBeTruthy()
@@ -1204,11 +1527,12 @@ describe('App conversation view', () => {
     }))
 
     render(<App />)
+    openTrajectory()
 
     expect(await screen.findByText('1.00 s · 20→8 tok · TTFT 200 ms')).toBeTruthy()
   })
 
-  it('keeps trajectory as the default and shows user and assistant messages after switching views', async () => {
+  it('defaults to summary after trajectory in the tabs and opens its evidence in trajectory', async () => {
     const currentSession = summary('zcode', 'conversation-session', 'Conversation session')
     const user: TrajectoryRecord = {
       id: 'message:user-1',
@@ -1262,13 +1586,28 @@ describe('App conversation view', () => {
     }))
 
     render(<App />)
-    expect(await screen.findByRole('tab', { name: '轨迹', selected: true })).toBeTruthy()
-    expect(screen.getByRole('region', { name: '轨迹时间概览' })).toBeTruthy()
+    expect(await screen.findByRole('tab', { name: '轨迹评测', selected: true })).toBeTruthy()
+    expect(screen.getByRole('region', { name: '轨迹评测' })).toBeTruthy()
+    const tabs = screen.getAllByRole('tab')
+    expect(tabs.findIndex(tab => tab.textContent?.includes('轨迹')))
+      .toBeLessThan(tabs.findIndex(tab => tab.textContent?.includes('轨迹评测')))
+
+    fireEvent.doubleClick(screen.getByRole('button', {
+      name: /汇报阶段结果，第 1 轮，1 步/,
+    }))
+    fireEvent.click(await screen.findByRole('button', {
+      name: '查看轨迹证据：完成模型响应',
+    }))
+
+    expect(screen.getByRole('tab', { name: '轨迹', selected: true })).toBeTruthy()
+    expect(screen.getByRole('region', { name: '轨迹概览' })).toBeTruthy()
+    expect(screen.getByRole('complementary', { name: '记录检查器' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '选择 助手回复' }).className).toContain('selected')
 
     fireEvent.click(screen.getByRole('tab', { name: '对话' }))
 
     expect(screen.getByRole('tab', { name: '对话', selected: true })).toBeTruthy()
-    expect(screen.queryByRole('region', { name: '轨迹时间概览' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '轨迹概览' })).toBeNull()
     expect(screen.getByRole('region', { name: '会话内容' })).toBeTruthy()
     expect(screen.getByText('Plan the migration')).toBeTruthy()
     expect(screen.getByText('Migration complete')).toBeTruthy()
@@ -1421,7 +1760,7 @@ describe('App conversation view', () => {
     }))
 
     render(<App />)
-    await screen.findByText('Task complete')
+    await waitForLoadedSession('zcode', 'activity-session')
     fireEvent.click(screen.getByRole('tab', { name: '对话' }))
 
     const expand = screen.getByRole('button', {
@@ -1481,7 +1820,7 @@ describe('App conversation view', () => {
     }))
 
     render(<App />)
-    await screen.findByText('Locate this message', { selector: '.record-main span' })
+    await waitForLoadedSession('zcode', 'navigation-session')
     fireEvent.click(screen.getByRole('tab', { name: '对话' }))
     fireEvent.click(screen.getByRole('button', {
       name: '在轨迹中定位：Locate this message',
@@ -1548,7 +1887,7 @@ describe('App conversation view', () => {
     }))
 
     render(<App />)
-    await screen.findByText('Beta response', { selector: '.record-main span' })
+    await waitForLoadedSession('zcode', 'search-session')
     fireEvent.click(screen.getByRole('tab', { name: '对话' }))
     const search = screen.getByRole('textbox', { name: '搜索会话内容' })
     fireEvent.change(search, { target: { value: 'beta' } })

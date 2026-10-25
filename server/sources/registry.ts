@@ -5,15 +5,17 @@ import type {
   SourceStatus,
 } from '../../src/types'
 import { jsonWeight, WeightedLruCache } from '../lru'
-import { codexSource } from './codex'
-import { dshSource } from './dsh'
+import { ProjectionWorkerClient } from '../projection-worker-client'
+import type { ResolvedSourcePaths } from '../source-paths'
+import { CodexSource } from './codex'
+import { DshSource } from './dsh'
 import {
   capabilities,
   sourceMetadata,
   type SessionSource,
   type SourceSessionRef,
 } from './types'
-import { zcodeSource } from './zcode'
+import { ZcodeSource } from './zcode'
 
 interface TimedValue<T> {
   expiresAt: number
@@ -28,6 +30,7 @@ interface DetailCacheEntry {
 interface SourceRegistryOptions {
   detailCacheEntries?: number
   detailCacheBytes?: number
+  projectionWorker?: ProjectionWorkerClient
 }
 
 const CACHE_WINDOW_MS = 1_000
@@ -54,12 +57,14 @@ export class SourceRegistry {
   private readonly missingRefs = new Map<string, number>()
   private statusCache?: TimedValue<SourceStatus[]>
   private readonly detailCache: WeightedLruCache<string, DetailCacheEntry>
+  private readonly projectionWorker?: ProjectionWorkerClient
 
   constructor(
     sources: readonly SessionSource[],
     options: SourceRegistryOptions = {},
   ) {
     this.sources = new Map(sources.map(source => [source.id, source]))
+    this.projectionWorker = options.projectionWorker
     this.detailCache = new WeightedLruCache({
       maxEntries: options.detailCacheEntries ?? DEFAULT_DETAIL_CACHE_ENTRIES,
       maxWeight: options.detailCacheBytes ?? DEFAULT_DETAIL_CACHE_BYTES,
@@ -80,6 +85,7 @@ export class SourceRegistry {
     const value = this.source(id).list().then(refs => {
       this.knownRefs.set(id, new Map(refs.map(ref => [ref.sourceSessionId, ref])))
       for (const ref of refs) this.missingRefs.delete(`${id}:${ref.sourceSessionId}`)
+      this.statusCache = undefined
       return refs
     })
     this.refCache.set(id, { expiresAt: now + CACHE_WINDOW_MS, value })
@@ -94,15 +100,30 @@ export class SourceRegistry {
     const value = Promise.all([...this.sources.values()].map(async (source) => {
       try {
         const status = await source.probe()
-        if (status.availability === 'blocked') return status
+        if (status.availability === 'blocked') {
+          return { ...status, sessionCountState: 'ready' as const }
+        }
+        if (!fresh) {
+          const known = this.knownRefs.get(source.id)
+          return {
+            ...status,
+            sessionCount: known?.size ?? status.sessionCount,
+            sessionCountState: known === undefined ? 'pending' as const : 'ready' as const,
+          }
+        }
         try {
           const refs = await this.refs(source.id, fresh)
-          return { ...status, sessionCount: refs.length }
+          return {
+            ...status,
+            sessionCount: refs.length,
+            sessionCountState: 'ready' as const,
+          }
         } catch {
           return {
             ...status,
             availability: 'degraded' as const,
             sessionCount: 0,
+            sessionCountState: 'ready' as const,
             reason: 'list_failed',
             detail: '会话列表读取失败',
           }
@@ -179,6 +200,26 @@ export class SourceRegistry {
     return detail?.projection.records.find(record => record.id === recordId)?.raw
   }
 
+  async audit(
+    source: SourceId,
+    sourceSessionId: string,
+  ): Promise<readonly unknown[] | undefined> {
+    const adapter = this.source(source)
+    const ref = await this.ref(source, sourceSessionId)
+    if (ref === undefined) return undefined
+    try {
+      return await adapter.audit(ref)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      this.knownRefs.get(source)?.delete(sourceSessionId)
+      const refreshed = (await this.refs(source, true)).find(
+        candidate => candidate.sourceSessionId === sourceSessionId,
+      )
+      if (refreshed === undefined) return undefined
+      return adapter.audit(refreshed)
+    }
+  }
+
   async fingerprint(source: SourceId, sourceSessionId: string): Promise<string | undefined> {
     const adapter = this.source(source)
     const ref = await this.ref(source, sourceSessionId)
@@ -200,10 +241,31 @@ export class SourceRegistry {
       return adapter.fingerprint(refreshed)
     }
   }
+
+  async close(): Promise<void> {
+    await Promise.allSettled([
+      ...[...this.sources.values()].map(source =>
+        source.close?.() ?? Promise.resolve()),
+      this.projectionWorker?.close() ?? Promise.resolve(),
+    ])
+  }
 }
 
-export const sourceRegistry = new SourceRegistry([
-  dshSource,
-  codexSource,
-  zcodeSource,
-])
+export function createSourceRegistry(paths: ResolvedSourcePaths): SourceRegistry {
+  const projectionWorker = new ProjectionWorkerClient()
+  return new SourceRegistry([
+    new DshSource({
+      sessionsRoot: paths.dshSessionsDir,
+      projectionWorker,
+    }),
+    new CodexSource({
+      sessionsRoot: paths.codexSessionsDir,
+      sessionIndexFile: paths.codexSessionIndex,
+      projectionWorker,
+    }),
+    new ZcodeSource({
+      database: paths.zcodeDatabase,
+      projectionWorker,
+    }),
+  ], { projectionWorker })
+}

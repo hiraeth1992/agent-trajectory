@@ -1,10 +1,9 @@
 import {
   Activity,
+  BarChart3,
   Clock3,
-  Code2,
   Download,
   FileJson,
-  Folder,
   Hash,
   Layers3,
   MessageSquare,
@@ -14,7 +13,6 @@ import {
   SquareTerminal,
   X,
 } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
 import {
   useCallback,
   useEffect,
@@ -24,20 +22,22 @@ import {
 } from 'react'
 import { Conversation } from './components/Conversation'
 import { Inspector, type InspectorTab } from './components/Inspector'
+import { SourcePicker } from './components/SourcePicker'
 import { Timeline } from './components/Timeline'
+import { TrajectorySummary } from './components/TrajectorySummary'
 import { VirtualLedger } from './components/VirtualLedger'
 import type {
   SessionDetail,
   SessionDetailDelta,
   SessionDetailResponse,
   SessionSummary,
-  SourceIconToken,
   SourceId,
   SourceStatus,
   TransportSessionDetail,
   TransportTrajectoryRecord,
 } from './types'
 import { recordSearchText } from './projector-utils'
+import { analyzeTrajectory } from './trajectory-analysis'
 import {
   buildTimelineGeometry,
   formatTime,
@@ -46,20 +46,26 @@ import {
 } from './trajectory-view-model'
 
 type SourceFilter = SourceId | 'all'
-type SessionView = 'conversation' | 'model-context' | 'trajectory'
+type SessionView = 'conversation' | 'model-context' | 'trajectory' | 'summary'
 
-const SOURCE_ICONS: Record<SourceIconToken, LucideIcon> = {
-  agent: Activity,
-  code: Code2,
-  terminal: SquareTerminal,
+interface SessionTarget {
+  source: SourceId
+  sessionId: string
 }
 
-const SOURCE_REASON_LABELS: Record<string, string> = {
-  list_failed: '会话列表不可读',
-  probe_failed: '探针失败',
-  sessions_database_missing: '未找到会话数据库',
-  sessions_directory_missing: '未找到会话目录',
-  unsupported_zcode_schema: '数据库结构不兼容',
+function sourceId(value: string | null): SourceId | undefined {
+  return value === 'codex' || value === 'dsh' || value === 'zcode'
+    ? value
+    : undefined
+}
+
+export function sessionTargetFromLocation(location: Pick<Location, 'search'>): SessionTarget | undefined {
+  const search = new URLSearchParams(location.search)
+  const source = sourceId(search.get('source'))
+  const sessionId = search.get('session')?.trim()
+  return source === undefined || sessionId === undefined || sessionId === ''
+    ? undefined
+    : { source, sessionId }
 }
 
 function hydrateRecord(record: TransportTrajectoryRecord): SessionDetail['projection']['records'][number] {
@@ -101,10 +107,17 @@ function applyDetailDelta(current: SessionDetail, delta: SessionDetailDelta): Se
 }
 
 export function App() {
+  const initialTarget = useRef(sessionTargetFromLocation(window.location))
   const [sources, setSources] = useState<SourceStatus[]>([])
   const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
-  const [view, setView] = useState<SessionView>('trajectory')
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>(
+    initialTarget.current?.source ?? 'all',
+  )
+  const [sessionTarget, setSessionTarget] = useState<SessionTarget | undefined>(
+    initialTarget.current,
+  )
+  const [waitingForSession, setWaitingForSession] = useState(false)
+  const [view, setView] = useState<SessionView>('summary')
   const [sessionKey, setSessionKey] = useState('')
   const [detail, setDetail] = useState<SessionDetail>()
   const [loading, setLoading] = useState(true)
@@ -125,6 +138,7 @@ export function App() {
   const detailRef = useRef<SessionDetail>()
   const detailRevision = useRef<{ key: string; revision: string }>()
   const sessionsRef = useRef<SessionSummary[]>([])
+  const selectedSessionByFilter = useRef<Partial<Record<SourceFilter, string>>>({})
 
   const loadSources = useCallback(async () => {
     const response = await fetch('/api/sources')
@@ -139,12 +153,42 @@ export function App() {
     if (signal.aborted) return
     sessionsRef.current = result
     setSessions(result)
-    setSessionKey(current => result.some(session => session.id === current) ? current : result[0]?.id ?? '')
+    const counts = new Map<SourceId, number>()
+    for (const session of result) {
+      counts.set(session.source, (counts.get(session.source) ?? 0) + 1)
+    }
+    setSources(current => current.map((status) => {
+      if (sourceFilter !== 'all' && status.source !== sourceFilter) return status
+      return {
+        ...status,
+        sessionCount: counts.get(status.source) ?? 0,
+        sessionCountState: 'ready',
+      }
+    }))
+    const targeted = sessionTarget === undefined
+      ? undefined
+      : result.find(session =>
+          session.source === sessionTarget.source
+          && session.sourceSessionId === sessionTarget.sessionId)
+    setWaitingForSession(sessionTarget !== undefined && targeted === undefined)
+    setSessionKey((current) => {
+      const remembered = selectedSessionByFilter.current[sourceFilter]
+      const next = targeted?.id
+        ?? (sessionTarget !== undefined
+          ? ''
+          : remembered !== undefined && result.some(session => session.id === remembered)
+            ? remembered
+            : result.some(session => session.id === current)
+              ? current
+              : result[0]?.id ?? '')
+      if (next !== '') selectedSessionByFilter.current[sourceFilter] = next
+      return next
+    })
     if (result.length === 0) {
       setDetail(undefined)
       setLoading(false)
     }
-  }, [sourceFilter])
+  }, [sessionTarget, sourceFilter])
 
   const loadDetail = useCallback(async (source: SourceId, id: string, quiet = false) => {
     const key = `${source}:${id}`
@@ -210,6 +254,10 @@ export function App() {
       }
       detailRef.current = next
       detailRevision.current = { key, revision: result.revision }
+      setView(current =>
+        current === 'model-context' && next.projection.modelContextRecordIds === undefined
+          ? 'conversation'
+          : current)
       setDetail(next)
       setSessions((current) => {
         const updated = current.map(session =>
@@ -260,6 +308,61 @@ export function App() {
     return () => controller.abort()
   }, [loadSessions])
 
+  useEffect(() => {
+    if (!waitingForSession || sessionTarget === undefined) return
+    const timer = window.setInterval(() => {
+      const controller = new AbortController()
+      void loadSessions(controller.signal).catch(caught => {
+        if (!controller.signal.aborted) {
+          setError(caught instanceof Error ? caught.message : String(caught))
+        }
+      })
+    }, 500)
+    return () => window.clearInterval(timer)
+  }, [loadSessions, sessionTarget, waitingForSession])
+
+  useEffect(() => {
+    let stream: EventSource
+    try {
+      stream = new EventSource('/api/integrations/activations')
+    } catch {
+      return
+    }
+    stream.addEventListener('activation', (event) => {
+      let activation: SessionTarget | undefined
+      try {
+        const value = JSON.parse((event as MessageEvent<string>).data) as {
+          source?: unknown
+          sessionId?: unknown
+        }
+        const source = typeof value.source === 'string'
+          ? sourceId(value.source)
+          : undefined
+        activation = source === undefined || typeof value.sessionId !== 'string'
+          ? undefined
+          : { source, sessionId: value.sessionId }
+      } catch {
+        return
+      }
+      if (activation === undefined) return
+      setError(undefined)
+      setLoading(true)
+      detailRequest.current?.controller.abort()
+      pendingDetailRefresh.current = undefined
+      detailRevision.current = undefined
+      detailRef.current = undefined
+      setDetail(undefined)
+      setSessionKey('')
+      setSourceFilter(activation.source)
+      setSessionTarget(activation)
+      const url = new URL(window.location.href)
+      url.searchParams.set('source', activation.source)
+      url.searchParams.set('session', activation.sessionId)
+      window.history.replaceState(null, '', url)
+    })
+    return () => stream.close()
+  }, [])
+
   const currentSession = sessions.find(session => session.id === sessionKey)
   const currentSessionKey = currentSession?.id
   const currentSource = currentSession?.source
@@ -272,6 +375,9 @@ export function App() {
     sourceMetadata.get(source)?.label ?? source
   const sourceColor = (source: SourceId): string =>
     sourceMetadata.get(source)?.colorToken ?? 'blue'
+  const availableSessionCount = sources
+    .filter(source => source.availability !== 'blocked')
+    .reduce((total, source) => total + source.sessionCount, 0)
 
   useEffect(() => {
     setRange(null)
@@ -367,6 +473,10 @@ export function App() {
   }, [detail, query, view])
 
   const selected = detail?.projection.records.find(record => record.id === selectedId)
+  const analysis = useMemo(
+    () => detail === undefined ? undefined : analyzeTrajectory(detail),
+    [detail],
+  )
   const selectedRawKey = selected === undefined
     || currentSource === undefined
     || currentSourceSessionId === undefined
@@ -465,22 +575,41 @@ export function App() {
         <div className="brand">
           <Activity size={21} />
           <span>Agent Trajectory</span>
-          <small>multi-source</small>
         </div>
-        <label className="session-picker">
-          <Folder size={16} />
-          <select
-            className="source-filter"
+        <div className="session-picker">
+          <SourcePicker
+            sources={sources}
             value={sourceFilter}
-            onChange={event => setSourceFilter(event.target.value as SourceFilter)}
-            aria-label="筛选来源"
+            total={availableSessionCount}
+            onChange={(next) => {
+              if (sessionKey !== '') selectedSessionByFilter.current[sourceFilter] = sessionKey
+              setSessionTarget(undefined)
+              setWaitingForSession(false)
+              setSourceFilter(next)
+              const url = new URL(window.location.href)
+              url.searchParams.delete('source')
+              url.searchParams.delete('session')
+              window.history.replaceState(null, '', url)
+            }}
+          />
+          <select
+            value={sessionKey}
+            onChange={(event) => {
+              const next = event.target.value
+              selectedSessionByFilter.current[sourceFilter] = next
+              setSessionKey(next)
+              setSessionTarget(undefined)
+              setWaitingForSession(false)
+              const session = sessions.find(candidate => candidate.id === next)
+              if (session !== undefined) {
+                const url = new URL(window.location.href)
+                url.searchParams.set('source', session.source)
+                url.searchParams.set('session', session.sourceSessionId)
+                window.history.replaceState(null, '', url)
+              }
+            }}
+            aria-label="选择会话"
           >
-            <option value="all">全部来源</option>
-            {sources
-              .filter(source => source.availability !== 'blocked')
-              .map(source => <option value={source.source} key={source.source}>{source.label}</option>)}
-          </select>
-          <select value={sessionKey} onChange={event => setSessionKey(event.target.value)} aria-label="选择会话">
             {sessions.length === 0 && <option value="">无可用会话</option>}
             {sessions.map(session => (
               <option value={session.id} key={session.id}>
@@ -488,7 +617,7 @@ export function App() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
         <div className="header-actions">
           {currentSession?.capabilities.live === true && <span className="live-status"><i /> 准实时</span>}
           <button
@@ -574,32 +703,21 @@ export function App() {
         >
           <Activity size={17} /> 轨迹
         </button>
-        <div className="source-health" aria-label="来源状态">
-          {sources.map((source) => {
-            const SourceIcon = SOURCE_ICONS[source.iconToken] ?? Activity
-            return (
-              <span
-                className={`source-health-item status-${source.availability} source-color-${source.colorToken}`}
-                key={source.source}
-                title={source.detail}
-              >
-                <i />
-                <SourceIcon className="source-icon" size={12} aria-hidden="true" />
-                <strong>{source.label}{source.version === undefined ? '' : ` ${source.version}`}</strong>
-                <small>
-                  {source.availability === 'blocked'
-                    ? SOURCE_REASON_LABELS[source.reason ?? ''] ?? source.reason ?? '已阻断'
-                    : source.availability === 'degraded'
-                      ? `${source.sessionCount} 个会话 · 降级`
-                      : `${source.sessionCount} 个会话`}
-                </small>
-              </span>
-            )
-          })}
-        </div>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === 'summary'}
+          className={view === 'summary' ? 'active' : ''}
+          onClick={() => {
+            setView('summary')
+            setSelectedId(undefined)
+          }}
+        >
+          <BarChart3 size={17} /> 轨迹评测
+        </button>
       </nav>
 
-      <section className="toolbar">
+      {view !== 'summary' && <section className="toolbar">
         <div className="toolbar-modes" aria-label={view === 'trajectory' ? '轨迹控制' : '消息控制'}>
           {view === 'trajectory' && (
             <>
@@ -635,10 +753,19 @@ export function App() {
             )}
           </label>
         </div>
-      </section>
+      </section>}
 
       {error !== undefined && <div className="error-banner">{error}</div>}
-      {loading && detail === undefined
+      {waitingForSession && sessionTarget !== undefined && detail === undefined
+        ? (
+            <div className="loading-state">
+              <Activity size={22} />
+              <span>
+                正在等待 {sourceLabel(sessionTarget.source)} 会话写入…
+              </span>
+            </div>
+          )
+        : loading && detail === undefined
         ? (
             <div className="loading-state">
               <Activity size={22} />
@@ -650,12 +777,35 @@ export function App() {
               <div className="empty-state">
                 <FileJson size={28} />
                 <strong>当前筛选没有可用的 Agent 会话</strong>
-                <span>{blockedSources.length} 个来源因证据门禁被阻断</span>
+                {blockedSources.length === 0
+                  ? <span>未检测到可读取的本地会话</span>
+                  : (
+                      <div className="source-diagnostics">
+                        {blockedSources.map(source => (
+                          <article key={source.source}>
+                            <strong>
+                              {source.label}：
+                              {source.protocol === undefined ? '来源不可用' : '协议暂不兼容'}
+                            </strong>
+                            {source.detail !== undefined && <span>{source.detail}</span>}
+                            {source.protocol !== undefined && (
+                              <>
+                                <span>
+                                  检测到 {source.protocol.detected} · 支持{' '}
+                                  {source.protocol.supported.join('、')}
+                                </span>
+                                <code>{source.protocol.fingerprint}</code>
+                              </>
+                            )}
+                          </article>
+                        ))}
+                      </div>
+                    )}
               </div>
             )
           : (
               <>
-                <div className="session-meta">
+                {view !== 'summary' && <div className="session-meta">
                   <div className="session-identity">
                     <strong>
                       <span className={`source-badge source-color-${sourceColor(detail.summary.source)}`}>
@@ -750,8 +900,33 @@ export function App() {
                     </details>
                     <div><dt>更新时间</dt><dd>{formatTime(detail.summary.updatedAt)}</dd></div>
                   </dl>
-                </div>
-                {view !== 'trajectory'
+                </div>}
+                {view === 'summary' && analysis !== undefined
+                  ? (
+                      <TrajectorySummary
+                        analysis={analysis}
+                        source={detail.summary.source}
+                        sourceSessionId={detail.summary.sourceSessionId}
+                        sessionModel={detail.projection.header.model}
+                        sessionProvider={detail.projection.header.provider}
+                        sessionMeta={{
+                          eventCount: detail.projection.eventCount,
+                          recordCount: detail.projection.records.length,
+                          eventTypeCount: eventTypeCounts.length,
+                          completedTurns,
+                          createdAt: detail.summary.createdAt,
+                          updatedAt: detail.summary.updatedAt,
+                          projectionStartTime: detail.projection.startTime,
+                          projectionEndTime: detail.projection.endTime,
+                        }}
+                        onOpenRecord={(id) => {
+                          setView('trajectory')
+                          setSelectedId(id)
+                          setInspectorTab('details')
+                        }}
+                      />
+                    )
+                  : view !== 'trajectory'
                   ? (
                       <Conversation
                         records={conversationRecords}

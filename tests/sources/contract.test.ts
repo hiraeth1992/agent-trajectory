@@ -58,12 +58,30 @@ function fakeSource(
     probe: async () => status,
     list: async () => [ref],
     load: async () => detail,
+    audit: async () => [],
     fingerprint: async () => 'v1',
     ...overrides,
   }
 }
 
 describe('SessionSource registry contract', () => {
+  it('returns lightweight source status before session discovery', async () => {
+    const list = vi.fn(async () => {
+      throw new Error('slow discovery is not part of a status probe')
+    })
+    const registry = new SourceRegistry([
+      fakeSource('codex', { list }),
+    ])
+
+    expect(await registry.listSources()).toMatchObject([{
+      source: 'codex',
+      availability: 'available',
+      sessionCount: 0,
+      sessionCountState: 'pending',
+    }])
+    expect(list).not.toHaveBeenCalled()
+  })
+
   it('isolates one source list failure from healthy sources', async () => {
     const registry = new SourceRegistry([
       fakeSource('dsh'),
@@ -73,7 +91,7 @@ describe('SessionSource registry contract', () => {
         },
       }),
     ])
-    const statuses = await registry.listSources()
+    const statuses = await registry.listSources(true)
     expect(statuses.find(status => status.source === 'codex')).toMatchObject({
       availability: 'degraded',
       reason: 'list_failed',

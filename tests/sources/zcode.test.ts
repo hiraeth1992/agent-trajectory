@@ -281,6 +281,44 @@ describe('ZCode projector', () => {
     })
   })
 
+  it('uses the persisted finish state when timing alone cannot prove completion', () => {
+    const input = fixture()
+    input.modelUsage = []
+    input.turnUsage = []
+    input.messages[2]!.time_updated = input.messages[2]!.time_created
+    input.messages[2]!.data.time = { created: input.messages[2]!.time_created }
+    input.messages[2]!.data.finish = 'completed'
+
+    const projection = projectZcodeTrajectory(input)
+
+    expect(projection.records.find(record => record.id === 'message:assistant-1'))
+      .toMatchObject({
+        status: 'complete',
+        endTime: input.messages[2]!.time_created,
+      })
+  })
+
+  it('uses the latest model and provider for the session header', () => {
+    const input = fixture()
+    input.modelUsage = [
+      input.modelUsage[0]!,
+      {
+        ...input.modelUsage[0]!,
+        id: 'model-latest',
+        assistant_message_id: null,
+        model_id: 'latest-model',
+        provider_id: 'latest-provider',
+        started_at: 2_000,
+        completed_at: 2_100,
+      },
+    ]
+
+    expect(projectZcodeTrajectory(input).header).toMatchObject({
+      model: 'latest-model',
+      provider: 'latest-provider',
+    })
+  })
+
   it('recognizes timeline metadata without projecting a visible record', () => {
     const input = fixture()
     input.parts = [...input.parts, {
@@ -476,6 +514,56 @@ function addAdvancedSchema(file: string): void {
 }
 
 describe('ZCode SQLite source', () => {
+  it('changes the fingerprint when projected row content changes without a watermark update', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-zcode-content-'))
+    temporaryRoots.push(root)
+    const database = path.join(root, 'db.sqlite')
+    createDatabase(database, fixture())
+    const source = new ZcodeSource({ database })
+    const [ref] = await source.list()
+    const before = await source.fingerprint(ref!)
+
+    const writer = new DatabaseSync(database)
+    writer.prepare('UPDATE part SET data = ? WHERE id = ?').run(
+      JSON.stringify({
+        type: 'text',
+        text: 'content changed without advancing time_updated',
+      }),
+      'part-user',
+    )
+    writer.close()
+
+    expect(await source.fingerprint(ref!)).not.toBe(before)
+    await source.close()
+  })
+
+  it('reloads projected content changed without a watermark update', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-zcode-rewrite-'))
+    temporaryRoots.push(root)
+    const database = path.join(root, 'db.sqlite')
+    createDatabase(database, fixture())
+    const source = new ZcodeSource({ database })
+    const registry = new SourceRegistry([source])
+    const initial = await registry.load('zcode', 'session-zcode-1')
+    expect(initial?.projection.records.find(record => record.id === 'message:user-1')?.summary)
+      .toBe('build it')
+
+    const writer = new DatabaseSync(database)
+    writer.prepare('UPDATE part SET data = ? WHERE id = ?').run(
+      JSON.stringify({
+        type: 'text',
+        text: 'content changed without advancing time_updated',
+      }),
+      'part-user',
+    )
+    writer.close()
+
+    const updated = await registry.load('zcode', 'session-zcode-1')
+    expect(updated?.projection.records.find(record => record.id === 'message:user-1')?.summary)
+      .toBe('content changed without advancing time_updated')
+    await registry.close()
+  })
+
   it('changes only the fingerprint of the session that was updated', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-zcode-fingerprint-'))
     temporaryRoots.push(root)
@@ -602,6 +690,11 @@ describe('ZCode SQLite source', () => {
       source: 'zcode',
       availability: 'degraded',
       reason: 'optional_zcode_features_unavailable',
+      protocol: {
+        detected: 'zcode-sqlite-core-v1',
+        supported: ['zcode-sqlite-core-v1'],
+        fingerprint: expect.stringMatching(/^zcode:sqlite:sha256:[a-f0-9]{64}$/),
+      },
       capabilities: {
         messages: true,
         trace: false,
@@ -932,6 +1025,11 @@ describe('ZCode SQLite source', () => {
       availability: 'blocked',
       reason: 'unsupported_zcode_schema',
       detail: expect.stringContaining('part.data'),
+      protocol: {
+        detected: 'zcode-sqlite-unknown',
+        supported: ['zcode-sqlite-core-v1'],
+        fingerprint: expect.stringMatching(/^zcode:sqlite:sha256:[a-f0-9]{64}$/),
+      },
     })
   })
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -8,7 +9,10 @@ import {
   type ZcodeSessionRow,
 } from '../projectors/zcode'
 import { jsonWeight, WeightedLruCache } from '../lru'
-import { projectionWorker } from '../projection-worker-client'
+import {
+  ProjectionWorkerClient,
+  projectionWorker as defaultProjectionWorker,
+} from '../projection-worker-client'
 import type { SessionDetail, SessionSummary, SourceStatus } from '../../src/types'
 import {
   capabilities,
@@ -33,6 +37,7 @@ export interface ZcodeSourceOptions {
   cacheEntries?: number
   cacheBytes?: number
   workerFactory?: WorkerFactory
+  projectionWorker?: ProjectionWorkerClient
 }
 
 type SqliteOperation = 'probe' | 'list' | 'fingerprint' | 'load'
@@ -51,12 +56,18 @@ interface ZcodeCacheEntry {
 interface ZcodeLoadResult extends ZcodeProjectionInput {
   messageCount: number
   partCount: number
+  rowFingerprint: string
   features: ZcodeFeatureSupport
 }
 
 interface ZcodeListResult {
   features: ZcodeFeatureSupport
   sessions: ZcodeSessionRow[]
+}
+
+interface ZcodeProbeResult {
+  features: ZcodeFeatureSupport
+  schemaFingerprint: string
 }
 
 interface WorkerSuccess<T> {
@@ -73,6 +84,8 @@ interface WorkerFailure {
     message: string
     stack?: string
     code?: string
+    protocolFingerprint?: string
+    protocolMissing?: string[]
   }
 }
 
@@ -153,6 +166,8 @@ class SqliteWorkerClient {
           name: message.error.name,
           stack: message.error.stack,
           code: message.error.code,
+          protocolFingerprint: message.error.protocolFingerprint,
+          protocolMissing: message.error.protocolMissing,
         }))
       }
     })
@@ -203,6 +218,24 @@ function mergeRows<T extends { id: string }>(current: readonly T[], changed: rea
   return [...byId.values()]
 }
 
+function projectedRowsFingerprint(
+  messages: ZcodeProjectionInput['messages'],
+  parts: ZcodeProjectionInput['parts'],
+): string {
+  const byOrder = <T extends {
+    id: string
+    sequence: number | null
+    time_created: number | null
+  }>(left: T, right: T) =>
+    (left.sequence ?? 0) - (right.sequence ?? 0)
+    || (left.time_created ?? 0) - (right.time_created ?? 0)
+    || left.id.localeCompare(right.id)
+  return createHash('sha256').update(JSON.stringify({
+    messages: [...messages].sort(byOrder),
+    parts: [...parts].sort(byOrder),
+  })).digest('hex')
+}
+
 function projectionInput(result: ZcodeLoadResult): ZcodeProjectionInput {
   return {
     session: result.session,
@@ -243,6 +276,7 @@ export class ZcodeSource implements SessionSource {
   private readonly database: string
   private readonly cache: WeightedLruCache<string, ZcodeCacheEntry>
   private readonly sqlite: SqliteWorkerClient
+  private readonly projectionWorker: ProjectionWorkerClient
   private readonly projectionNamespace = `zcode-source:${++zcodeSourceInstances}`
   private features?: ZcodeFeatureSupport
 
@@ -253,6 +287,7 @@ export class ZcodeSource implements SessionSource {
       options.workerFactory ?? ((filename, workerOptions) =>
         new Worker(filename, workerOptions)),
     )
+    this.projectionWorker = options.projectionWorker ?? defaultProjectionWorker
     this.cache = new WeightedLruCache<string, ZcodeCacheEntry>({
       maxEntries: options.cacheEntries ?? 8,
       maxWeight: options.cacheBytes ?? 96 * 1024 * 1024,
@@ -263,7 +298,8 @@ export class ZcodeSource implements SessionSource {
   async probe(): Promise<SourceStatus> {
     try {
       await fs.access(this.database)
-      const features = await this.sqlite.query<ZcodeFeatureSupport>('probe')
+      const probe = await this.sqlite.query<ZcodeProbeResult>('probe')
+      const features = probe.features
       this.features = features
       const missing = missingFeatures(features)
       return {
@@ -272,6 +308,11 @@ export class ZcodeSource implements SessionSource {
         ...sourceMetadata(this.id),
         sessionCount: 0,
         capabilities: zcodeCapabilities(features),
+        protocol: {
+          detected: 'zcode-sqlite-core-v1',
+          supported: ['zcode-sqlite-core-v1'],
+          fingerprint: probe.schemaFingerprint,
+        },
         ...(missing.length === 0
           ? {}
           : {
@@ -281,6 +322,9 @@ export class ZcodeSource implements SessionSource {
       }
     } catch (error) {
       const missing = (error as NodeJS.ErrnoException).code === 'ENOENT'
+      const protocolFingerprint = (error as Error & {
+        protocolFingerprint?: string
+      }).protocolFingerprint
       return {
         source: this.id,
         availability: 'blocked',
@@ -291,6 +335,15 @@ export class ZcodeSource implements SessionSource {
         detail: missing
           ? '未找到 ~/.zcode/cli/db/db.sqlite'
           : error instanceof Error ? error.message : String(error),
+        ...(protocolFingerprint === undefined
+          ? {}
+          : {
+              protocol: {
+                detected: 'zcode-sqlite-unknown',
+                supported: ['zcode-sqlite-core-v1'],
+                fingerprint: protocolFingerprint,
+              },
+            }),
       }
     }
   }
@@ -330,6 +383,27 @@ export class ZcodeSource implements SessionSource {
     return this.sqlite.query<string>('fingerprint', this.assertRef(ref))
   }
 
+  async audit(ref: SourceSessionRef): Promise<readonly unknown[]> {
+    const sessionId = this.assertRef(ref)
+    const result = await this.sqlite.query<ZcodeLoadResult | undefined>(
+      'load',
+      sessionId,
+    )
+    if (result === undefined) throw missingSessionError()
+    return [
+      { type: 'session', data: result.session },
+      ...result.messages.map(data => ({ type: 'message', data })),
+      ...result.parts.map(data => ({ type: 'part', data })),
+      ...result.modelUsage.map(data => ({ type: 'model_usage', data })),
+      ...result.toolUsage.map(data => ({ type: 'tool_usage', data })),
+      ...result.turnUsage.map(data => ({ type: 'turn_usage', data })),
+      ...(result.target === undefined
+        ? []
+        : [{ type: 'session_target', data: result.target }]),
+      ...(result.todos ?? []).map(data => ({ type: 'todo', data })),
+    ]
+  }
+
   async load(ref: SourceSessionRef): Promise<SessionDetail> {
     const sessionId = this.assertRef(ref)
     const cached = this.cache.get(sessionId)
@@ -361,6 +435,7 @@ export class ZcodeSource implements SessionSource {
         }
     cacheInvalid ||= merged.messages.length !== changed.messageCount
       || merged.parts.length !== changed.partCount
+      || projectedRowsFingerprint(merged.messages, merged.parts) !== changed.rowFingerprint
     if (cacheInvalid) {
       changed = await this.sqlite.query<ZcodeLoadResult | undefined>(
         'load',
@@ -376,7 +451,7 @@ export class ZcodeSource implements SessionSource {
       messageUpdatedAt: watermark(input.messages),
       partUpdatedAt: watermark(input.parts),
     })
-    const projection = await projectionWorker.projectZcode(
+    const projection = await this.projectionWorker.projectZcode(
       `${this.projectionNamespace}:${sessionId}`,
       input,
     )
@@ -405,5 +480,3 @@ export class ZcodeSource implements SessionSource {
     return ref.sourceSessionId
   }
 }
-
-export const zcodeSource = new ZcodeSource()

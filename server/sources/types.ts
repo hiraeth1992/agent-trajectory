@@ -34,7 +34,9 @@ export interface SessionSource {
   probe(): Promise<SourceStatus>
   list(): Promise<readonly SourceSessionRef[]>
   load(ref: SourceSessionRef): Promise<SessionDetail>
+  audit(ref: SourceSessionRef): Promise<readonly unknown[]>
   fingerprint(ref: SourceSessionRef): Promise<string>
+  close?(): Promise<void>
 }
 
 export function sessionKey(source: SourceId, sourceSessionId: string): string {

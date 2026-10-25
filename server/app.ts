@@ -2,11 +2,29 @@ import { createReadStream, promises as fs } from 'node:fs'
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import path from 'node:path'
 import type { ViteDevServer } from 'vite'
-import { handleApi, sendError, sendJson } from './api'
-import { projectionWorker } from './projection-worker-client'
+import { BrowserSession } from './browser-session'
+import {
+  handleApi,
+  sendError,
+  sendJson,
+  type ApiRegistry,
+} from './api'
+import { TrajectoryDiagnosisService } from './diagnosis/service'
+import { DiagnosisEvidenceStore } from './diagnosis/evidence-store'
 import { assertLoopbackListenHost, hasAllowedLocalRequest } from './security'
-import { sourceRegistry } from './sources/registry'
-import { zcodeSource } from './sources/zcode'
+import { SessionActivationHub } from './session-activation'
+import {
+  resolveSourcePaths,
+  type ResolvedSourcePaths,
+} from './source-paths'
+import { SummaryCache } from './summary/cache'
+import { SummaryEngine } from './summary/engine'
+import { SummarySettingsStore } from './summary/settings'
+import { createEncryptedFileSummarySecretStore } from './summary/secret-store'
+import {
+  type SummarySecretStore,
+} from './summary/types'
+import { createSourceRegistry } from './sources/registry'
 
 const mimeTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -34,7 +52,15 @@ export interface AgentTrajectoryServerOptions {
   development?: boolean
   host?: string
   port?: number
+  registry?: ApiRegistry & { close?(): Promise<void> }
   root: string
+  browserSession?: BrowserSession
+  diagnosisEvidenceCommand?: string
+  diagnosisSkillPath?: string
+  sessionActivationHub?: SessionActivationHub
+  sourcePaths?: ResolvedSourcePaths
+  summaryDataRoot?: string
+  summarySecretStore?: SummarySecretStore
   staticRoot?: string
 }
 
@@ -114,6 +140,35 @@ export async function startAgentTrajectoryServer(
   const host = assertLoopbackListenHost(options.host)
   const development = options.development ?? false
   const staticRoot = options.staticRoot ?? path.join(options.root, 'dist')
+  const summaryDataRoot = options.summaryDataRoot
+    ?? path.join(options.root, '.agent-trajectory-local')
+  const summarySecrets = options.summarySecretStore
+    ?? await createEncryptedFileSummarySecretStore(summaryDataRoot)
+  const sourcePaths = options.sourcePaths ?? resolveSourcePaths({
+    configDirectory: options.root,
+  })
+  const registry = options.registry ?? createSourceRegistry(sourcePaths)
+  const summary = new SummaryEngine(
+    registry,
+    new SummarySettingsStore(
+      path.join(summaryDataRoot, 'summary-settings.json'),
+      summarySecrets,
+    ),
+    new SummaryCache(path.join(summaryDataRoot, 'summary-cache.json')),
+    summarySecrets,
+  )
+  const diagnosis = new TrajectoryDiagnosisService(
+    registry,
+    new DiagnosisEvidenceStore(path.join(summaryDataRoot, 'diagnosis-snapshots')),
+    options.diagnosisEvidenceCommand
+      ?? [
+        JSON.stringify(process.execPath),
+        JSON.stringify(path.join(options.root, 'node_modules', 'tsx', 'dist', 'cli.mjs')),
+        JSON.stringify(path.join(options.root, 'server', 'diagnosis', 'evidence-cli.ts')),
+      ].join(' '),
+    options.diagnosisSkillPath
+      ?? path.join(options.root, 'skills', 'trajectory-diagnosis', 'SKILL.md'),
+  )
   let vite: ViteDevServer | undefined
   if (development) {
     const { createServer: createViteServer } = await import('vite')
@@ -138,7 +193,35 @@ export async function startAgentTrajectoryServer(
         request.url ?? '/',
         `http://${request.headers.host ?? `${host}:${fallbackPort}`}`,
       )
-      if (await handleApi(request, response, url, { registry: sourceRegistry })) return
+      if (options.sessionActivationHub !== undefined
+        && await options.sessionActivationHub.handleHook(request, response, url)) return
+      const expectedOrigin = `http://${host}:${fallbackPort}`
+      if (options.browserSession !== undefined) {
+        const authorization = options.browserSession.authorize(request, response, url)
+        if (authorization === 'handled') return
+        if (authorization === 'rejected') {
+          sendJson(response, 401, { error: 'browser authorization required' })
+          return
+        }
+        if (!options.browserSession.allowsMutation(request, expectedOrigin)) {
+          sendJson(response, 403, { error: 'forbidden cross-origin mutation' })
+          return
+        }
+      }
+      if (url.pathname === '/api/integrations/activations'
+        && options.sessionActivationHub !== undefined) {
+        if (request.method !== 'GET') {
+          sendJson(response, 405, { error: 'method not allowed' })
+          return
+        }
+        options.sessionActivationHub.subscribe(request, response)
+        return
+      }
+      if (await handleApi(request, response, url, {
+        diagnosis,
+        registry,
+        summary,
+      })) return
       if (vite !== undefined) {
         vite.middlewares(request, response, () => {
           sendJson(response, 404, { error: 'not found' })
@@ -163,9 +246,10 @@ export async function startAgentTrajectoryServer(
         await Promise.allSettled([
           closeHttpServer(server),
           vite?.close() ?? Promise.resolve(),
-          zcodeSource.close(),
-          projectionWorker.close(),
+          registry.close?.() ?? Promise.resolve(),
+          summary.close(),
         ])
+        options.sessionActivationHub?.close()
       },
     }
   } catch (error) {

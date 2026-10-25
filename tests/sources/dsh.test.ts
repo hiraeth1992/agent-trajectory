@@ -6,6 +6,73 @@ import { DshSource, inferredDshId } from '../../server/sources/dsh'
 import type { SessionEvent, SessionHeader } from '../../src/types'
 
 describe('DSH source identity', () => {
+  it('reports no detected protocol for an empty sessions directory', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-empty-'))
+    try {
+      expect(await new DshSource({ sessionsRoot: root }).probe()).toMatchObject({
+        availability: 'available',
+        protocol: {
+          detected: 'none',
+          supported: ['dsh-session-v4'],
+          fingerprint: 'dsh:session:none',
+        },
+      })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('blocks an unknown session protocol with a portable diagnosis', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-protocol-'))
+    const file = path.join(root, 'session-new', 'session.v5.jsonl')
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    try {
+      await fs.writeFile(file, `${JSON.stringify({
+        type: 'session',
+        version: 5,
+        id: 'session-new',
+        createdAt: 1_000,
+        cwd: '/tmp/new',
+      })}\n`)
+
+      expect(await new DshSource({ sessionsRoot: root }).probe()).toMatchObject({
+        availability: 'blocked',
+        reason: 'unsupported_dsh_protocol',
+        protocol: {
+          detected: 'dsh-session-v5',
+          supported: ['dsh-session-v4'],
+          fingerprint: 'dsh:session:v5',
+        },
+      })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps v4 sessions available when unknown versions are also present', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-mixed-protocol-'))
+    const supported = path.join(root, 'session-supported', 'session.v4.jsonl')
+    const future = path.join(root, 'session-future', 'session.v5.jsonl')
+    await fs.mkdir(path.dirname(supported), { recursive: true })
+    await fs.mkdir(path.dirname(future), { recursive: true })
+    try {
+      await fs.writeFile(supported, '')
+      await fs.writeFile(future, '')
+
+      expect(await new DshSource({ sessionsRoot: root }).probe()).toMatchObject({
+        availability: 'degraded',
+        reason: 'additional_dsh_protocols_ignored',
+        protocol: {
+          detected: 'dsh-session-v4,dsh-session-v5',
+          supported: ['dsh-session-v4'],
+          fingerprint: 'dsh:session:v4,v5',
+        },
+      })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('preserves the session- prefix used by the v4 header', () => {
     expect(inferredDshId('/tmp/session-123/session.v4.jsonl.zstd')).toBe('session-123')
   })
@@ -75,6 +142,70 @@ describe('DSH source identity', () => {
       const [ref] = await new DshSource({ sessionsRoot: root }).list()
 
       expect(ref?.summary.title).toBe('DSH · 1234567890ab')
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('prefers live JSONL and lists one ref when multiple formats share a session id', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-formats-'))
+    const sessionId = 'session-format-priority'
+    const directory = path.join(root, sessionId)
+    const header: SessionHeader = {
+      type: 'session',
+      version: 4,
+      id: sessionId,
+      createdAt: 1_000,
+      cwd: '/tmp/format-priority',
+    }
+    await fs.mkdir(directory, { recursive: true })
+    try {
+      await fs.writeFile(
+        path.join(directory, 'session.v4.jsonl'),
+        `${JSON.stringify(header)}\n`,
+      )
+      await fs.writeFile(
+        path.join(directory, 'session.v4.jsonl.zstd'),
+        Buffer.from('not selected'),
+      )
+
+      const refs = await new DshSource({ sessionsRoot: root }).list()
+
+      expect(refs).toHaveLength(1)
+      expect(refs[0]?.sourceSessionId).toBe(sessionId)
+      expect(refs[0]?.locator).toBe(path.join(directory, 'session.v4.jsonl'))
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('returns every source event for audit, including raw-only events', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-dsh-audit-'))
+    const sessionId = 'session-audit'
+    const file = path.join(root, sessionId, 'session.v4.jsonl')
+    const header: SessionHeader = {
+      type: 'session',
+      version: 4,
+      id: sessionId,
+      createdAt: 1_000,
+      cwd: '/tmp/audit',
+    }
+    const rawOnly: SessionEvent = {
+      type: 'approval/asked',
+      seq: 0,
+      time: 1_100,
+      data: { id: 'approval-1', toolName: 'bash' },
+    }
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    try {
+      await fs.writeFile(
+        file,
+        `${JSON.stringify(header)}\n${JSON.stringify(rawOnly)}\n`,
+      )
+      const source = new DshSource({ sessionsRoot: root })
+      const [ref] = await source.list()
+
+      expect(await source.audit(ref!)).toEqual([header, rawOnly])
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

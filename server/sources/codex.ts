@@ -10,7 +10,10 @@ import {
 } from '../parsers/jsonl'
 import type { CodexEnvelope } from '../projectors/codex'
 import { jsonWeight, WeightedLruCache } from '../lru'
-import { projectionWorker } from '../projection-worker-client'
+import {
+  ProjectionWorkerClient,
+  projectionWorker as defaultProjectionWorker,
+} from '../projection-worker-client'
 import type { JsonObject, SessionDetail, SessionSummary, SourceStatus } from '../../src/types'
 import {
   capabilities,
@@ -21,6 +24,10 @@ import {
 } from './types'
 
 const CODEX_CAPABILITIES = capabilities('messages', 'tools', 'timing', 'usage', 'live')
+const SUPPORTED_CODEX_PROTOCOLS = ['codex-rollout-v1']
+const PROBE_DIRECTORY_LIMIT = 256
+const PROBE_ROLLOUT_LIMIT = 16
+const PROBE_HEADER_BYTES = 64 * 1024
 const codexHome = path.resolve(process.env.CODEX_HOME ?? path.join(homedir(), '.codex'))
 export const codexSessionsRoot = path.resolve(
   process.env.CODEX_SESSIONS_DIR ?? path.join(codexHome, 'sessions'),
@@ -48,6 +55,7 @@ interface CodexSourceOptions {
   sessionIndexFile?: string
   cacheEntries?: number
   cacheBytes?: number
+  projectionWorker?: ProjectionWorkerClient
 }
 
 interface IndexEntry {
@@ -120,6 +128,69 @@ async function readFirstLine(file: string): Promise<string> {
   }
 }
 
+async function probeRolloutHeaders(sessionsRoot: string): Promise<{
+  complete: boolean
+  malformed: boolean
+  types: string[]
+}> {
+  const pending = [sessionsRoot]
+  let visited = 0
+  let inspectedRollouts = 0
+  let complete = true
+  let malformed = false
+  const types = new Set<string>()
+  scan: while (pending.length > 0) {
+    const directory = pending.shift()!
+    const entries = await fs.opendir(directory)
+    for await (const entry of entries) {
+      if (visited >= PROBE_DIRECTORY_LIMIT) {
+        complete = false
+        break scan
+      }
+      visited++
+      const absolute = path.join(directory, entry.name)
+      if (entry.isDirectory()) {
+        pending.push(absolute)
+        continue
+      }
+      if (!entry.isFile() || !/^rollout-.*\.jsonl$/.test(entry.name)) continue
+      if (inspectedRollouts >= PROBE_ROLLOUT_LIMIT) {
+        complete = false
+        break scan
+      }
+      inspectedRollouts++
+      const handle = await fs.open(absolute, 'r')
+      try {
+        const buffer = Buffer.allocUnsafe(PROBE_HEADER_BYTES)
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+        const text = buffer.subarray(0, bytesRead).toString('utf8')
+        const line = text.split(/\r?\n/, 1)[0]?.trim() ?? ''
+        if (line === '') {
+          malformed = true
+          continue
+        }
+        try {
+          const header = JSON.parse(line) as { type?: unknown }
+          if (typeof header.type === 'string') types.add(header.type)
+          else malformed = true
+        } catch {
+          malformed = true
+        }
+      } finally {
+        await handle.close()
+      }
+    }
+  }
+  return {
+    complete,
+    malformed,
+    types: [
+      ...([...types].includes('session_meta') ? ['session_meta'] : []),
+      ...[...types].filter(type => type !== 'session_meta').sort(),
+    ],
+  }
+}
+
 async function readIndex(file: string): Promise<Map<string, IndexEntry>> {
   try {
     const rows = parseJsonlRows<IndexEntry>(await fs.readFile(file, 'utf8'))
@@ -153,6 +224,17 @@ function indexSignature(entry: IndexEntry | undefined): string {
 function sourceEventId(page: number, row: JsonlRow<CodexEnvelope>): string {
   const ordinal = typeof row.value.ordinal === 'number' ? row.value.ordinal : row.line - 1
   return `page:${page}:line:${row.line}:ordinal:${ordinal}`
+}
+
+function pageOrder(file: string): number {
+  const match = path.basename(file).match(/_(\d+)\.jsonl$/)
+  return match === null ? 0 : Number(match[1])
+}
+
+function comparePages(left: DiscoveredPage, right: DiscoveredPage): number {
+  return left.pageTime - right.pageTime
+    || pageOrder(left.file) - pageOrder(right.file)
+    || left.file.localeCompare(right.file)
 }
 
 async function boundarySignature(file: string, offset: number): Promise<string> {
@@ -214,11 +296,13 @@ export class CodexSource implements SessionSource {
   private sessionIndexRead?: Promise<Map<string, IndexEntry>>
   private readonly sessionsRoot: string
   private readonly sessionIndexFile: string
+  private readonly projectionWorker: ProjectionWorkerClient
   private readonly projectionNamespace = `codex-source:${++codexSourceInstances}`
 
   constructor(options: CodexSourceOptions = {}) {
     this.sessionsRoot = path.resolve(options.sessionsRoot ?? codexSessionsRoot)
     this.sessionIndexFile = path.resolve(options.sessionIndexFile ?? sessionIndexFile)
+    this.projectionWorker = options.projectionWorker ?? defaultProjectionWorker
     this.cache = new WeightedLruCache<string, CacheEntry>({
       maxEntries: options.cacheEntries ?? 8,
       maxWeight: options.cacheBytes ?? 96 * 1024 * 1024,
@@ -436,7 +520,7 @@ export class CodexSource implements SessionSource {
       throw Object.assign(new Error('Codex session pages are missing'), { code: 'ENOENT' })
     }
     const files = pages
-      .sort((a, b) => a.pageTime - b.pageTime || a.file.localeCompare(b.file))
+      .sort(comparePages)
       .map(page => page.file)
     return files
   }
@@ -444,12 +528,70 @@ export class CodexSource implements SessionSource {
   async probe(): Promise<SourceStatus> {
     try {
       await fs.access(this.sessionsRoot)
+      const headers = await probeRolloutHeaders(this.sessionsRoot)
+      const hasSupported = headers.types.includes('session_meta')
+      const unsupported = headers.types.filter(type => type !== 'session_meta')
+      const detectedProtocols = [
+        ...(hasSupported ? ['codex-rollout-v1'] : []),
+        ...unsupported.map(type => `codex-rollout-header:${type}`),
+        ...(headers.malformed ? ['codex-rollout-header:incomplete'] : []),
+      ]
+      const detected = detectedProtocols.length === 0
+        ? 'codex-rollout:none'
+        : detectedProtocols.join(',')
+      const protocol = {
+        detected,
+        supported: SUPPORTED_CODEX_PROTOCOLS,
+        fingerprint: headers.types.length === 0
+          ? headers.malformed
+            ? 'codex:rollout:incomplete'
+            : 'codex:rollout:none'
+          : `codex:rollout:${[
+              ...headers.types,
+              ...(headers.malformed ? ['incomplete'] : []),
+            ].join(',')}`,
+      }
+      if (!hasSupported
+        && unsupported.length > 0
+        && !headers.malformed
+        && headers.complete) {
+        return {
+          source: this.id,
+          availability: 'blocked',
+          ...sourceMetadata(this.id),
+          sessionCount: 0,
+          capabilities: CODEX_CAPABILITIES,
+          reason: 'unsupported_codex_protocol',
+          detail: `检测到 ${detected}；当前仅支持 ${SUPPORTED_CODEX_PROTOCOLS.join(', ')}`,
+          protocol,
+        }
+      }
+      const degraded = unsupported.length > 0 || headers.malformed || !headers.complete
       return {
         source: this.id,
-        availability: 'available',
+        availability: degraded ? 'degraded' : 'available',
         ...sourceMetadata(this.id),
         sessionCount: 0,
         capabilities: CODEX_CAPABILITIES,
+        ...(unsupported.length > 0 && hasSupported
+          ? {
+              reason: 'additional_codex_protocols_ignored',
+              detail: `继续读取 ${SUPPORTED_CODEX_PROTOCOLS.join(', ')}；已忽略未知协议：${
+                unsupported.map(type => `codex-rollout-header:${type}`).join(', ')
+              }`,
+            }
+          : headers.malformed
+          ? {
+              reason: 'codex_rollout_header_incomplete',
+              detail: '检测到仍在写入或不完整的 Codex rollout 首行；稍后会自动重试',
+            }
+          : !headers.complete
+            ? {
+                reason: 'codex_protocol_probe_bounded',
+                detail: '协议探测已达到本地扫描上限；会话发现将在后台继续',
+              }
+          : {}),
+        protocol,
       }
     } catch {
       return {
@@ -473,8 +615,7 @@ export class CodexSource implements SessionSource {
       grouped.set(page.sourceSessionId, [...(grouped.get(page.sourceSessionId) ?? []), page])
     }
     const refs = [...grouped].map(([sourceSessionId, unordered]): SourceSessionRef => {
-      const ordered = unordered.sort((a, b) =>
-        a.pageTime - b.pageTime || a.file.localeCompare(b.file))
+      const ordered = unordered.sort(comparePages)
       const first = ordered[0]!
       const latest = ordered.at(-1)!
       const indexed = index.get(sourceSessionId)
@@ -518,6 +659,21 @@ export class CodexSource implements SessionSource {
       ...stats.map((stat, page) => `${page}:${stat.mtimeMs}:${stat.size}`),
       `index:${indexSignature(index.get(ref.sourceSessionId))}`,
     ].join('|')
+  }
+
+  async audit(ref: SourceSessionRef): Promise<readonly unknown[]> {
+    const files = await this.sessionFiles(ref)
+    return (await Promise.all(files.map(async (file, page) =>
+      (await readJsonlRows<CodexEnvelope>(file)).map(row => ({
+        ...row.value,
+        metadata: {
+          ...object(row.value.metadata),
+          source_event_id: sourceEventId(page, row),
+          original_ordinal: row.value.ordinal,
+          page,
+          line: row.line,
+        },
+      }))))).flat()
   }
 
   async load(ref: SourceSessionRef): Promise<SessionDetail> {
@@ -592,7 +748,7 @@ export class CodexSource implements SessionSource {
         },
       }))
     })
-    const projection = await projectionWorker.projectCodex(
+    const projection = await this.projectionWorker.projectCodex(
       `${this.projectionNamespace}:${ref.sourceSessionId}`,
       envelopes,
       appendOnly ? envelopes.slice(previousEnvelopeCount) : undefined,
@@ -628,5 +784,3 @@ export class CodexSource implements SessionSource {
     return detail
   }
 }
-
-export const codexSource = new CodexSource()

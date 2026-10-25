@@ -417,6 +417,7 @@ interface SurfaceFold {
   shadowedSeqs: Set<number>
   transcriptSeqs: Set<number>
   relations: TrajectoryRelation[]
+  hasReplacement: boolean
 }
 
 function sourceRelations(event: SessionEvent): TrajectoryRelation[] {
@@ -461,6 +462,7 @@ function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
   const shadowedSeqs = new Set<number>()
   const transcriptSeqs = new Set<number>()
   const relations: TrajectoryRelation[] = []
+  let hasReplacement = false
 
   for (const event of events) {
     if (!SURFACE_EVENT_TYPES.has(event.type)) continue
@@ -490,6 +492,7 @@ function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
       )
     }
     nodes.splice(startIndex, endIndex - startIndex + 1, event.seq)
+    hasReplacement = true
     replaced.forEach(seq => {
       shadowedSeqs.add(seq)
       relations.push({
@@ -508,6 +511,7 @@ function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
     shadowedSeqs,
     transcriptSeqs,
     relations,
+    hasReplacement,
   }
 }
 
@@ -1160,12 +1164,14 @@ export function projectTrajectory(header: SessionHeader, events: readonly Sessio
       .map(seq => recordIdBySurfaceSeq.get(seq))
       .filter((id): id is string => id !== undefined),
   )]
-  const modelContextRecordIds = [...new Set(
-    sorted
-      .filter(event => surface.currentSeqs.has(event.seq))
-      .map(event => recordIdBySurfaceSeq.get(event.seq))
-      .filter((id): id is string => id !== undefined),
-  )]
+  const modelContextRecordIds = surface.hasReplacement
+    ? [...new Set(
+        sorted
+          .filter(event => surface.currentSeqs.has(event.seq))
+          .map(event => recordIdBySurfaceSeq.get(event.seq))
+          .filter((id): id is string => id !== undefined),
+      )]
+    : undefined
   const coverage = Object.entries(eventTypeCounts)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([type, total]) => {
@@ -1227,6 +1233,9 @@ export function projectTrajectory(header: SessionHeader, events: readonly Sessio
         model,
       }
     })
+  const currentModelRecord = [...records]
+    .reverse()
+    .find(record => record.model !== undefined)
   return {
     header: {
       source: 'dsh',
@@ -1237,6 +1246,8 @@ export function projectTrajectory(header: SessionHeader, events: readonly Sessio
       parentSessionId: header.parentSession,
       origin: header.origin,
       delegationDepth: header.delegationDepth,
+      provider: currentModelRecord?.provider,
+      model: currentModelRecord?.model,
       rawVersion: header.version,
     },
     records,

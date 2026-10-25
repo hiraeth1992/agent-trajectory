@@ -6,7 +6,10 @@ import path from 'node:path'
 import { Decompress } from 'fzstd'
 import { readJsonlRowsFrom } from '../parsers/jsonl'
 import { jsonWeight, WeightedLruCache } from '../lru'
-import { projectionWorker } from '../projection-worker-client'
+import {
+  ProjectionWorkerClient,
+  projectionWorker as defaultProjectionWorker,
+} from '../projection-worker-client'
 import { KNOWN_EVENT_TYPES, textFromContent } from '../../src/projector'
 import type {
   SessionDetail,
@@ -28,6 +31,14 @@ const SESSION_FILE_NAMES = new Set([
   'session.v4.jsonl.zst',
   'session.v4.jsonl',
 ])
+const SESSION_FILE_PRIORITY = new Map([
+  ['session.v4.jsonl', 0],
+  ['session.v4.jsonl.zst', 1],
+  ['session.v4.jsonl.zstd', 2],
+])
+const SESSION_PROTOCOL_FILE = /^session\.v(\d+)\.jsonl(?:\.zst|\.zstd)?$/
+const SUPPORTED_DSH_PROTOCOLS = ['dsh-session-v4']
+const PROBE_ENTRY_LIMIT = 256
 let dshSourceInstances = 0
 
 const DSH_CAPABILITIES = capabilities(
@@ -62,6 +73,7 @@ interface DshSourceOptions {
   sessionsRoot?: string
   cacheEntries?: number
   cacheBytes?: number
+  projectionWorker?: ProjectionWorkerClient
 }
 
 export const sessionsRoot = path.resolve(
@@ -84,6 +96,36 @@ async function walk(directory: string, output: string[]): Promise<void> {
       output.push(absolute)
     }
   }))
+}
+
+async function detectSessionVersions(directory: string): Promise<{
+  complete: boolean
+  versions: number[]
+}> {
+  const versions = new Set<number>()
+  const pending = [directory]
+  let visited = 0
+  let complete = true
+  scan: while (pending.length > 0) {
+    const current = pending.shift()!
+    const entries = await fs.opendir(current)
+    for await (const entry of entries) {
+      if (visited >= PROBE_ENTRY_LIMIT) {
+        complete = false
+        break scan
+      }
+      visited++
+      const version = entry.isFile()
+        ? entry.name.match(SESSION_PROTOCOL_FILE)?.[1]
+        : undefined
+      if (version !== undefined) versions.add(Number(version))
+      else if (entry.isDirectory()) pending.push(path.join(current, entry.name))
+    }
+  }
+  return {
+    complete,
+    versions: [...versions].sort((left, right) => left - right),
+  }
 }
 
 async function decompress(file: string): Promise<string> {
@@ -236,10 +278,12 @@ export class DshSource implements SessionSource {
   readonly id = 'dsh' as const
   private readonly cache: WeightedLruCache<string, CacheEntry>
   private readonly sessionsRoot: string
+  private readonly projectionWorker: ProjectionWorkerClient
   private readonly projectionNamespace = `dsh-source:${++dshSourceInstances}`
 
   constructor(options: DshSourceOptions = {}) {
     this.sessionsRoot = path.resolve(options.sessionsRoot ?? sessionsRoot)
+    this.projectionWorker = options.projectionWorker ?? defaultProjectionWorker
     this.cache = new WeightedLruCache<string, CacheEntry>({
       maxEntries: options.cacheEntries ?? 8,
       maxWeight: options.cacheBytes ?? 96 * 1024 * 1024,
@@ -250,13 +294,55 @@ export class DshSource implements SessionSource {
   async probe(): Promise<SourceStatus> {
     try {
       await fs.access(this.sessionsRoot)
+      const detection = await detectSessionVersions(this.sessionsRoot)
+      const versions = detection.versions
+      const unsupported = versions.filter(version => version !== 4)
+      const detected = versions.length === 0
+        ? 'none'
+        : versions.map(version => `dsh-session-v${version}`).join(',')
+      const protocol = {
+        detected,
+        supported: SUPPORTED_DSH_PROTOCOLS,
+        fingerprint: versions.length === 0
+          ? 'dsh:session:none'
+          : `dsh:session:v${versions.join(',v')}`,
+      }
+      if (versions.length > 0 && !versions.includes(4) && detection.complete) {
+        return {
+          source: this.id,
+          availability: 'blocked',
+          ...sourceMetadata(this.id),
+          version: detected,
+          sessionCount: 0,
+          capabilities: DSH_CAPABILITIES,
+          reason: 'unsupported_dsh_protocol',
+          detail: `检测到 ${detected}；当前仅支持 ${SUPPORTED_DSH_PROTOCOLS.join(', ')}`,
+          protocol,
+        }
+      }
+      const bounded = !detection.complete
       return {
         source: this.id,
-        availability: 'available',
+        availability: unsupported.length === 0 && !bounded ? 'available' : 'degraded',
         ...sourceMetadata(this.id),
         version: 'Session v4',
         sessionCount: 0,
         capabilities: DSH_CAPABILITIES,
+        ...(unsupported.length > 0 && versions.includes(4)
+          ? {
+              reason: 'additional_dsh_protocols_ignored',
+              detail: `继续读取 Session v4；已忽略未知版本：${
+                unsupported.map(version => `v${version}`).join(', ')
+              }`,
+            }
+          : bounded
+            ? {
+                reason: 'dsh_protocol_probe_bounded',
+                detail: '协议探测已达到本地扫描上限；会话发现将在后台继续',
+              }
+          : {}
+        ),
+        protocol,
       }
     } catch {
       return {
@@ -275,7 +361,7 @@ export class DshSource implements SessionSource {
   async list(): Promise<readonly SourceSessionRef[]> {
     const files: string[] = []
     await walk(this.sessionsRoot, files)
-    const refs = await Promise.all(files.map(async (file): Promise<SourceSessionRef> => {
+    const discovered = await Promise.all(files.map(async (file): Promise<SourceSessionRef> => {
       const stat = await fs.stat(file)
       const sourceSessionId = await readSourceSessionId(file, this.sessionsRoot)
       const cached = this.cache.peek(file)?.detail.summary
@@ -296,12 +382,30 @@ export class DshSource implements SessionSource {
       }
       return { source: this.id, sourceSessionId, locator: file, summary }
     }))
+    const bySession = new Map<string, SourceSessionRef>()
+    for (const ref of discovered.sort((left, right) =>
+      (SESSION_FILE_PRIORITY.get(path.basename(left.locator)) ?? Number.MAX_SAFE_INTEGER)
+      - (SESSION_FILE_PRIORITY.get(path.basename(right.locator)) ?? Number.MAX_SAFE_INTEGER)
+      || right.summary.updatedAt - left.summary.updatedAt
+      || left.locator.localeCompare(right.locator))) {
+      if (!bySession.has(ref.sourceSessionId)) bySession.set(ref.sourceSessionId, ref)
+    }
+    const refs = [...bySession.values()]
     return refs.sort((a, b) => b.summary.updatedAt - a.summary.updatedAt)
   }
 
   async fingerprint(ref: SourceSessionRef): Promise<string> {
     const stat = await fs.stat(assertRef(ref, this.sessionsRoot))
     return `${stat.mtimeMs}:${stat.size}`
+  }
+
+  async audit(ref: SourceSessionRef): Promise<readonly unknown[]> {
+    const file = assertRef(ref, this.sessionsRoot)
+    const parsed = parseDshJsonl(await decompress(file))
+    if (parsed.header.id !== ref.sourceSessionId) {
+      throw new Error('DSH session id does not match its safe locator')
+    }
+    return [parsed.header, ...parsed.events]
   }
 
   async load(ref: SourceSessionRef): Promise<SessionDetail> {
@@ -399,7 +503,7 @@ export class DshSource implements SessionSource {
     }
     const detail = {
       summary,
-      projection: await projectionWorker.projectDsh(
+      projection: await this.projectionWorker.projectDsh(
         `${this.projectionNamespace}:${header.id}`,
         header,
         events,
@@ -419,5 +523,3 @@ export class DshSource implements SessionSource {
     return detail
   }
 }
-
-export const dshSource = new DshSource()

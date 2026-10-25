@@ -157,6 +157,26 @@ function tokenUsage(value: unknown): TokenUsage | undefined {
   return Object.values(result).some(item => item !== undefined) ? result : undefined
 }
 
+function sumTokenUsage(values: readonly (TokenUsage | undefined)[]): TokenUsage | undefined {
+  const present = values.filter((value): value is TokenUsage => value !== undefined)
+  if (present.length === 0) return undefined
+  const keys: Array<keyof TokenUsage> = [
+    'inputTokens',
+    'outputTokens',
+    'cacheReadTokens',
+    'cacheWriteTokens',
+    'reasoningTokens',
+    'totalTokens',
+  ]
+  return Object.fromEntries(keys.flatMap((key) => {
+    const selected = present.flatMap(value =>
+      value[key] === undefined ? [] : [value[key]])
+    return selected.length === 0
+      ? []
+      : [[key, selected.reduce((total, value) => total + value, 0)]]
+  })) as TokenUsage
+}
+
 function acceptedRaw(envelope: IndexedEnvelope, payload: unknown = envelope.payload): unknown {
   const metadata = object(envelope.metadata)
   return redactSensitive({
@@ -237,6 +257,27 @@ function processExitCode(name: string, output: unknown): number | undefined {
   return Number.isFinite(code) ? code : undefined
 }
 
+function assignLogicalSteps(records: TrajectoryRecord[]): void {
+  let activeTurn: number | undefined
+  let step = 0
+  for (const record of records) {
+    if (record.turn !== activeTurn) {
+      activeTurn = record.turn
+      step = 0
+    }
+    if (record.kind === 'system'
+      || record.kind === 'user'
+      || record.kind === 'steering'
+      || record.kind === 'context') {
+      record.step = 0
+      continue
+    }
+    if (step === 0) step = 1
+    record.step = step
+    if (record.kind === 'model') step++
+  }
+}
+
 function contentPayload(payload: JsonObject): JsonObject {
   return {
     type: payload.type,
@@ -305,7 +346,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
   const toolCalls = new Map<string, IndexedEnvelope>()
   const toolOutputs = new Map<string, IndexedEnvelope>()
   const modelCalls: IndexedEnvelope[] = []
-  let sessionUsage: TokenUsage | undefined
+  let threadUsage: TokenUsage | undefined
 
   for (const envelope of sorted) {
     const payloadType = string(envelope.payload.type)
@@ -364,7 +405,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     if (envelope.type === 'token_usage_record' && turnId !== undefined) {
       const usage = tokenUsage(envelope.payload.turn_token_usage ?? envelope.payload.usage)
       if (usage !== undefined) ensureTurn(turnId).usage = usage
-      sessionUsage = tokenUsage(envelope.payload.thread_token_usage) ?? usage ?? sessionUsage
+      threadUsage = tokenUsage(envelope.payload.thread_token_usage) ?? threadUsage
       if (string(envelope.payload.response_id) !== undefined
         && tokenUsage(envelope.payload.usage) !== undefined) {
         modelCalls.push(envelope)
@@ -641,6 +682,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     || a.seq - b.seq
     || priority[a.kind] - priority[b.kind]
     || a.id.localeCompare(b.id))
+  assignLogicalSteps(records)
 
   const recordTimes = records.flatMap(record => [
     record.startTime,
@@ -679,6 +721,9 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       model: turn.model,
     }
   })
+  const latestModel = [...turns.values()]
+    .reverse()
+    .find(turn => turn.model !== undefined)?.model
 
   return {
     header: {
@@ -687,7 +732,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       id: sessionId,
       createdAt,
       cwd: string(sessionPayload.cwd),
-      model: [...turns.values()].find(turn => turn.model !== undefined)?.model,
+      model: latestModel,
       provider: string(sessionPayload.model_provider),
       rawVersion: string(sessionPayload.cli_version),
     },
@@ -709,6 +754,6 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
         time: turn.completedAt!,
         reason: turn.reason,
       }])),
-    usage: sessionUsage,
+    usage: threadUsage ?? sumTokenUsage([...turns.values()].map(turn => turn.usage)),
   }
 }

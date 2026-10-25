@@ -37,5 +37,19 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high
+      - name: Verify lightweight package
+        run: |
+          npm pack --json > pack-report.json
+          node -e '
+            const report = require("./pack-report.json")[0]
+            if (report.size > 2 * 1024 * 1024) {
+              throw new Error(`packed artifact is too large: ${report.size} bytes`)
+            }
+            if (report.files.some(file => /electron|chromium/i.test(file.path))) {
+              throw new Error("packed artifact contains an Electron/Chromium file")
+            }
+          '
+          rm pack-report.json agent-trajectory-*.tgz
+
+      - name: Audit bundled dependency graph
+        run: npm audit --audit-level=high

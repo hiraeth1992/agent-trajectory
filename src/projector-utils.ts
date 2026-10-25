@@ -78,7 +78,7 @@ function redactSensitiveString(value: string): string {
     .replace(/\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{12,}\b/g, '<redacted>')
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '<redacted>')
     .replace(
-      /(["']?(?:password|passwd|secret|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie)["']?\s*[:=]\s*["']?)([^"',;\s}\]]+)/gi,
+      /(["']?(?:password|passwd|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie)["']?\s*[:=]\s*["']?)([^"',;\s}\]]+)/gi,
       '$1<redacted>',
     )
 }
@@ -119,7 +119,8 @@ export function redactSensitive(value: unknown, key = ''): unknown {
     if (value === null || value === undefined) return { present: false }
     return { present: Array.isArray(value) ? value.length > 0 : true }
   }
-  if (/password|passwd|secret|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie/i.test(key)) {
+  if (/password|passwd|secret|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie/i.test(key)
+    || /^token$/i.test(key)) {
     return '<redacted>'
   }
   if (typeof value === 'string' && /arguments|input|output/i.test(key)) {

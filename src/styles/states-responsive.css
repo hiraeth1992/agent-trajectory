@@ -41,6 +41,33 @@
   font-size: 11px;
 }
 
+.source-diagnostics {
+  width: min(620px, calc(100vw - 32px));
+  display: grid;
+  gap: 8px;
+}
+
+.source-diagnostics article {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #efc5cd;
+  border-radius: 7px;
+  background: #fff8f9;
+  text-align: left;
+}
+
+.source-diagnostics article strong {
+  color: #8e3448;
+  font-size: 12px;
+}
+
+.source-diagnostics code {
+  overflow-wrap: anywhere;
+  color: #6e3442;
+  font-size: 10px;
+}
+
 .no-results {
   font-size: 12px;
 }
@@ -95,12 +122,12 @@
     overflow: hidden;
   }
 
-  .session-picker .source-filter {
-    width: 82px;
-    flex-basis: 82px;
+  .source-picker {
+    width: 100px;
+    flex-basis: 100px;
   }
 
-  .session-picker select:not(.source-filter) {
+  .session-picker select {
     width: 0;
     flex: 1 1 0;
   }
@@ -118,20 +145,6 @@
   .view-tabs {
     gap: 12px;
     padding: 0 8px;
-  }
-
-  .source-health {
-    width: 0;
-    flex: 1 1 0;
-    gap: 5px;
-  }
-
-  .source-health-item {
-    padding: 0 5px;
-  }
-
-  .source-health-item.status-available small {
-    display: none;
   }
 
   .session-meta dl {

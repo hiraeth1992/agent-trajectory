@@ -7,10 +7,11 @@ import type {
   SourceId,
   TrajectoryProjection,
 } from '../src/types'
-import { codexSource } from '../server/sources/codex'
-import { dshSource } from '../server/sources/dsh'
+import { defaultDataRoot, readConfig, resolveSourcePaths } from '../server/source-paths'
+import { CodexSource } from '../server/sources/codex'
+import { DshSource } from '../server/sources/dsh'
 import type { SessionSource } from '../server/sources/types'
-import { zcodeSource } from '../server/sources/zcode'
+import { ZcodeSource } from '../server/sources/zcode'
 
 const RECORD_KINDS: readonly RecordKind[] = [
   'system',
@@ -197,6 +198,20 @@ export async function verifyRealSources(
   },
   generatedAt = new Date(),
 ): Promise<RealSourceVerification> {
+  const dataRoot = path.resolve(
+    process.env.AGENT_TRAJECTORY_DATA_DIR ?? defaultDataRoot(),
+  )
+  const config = await readConfig(dataRoot)
+  const paths = resolveSourcePaths({
+    config: config.sources,
+    configDirectory: dataRoot,
+  })
+  const dshSource = new DshSource({ sessionsRoot: paths.dshSessionsDir })
+  const codexSource = new CodexSource({
+    sessionsRoot: paths.codexSessionsDir,
+    sessionIndexFile: paths.codexSessionIndex,
+  })
+  const zcodeSource = new ZcodeSource({ database: paths.zcodeDatabase })
   try {
     const inputs = await Promise.all([
       readSelected(dshSource, arguments_.sessions.dsh),
