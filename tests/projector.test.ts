@@ -1,8 +1,78 @@
 import { describe, expect, it } from 'vitest'
 import { parseDshJsonl } from '../server/sources/dsh'
-import { projectTrajectory } from '../src/projector'
+import {
+  KNOWN_EVENT_TYPES,
+  MESSAGE_PROJECTION_EVENT_TYPES,
+  projectTrajectory,
+} from '../src/projector'
 import { projectedRecord, redactSensitive } from '../src/projector-utils'
 import type { SessionEvent, SessionHeader } from '../src/types'
+
+// deepseek-ai/deepseek-harness@22ddee3792402c3e70ec5f86a63c3e3e895a2f60
+const UPSTREAM_PERSISTED_EVENT_TYPES = [
+  'agent-preset/selected',
+  'agent/inbox/spliced',
+  'approval/asked',
+  'approval/decided',
+  'approval/policy',
+  'assistant/attempt',
+  'assistant/message',
+  'command/done',
+  'command/run',
+  'compaction/end',
+  'compaction/prune',
+  'compaction/start',
+  'compaction/summary',
+  'deliverables/presented',
+  'developer/message',
+  'feedback/message-delete',
+  'feedback/message-put',
+  'feedback/record',
+  'goal/change',
+  'hook/invoked',
+  'hook/result',
+  'image/offload',
+  'job/registered',
+  'job/settled',
+  'llm/retry',
+  'llm/retry-started',
+  'model/selection',
+  'permission/preset',
+  'plan/mode',
+  'request/context',
+  'request/header',
+  'sandbox/mode',
+  'schedule/change',
+  'session-log-deepseek/delivery-accepted',
+  'session/end-seed',
+  'session/title',
+  'session/title-llm-request',
+  'step/end',
+  'step/start',
+  'subagent/catalog',
+  'subagent/descriptor',
+  'subagent/model-selection-policy',
+  'system/message',
+  'team/member',
+  'team/message/delivered',
+  'team/message/queued',
+  'team/task',
+  'todo/write',
+  'tool-workflow/agent-end',
+  'tool-workflow/agent-start',
+  'tool-workflow/run-end',
+  'tool-workflow/run-start',
+  'tool/call',
+  'tool/ptc-dispatch',
+  'tool/ptc-dispatch-start',
+  'tool/result',
+  'turn/end',
+  'turn/start',
+  'user/message',
+  'web/deepseek-search-llm-request',
+  'working-directory/change',
+  'workspace/changes',
+] as const
 
 const header: SessionHeader = {
   type: 'session',
@@ -17,6 +87,12 @@ function event(seq: number, time: number, type: string, data: Record<string, unk
 }
 
 describe('projectTrajectory', () => {
+  it('keeps persisted and required message-projection event sets in sync with upstream', () => {
+    expect([...KNOWN_EVENT_TYPES].sort()).toEqual([...UPSTREAM_PERSISTED_EVENT_TYPES].sort())
+    expect([...MESSAGE_PROJECTION_EVENT_TYPES]).toEqual(['image/offload'])
+    expect(KNOWN_EVENT_TYPES.has('assistant/live-chunk')).toBe(false)
+  })
+
   it('preserves DSH session lineage in the projection header', () => {
     const projection = projectTrajectory({
       ...header,
@@ -471,6 +547,232 @@ describe('projectTrajectory', () => {
         sourceEventIds: ['1', '0'],
       },
     ])
+  })
+
+  it('projects image offloads only into the current model context', () => {
+    const source = {
+      ...event(0, 1_000, 'user/message', {
+        id: 'images',
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: 'inspect these images' },
+          { type: 'image', attachment: { attachmentId: 'first' } },
+          { type: 'image', attachment: { attachmentId: 'second' } },
+          { type: 'image', attachment: { attachmentId: 'third' } },
+        ],
+      }),
+      surfaceOp: 'append' as const,
+    }
+    const offload = event(1, 1_010, 'image/offload', {
+      targets: [{ seq: 0, imageIndexes: [1] }],
+    })
+
+    const projection = projectTrajectory(header, [source, offload])
+    const durable = projection.records.find(record => record.id === 'user:0')
+
+    expect(durable?.input).toEqual(source.data.content)
+    expect(durable?.summary).toBe('inspect these images [image] [image] [image]')
+    expect(projection.transcriptRecordIds).toEqual(['user:0'])
+    expect(projection.modelContextRecordIds).toEqual(['user:0'])
+    expect(projection.modelContextRecordOverrides).toEqual({
+      'user:0': {
+        input: [
+          { type: 'text', text: 'inspect these images' },
+          { type: 'image', attachment: { attachmentId: 'first' } },
+          {
+            type: 'image',
+            attachment: { attachmentId: 'second' },
+            offloaded: true,
+          },
+          { type: 'image', attachment: { attachmentId: 'third' } },
+        ],
+        summary: 'inspect these images [image] [offloaded image] [image]',
+      },
+    })
+    expect(projection.coverage?.find(item => item.type === 'image/offload'))
+      .toEqual({
+        type: 'image/offload',
+        total: 1,
+        consumed: 1,
+        disposition: 'folded-state',
+      })
+  })
+
+  it('redacts sensitive fields from projected model-context overrides', () => {
+    const source = {
+      ...event(0, 1_000, 'user/message', {
+        id: 'sensitive-image',
+        source: { kind: 'user' },
+        content: [{
+          type: 'image',
+          attachment: { attachmentId: 'first' },
+          authorization: 'Bearer projected-private-token',
+        }],
+      }),
+      surfaceOp: 'append' as const,
+    }
+
+    const projection = projectTrajectory(header, [
+      source,
+      event(1, 1_010, 'image/offload', {
+        targets: [{ seq: 0, imageIndexes: [0] }],
+      }),
+    ])
+    const serialized = JSON.stringify(projection.modelContextRecordOverrides)
+
+    expect(serialized).not.toContain('projected-private-token')
+    expect(projection.modelContextRecordOverrides?.['user:0']?.input).toEqual([{
+      type: 'image',
+      attachment: { attachmentId: 'first' },
+      authorization: '<redacted>',
+      offloaded: true,
+    }])
+  })
+
+  it('applies consecutive image offloads to tool-result model context', () => {
+    const call = event(0, 1_000, 'tool/call', {
+      turn: 1,
+      step: 1,
+      callId: 'shot',
+      name: 'read_images',
+      arguments: '{}',
+    })
+    const result = {
+      ...event(1, 1_010, 'tool/result', {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { kind: 'tool', callId: 'shot' },
+          content: [
+            { type: 'image', attachment: { attachmentId: 'first' } },
+            { type: 'image', attachment: { attachmentId: 'second' } },
+          ],
+          isError: false,
+        },
+      }),
+      surfaceOp: 'append' as const,
+    }
+    const first = event(2, 1_020, 'image/offload', {
+      targets: [{ seq: 1, imageIndexes: [1] }],
+    })
+    const second = event(3, 1_030, 'image/offload', {
+      targets: [{ seq: 1, imageIndexes: [0] }],
+    })
+
+    const projection = projectTrajectory(header, [call, result, first, second])
+    const resultMessage = result.data.message as { content: unknown[] }
+
+    expect(projection.records.find(record => record.id === 'tool:shot')?.output)
+      .toEqual(resultMessage.content)
+    expect(projection.modelContextRecordOverrides).toEqual({
+      'tool:shot': {
+        output: [
+          {
+            type: 'image',
+            attachment: { attachmentId: 'first' },
+            offloaded: true,
+          },
+          {
+            type: 'image',
+            attachment: { attachmentId: 'second' },
+            offloaded: true,
+          },
+        ],
+        summary: '{} → [offloaded image] [offloaded image]',
+      },
+    })
+  })
+
+  it.each([
+    [{}, /data must contain a nonempty targets array/],
+    [{ targets: [] }, /data must contain a nonempty targets array/],
+    [{ targets: [{ seq: 0, imageIndexes: [] }] }, /nonempty imageIndexes/],
+    [{ targets: [{ seq: 0, imageIndexes: [1, 0] }] }, /strictly increasing/],
+    [{ targets: [{ seq: 0, imageIndexes: [0, 0] }] }, /strictly increasing/],
+    [{ targets: [{ seq: 0, imageIndexes: [2] }] }, /does not exist/],
+    [{
+      targets: [
+        { seq: 0, imageIndexes: [0] },
+        { seq: 0, imageIndexes: [1] },
+      ],
+    }, /duplicate target seq/],
+  ])('rejects malformed image offloads without partial projection: %j', (
+    data,
+    message,
+  ) => {
+    const source = {
+      ...event(0, 1_000, 'user/message', {
+        id: 'images',
+        source: { kind: 'user' },
+        content: [
+          { type: 'image', attachment: { attachmentId: 'first' } },
+          { type: 'image', attachment: { attachmentId: 'second' } },
+        ],
+      }),
+      surfaceOp: 'append' as const,
+    }
+
+    expect(() => projectTrajectory(header, [
+      source,
+      event(1, 1_010, 'image/offload', data),
+    ])).toThrow(message)
+  })
+
+  it('rejects repeated, shadowed, and assistant image offload targets', () => {
+    const source = {
+      ...event(0, 1_000, 'user/message', {
+        id: 'images',
+        source: { kind: 'user' },
+        content: [{ type: 'image', attachment: { attachmentId: 'first' } }],
+      }),
+      surfaceOp: 'append' as const,
+    }
+    const first = event(1, 1_010, 'image/offload', {
+      targets: [{ seq: 0, imageIndexes: [0] }],
+    })
+    const repeated = event(2, 1_020, 'image/offload', {
+      targets: [{ seq: 0, imageIndexes: [0] }],
+    })
+    expect(() => projectTrajectory(header, [source, first, repeated]))
+      .toThrow(/already offloaded/)
+
+    const replacement = {
+      ...event(1, 1_010, 'developer/message', {
+        message: {
+          role: 'developer',
+          source: { kind: 'compaction' },
+          content: [{ type: 'text', text: 'replacement' }],
+        },
+      }),
+      surfaceOp: { op: 'replace' as const, startSeq: 0, endSeq: 0 },
+      sourceEventSeqs: [0],
+    }
+    expect(() => projectTrajectory(header, [
+      source,
+      replacement,
+      event(2, 1_020, 'image/offload', {
+        targets: [{ seq: 0, imageIndexes: [0] }],
+      }),
+    ])).toThrow(/not a current surface node/)
+
+    const assistant = {
+      ...event(0, 1_000, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'image', attachment: { attachmentId: 'first' } }],
+        },
+      }),
+      surfaceOp: 'append' as const,
+    }
+    expect(() => projectTrajectory(header, [
+      assistant,
+      event(1, 1_010, 'image/offload', {
+        targets: [{ seq: 0, imageIndexes: [0] }],
+      }),
+    ])).toThrow(/must be user\/message or tool\/result/)
   })
 
   it('rejects duplicate source references on a surface replacement', () => {
@@ -988,5 +1290,13 @@ describe('parseDshJsonl', () => {
     expect(parseDshJsonl(`${prefix}\n{"type":"turn/end"`).events).toHaveLength(1)
     const unknown = `${JSON.stringify(header)}\n${JSON.stringify(event(0, 1_000, 'future/required', {}))}\n`
     expect(() => parseDshJsonl(unknown)).toThrow(/unknown required session event/)
+  })
+
+  it('rejects transient assistant live chunks in durable sessions', () => {
+    const source = `${JSON.stringify(header)}\n${JSON.stringify(
+      event(0, 1_000, 'assistant/live-chunk', {}),
+    )}\n`
+
+    expect(() => parseDshJsonl(source)).toThrow(/unknown required session event/)
   })
 })

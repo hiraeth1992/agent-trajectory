@@ -518,6 +518,52 @@ describe('multi-source API', () => {
     })
   })
 
+  it('redacts and bounds model-context record overrides at the detail boundary', async () => {
+    const unsafeDetail = structuredClone(detail)
+    unsafeDetail.projection.modelContextRecordOverrides = {
+      'record-1': {
+        input: {
+          note: 'password=override-private-input',
+          payload: 'i'.repeat(100_000),
+        },
+        output: {
+          authorization: 'Bearer override-private-output',
+          payload: 'o'.repeat(100_000),
+        },
+        summary: 'token=override-private-summary',
+      },
+    }
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => unsafeDetail,
+      fingerprint: async () => 'v1',
+    })
+
+    const response = await fetch(`${base}/api/sessions/dsh/session-1`)
+    const body = await response.text()
+    const snapshot = JSON.parse(body) as {
+      detail: SessionDetail
+    }
+    const override = snapshot.detail.projection.modelContextRecordOverrides?.['record-1']
+
+    expect(response.status).toBe(200)
+    expect(body).not.toMatch(
+      /override-private-input|override-private-output|override-private-summary/,
+    )
+    expect(override?.input).toMatchObject({
+      truncated: true,
+      originalBytes: expect.any(Number),
+    })
+    expect(override?.output).toMatchObject({
+      truncated: true,
+      originalBytes: expect.any(Number),
+    })
+    expect(JSON.stringify(override?.input).length).toBeLessThan(20_000)
+    expect(JSON.stringify(override?.output).length).toBeLessThan(20_000)
+    expect(override?.summary).toBe('token=<redacted>')
+  })
+
   it('downloads a complete redacted audit export without preview truncation', async () => {
     const base = await start({
       listSources: async () => [status],

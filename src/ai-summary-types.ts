@@ -3,6 +3,7 @@ import type {
   AnalysisEvaluation,
   TrajectoryAnalysis,
 } from './trajectory-analysis'
+import type { FactsQualityReport } from './evaluation-types'
 import type { SourceId, TokenUsage } from './types'
 import type { AiOptimization, OptimizationSuggestion } from './trajectory-optimization'
 import type { TrajectoryStory } from './trajectory-story'
@@ -109,10 +110,11 @@ export interface SummaryFactCorrection {
 }
 
 export interface SummaryFactPackage {
-  schemaVersion: 2
+  schemaVersion: 3
   source: SourceId
   sourceSessionId: string
   modules: AiEnhancementModule[]
+  factsQuality: FactsQualityReport
   sessionProvider?: string
   sessionModel?: string
   localFacts: TrajectoryAnalysis['stats']

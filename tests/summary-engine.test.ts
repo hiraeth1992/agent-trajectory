@@ -253,6 +253,40 @@ describe('SummaryEngine', () => {
     expect(preview.facts.steps[0]?.localFacts.usage?.totalTokens).toBe(12)
   })
 
+  it('invalidates AI facts hashes when the judge-ready quality boundary changes', async () => {
+    const stored = await stores()
+    const current = detail()
+    const registry = new Registry(current)
+    const engine = new SummaryEngine(
+      registry,
+      stored.settings,
+      stored.cache,
+      stored.secrets,
+      '/missing-codex',
+    )
+
+    const complete = await engine.preview('zcode', 'summary-session', ['outcome'])
+    current.projection.records[0]!.output = {
+      truncated: true,
+      originalBytes: 100_000,
+      preview: 'partial output',
+    }
+    const truncated = await engine.preview('zcode', 'summary-session', ['outcome'])
+
+    expect(complete.facts.schemaVersion).toBe(3)
+    expect(complete.facts.factsQuality).toMatchObject({
+      ready: true,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ id: 'target-live', severity: 'warning' }),
+      ]),
+    })
+    expect(truncated.facts.factsQuality).toMatchObject({
+      ready: false,
+      blockedCriterionIds: expect.arrayContaining(['outcome']),
+    })
+    expect(truncated.factsHashes.outcome).not.toBe(complete.factsHashes.outcome)
+  })
+
   it('reports the real session model without auto-selecting it', async () => {
     const stored = await stores()
     const adapter = new FakeAdapter(draft())

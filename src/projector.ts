@@ -1,6 +1,7 @@
 import type {
-  JsonObject,
   EventDisposition,
+  JsonObject,
+  ModelContextRecordOverride,
   RecordKind,
   SessionEvent,
   SessionHeader,
@@ -20,6 +21,7 @@ import {
   jsonText,
   parseStructured as parseRawArgs,
   projectedRecord,
+  redactSensitive,
 } from './projector-utils'
 
 export const KNOWN_EVENT_TYPES = new Set([
@@ -29,7 +31,6 @@ export const KNOWN_EVENT_TYPES = new Set([
   'approval/decided',
   'approval/policy',
   'assistant/attempt',
-  'assistant/live-chunk',
   'assistant/message',
   'command/done',
   'command/run',
@@ -86,6 +87,10 @@ export const KNOWN_EVENT_TYPES = new Set([
   'web/deepseek-search-llm-request',
   'working-directory/change',
   'workspace/changes',
+])
+
+export const MESSAGE_PROJECTION_EVENT_TYPES = new Set([
+  'image/offload',
 ])
 
 interface StepState {
@@ -153,6 +158,7 @@ const FOLDED_EVENT_TYPES = new Set([
   'todo/write',
   'turn/end',
   'turn/start',
+  ...MESSAGE_PROJECTION_EVENT_TYPES,
 ])
 
 function eventDisposition(type: string): EventDisposition {
@@ -418,6 +424,99 @@ interface SurfaceFold {
   transcriptSeqs: Set<number>
   relations: TrajectoryRelation[]
   hasReplacement: boolean
+  projectedMessages: Map<number, JsonObject>
+}
+
+function canonicalIndex(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 0
+    && !Object.is(value, -0)
+}
+
+function offloadMessageImages(messageValue: unknown, indexes: readonly number[]): JsonObject {
+  const message = object(messageValue)
+  if (!Array.isArray(message.content)) {
+    throw new Error(`image/offload: image index ${indexes[0]} does not exist`)
+  }
+  let imageIndex = 0
+  let selected = 0
+  const content = message.content.map((value) => {
+    const block = object(value)
+    if (block.type !== 'image') return value
+    const current = imageIndex++
+    if (current !== indexes[selected]) return value
+    if (block.offloaded === true) {
+      throw new Error(`image/offload: image index ${current} is already offloaded`)
+    }
+    selected++
+    return { ...block, offloaded: true }
+  })
+  if (selected !== indexes.length) {
+    throw new Error(`image/offload: image index ${indexes[selected]} does not exist`)
+  }
+  return { ...message, content }
+}
+
+function messageFromSurfaceEvent(event: SessionEvent): JsonObject {
+  return event.type === 'user/message' ? event.data : eventMessage(event)
+}
+
+function applyImageOffload(
+  event: SessionEvent,
+  nodes: readonly number[],
+  eventsBySeq: ReadonlyMap<number, SessionEvent>,
+  projectedMessages: Map<number, JsonObject>,
+): void {
+  const data = event.data
+  if (!hasExactKeys(data, ['targets'])
+    || !Array.isArray(data.targets)
+    || data.targets.length === 0) {
+    throw new Error('image/offload: data must contain a nonempty targets array')
+  }
+  const current = new Set(nodes)
+  const next = new Map<number, JsonObject>()
+  for (const targetValue of data.targets) {
+    const target = object(targetValue)
+    if (!hasExactKeys(target, ['seq', 'imageIndexes'])
+      || !canonicalIndex(target.seq)
+      || !Array.isArray(target.imageIndexes)
+      || target.imageIndexes.length === 0) {
+      throw new Error(
+        'image/offload: each target must contain a seq and nonempty imageIndexes',
+      )
+    }
+    const seq = target.seq
+    if (next.has(seq)) {
+      throw new Error(`image/offload: duplicate target seq ${seq}`)
+    }
+    if (!current.has(seq)) {
+      throw new Error(`image/offload: target seq ${seq} is not a current surface node`)
+    }
+    const source = eventsBySeq.get(seq)
+    if (source?.type !== 'user/message' && source?.type !== 'tool/result') {
+      throw new Error(
+        `image/offload: target seq ${seq} must be user/message or tool/result`,
+      )
+    }
+    let previous = -1
+    for (const index of target.imageIndexes) {
+      if (!canonicalIndex(index) || index <= previous) {
+        throw new Error(
+          'image/offload: imageIndexes must be strictly increasing non-negative safe integers',
+        )
+      }
+      previous = index
+    }
+    next.set(
+      seq,
+      offloadMessageImages(
+        projectedMessages.get(seq) ?? messageFromSurfaceEvent(source),
+        target.imageIndexes as number[],
+      ),
+    )
+  }
+  for (const [seq, message] of next) projectedMessages.set(seq, message)
 }
 
 function sourceRelations(event: SessionEvent): TrajectoryRelation[] {
@@ -462,9 +561,15 @@ function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
   const shadowedSeqs = new Set<number>()
   const transcriptSeqs = new Set<number>()
   const relations: TrajectoryRelation[] = []
+  const projectedMessages = new Map<number, JsonObject>()
+  const eventsBySeq = new Map(events.map(event => [event.seq, event]))
   let hasReplacement = false
 
   for (const event of events) {
+    if (event.type === 'image/offload') {
+      applyImageOffload(event, nodes, eventsBySeq, projectedMessages)
+      continue
+    }
     if (!SURFACE_EVENT_TYPES.has(event.type)) continue
     const derivedRelations = sourceRelations(event)
     if (event.surfaceOp === undefined || event.surfaceOp === 'append') {
@@ -512,6 +617,7 @@ function foldSurface(events: readonly SessionEvent[]): SurfaceFold {
     transcriptSeqs,
     relations,
     hasReplacement,
+    projectedMessages,
   }
 }
 
@@ -549,7 +655,9 @@ export function textFromContent(content: unknown): string {
         const name = string(block.name) ?? 'tool'
         return [`${name} ${typeof block.arguments === 'string' ? block.arguments : jsonText(block.arguments)}`]
       }
-      if (block.type === 'image') return ['[image]']
+      if (block.type === 'image') {
+        return [block.offloaded === true ? '[offloaded image]' : '[image]']
+      }
       if (block.type === 'file') return [`[file ${string(block.name) ?? ''}]`]
       return []
     })
@@ -1165,6 +1273,7 @@ export function projectTrajectory(header: SessionHeader, events: readonly Sessio
       .filter((id): id is string => id !== undefined),
   )]
   const modelContextRecordIds = surface.hasReplacement
+    || surface.projectedMessages.size > 0
     ? [...new Set(
         sorted
           .filter(event => surface.currentSeqs.has(event.seq))
@@ -1172,6 +1281,24 @@ export function projectTrajectory(header: SessionHeader, events: readonly Sessio
           .filter((id): id is string => id !== undefined),
       )]
     : undefined
+  const recordsById = new Map(records.map(record => [record.id, record]))
+  const modelContextRecordOverrides = Object.fromEntries(
+    [...surface.projectedMessages].flatMap(([seq, message]) => {
+      const recordId = recordIdBySurfaceSeq.get(seq)
+      const record = recordId === undefined ? undefined : recordsById.get(recordId)
+      if (record === undefined) return []
+      const content = redactSensitive(message.content)
+      const override = redactSensitive({
+        ...(record.kind === 'tool' || record.kind === 'subtool'
+          ? { output: content }
+          : { input: content }),
+        summary: record.kind === 'tool' || record.kind === 'subtool'
+          ? compactText(`${jsonText(record.input)} → ${textFromContent(content)}`)
+          : compactText(textFromContent(content)),
+      }) as ModelContextRecordOverride
+      return [[record.id, override] as const]
+    }),
+  )
   const coverage = Object.entries(eventTypeCounts)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([type, total]) => {
@@ -1207,12 +1334,18 @@ export function projectTrajectory(header: SessionHeader, events: readonly Sessio
     ...records.map(record => record.turn),
   ])
   turnNumbers.delete(0)
+  const recordsByTurn = new Map<number, TrajectoryRecord[]>()
+  for (const record of records) {
+    const grouped = recordsByTurn.get(record.turn) ?? []
+    grouped.push(record)
+    recordsByTurn.set(record.turn, grouped)
+  }
   const turns: TrajectoryTurnSummary[] = [...turnNumbers]
     .sort((a, b) => a - b)
     .map((turn) => {
       const start = turnStarts.get(turn)
       const end = turnEnds.get(turn)
-      const turnRecords = records.filter(record => record.turn === turn)
+      const turnRecords = recordsByTurn.get(turn) ?? []
       const usage = sumUsage(turnRecords.map(record => record.usage))
       const firstRecordTime = turnRecords[0]?.startTime
       const startAt = start?.time ?? firstRecordTime ?? end?.time ?? startTime
@@ -1264,6 +1397,9 @@ export function projectTrajectory(header: SessionHeader, events: readonly Sessio
     unknownEventTypes: [...unknown].sort(),
     transcriptRecordIds,
     modelContextRecordIds,
+    ...(Object.keys(modelContextRecordOverrides).length === 0
+      ? {}
+      : { modelContextRecordOverrides }),
     relations: surface.relations,
     coverage,
     coverageSummary: {

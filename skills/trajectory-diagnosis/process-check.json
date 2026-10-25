@@ -1,0 +1,48 @@
+{
+  "id": "trajectory-diagnosis-contract",
+  "version": "1",
+  "evaluatorId": "trajectory-diagnosis-process",
+  "evaluatorVersion": "1",
+  "scope": {
+    "skill": "trajectory-diagnosis",
+    "context": "frozen-snapshot"
+  },
+  "checks": [
+    {
+      "id": "frozen-target-only",
+      "criticality": "required",
+      "applicable_if": "snapshot_id is supplied",
+      "pass_if": "Every evidence read uses the supplied snapshot_id."
+    },
+    {
+      "id": "overview-findings-first",
+      "criticality": "required",
+      "applicable_if": "diagnosis starts",
+      "pass_if": "overview and findings are both read before records or record."
+    },
+    {
+      "id": "evidence-read-on-demand",
+      "criticality": "recommended",
+      "applicable_if": "material claims need supporting records",
+      "pass_if": "records and record reads occur only after overview and findings."
+    },
+    {
+      "id": "no-live-source-read",
+      "criticality": "required",
+      "applicable_if": "a frozen snapshot exists",
+      "pass_if": "No live session, project, network, or external-system read is used."
+    },
+    {
+      "id": "four-section-report",
+      "criticality": "required",
+      "applicable_if": "a report is produced",
+      "pass_if": "The report has exactly the four required top-level headings in order."
+    },
+    {
+      "id": "actionable-recommendations",
+      "criticality": "recommended",
+      "applicable_if": "the report contains a material recommendation",
+      "pass_if": "Each recommendation includes evidence, one preferred target, a concrete change, expected improvement, and verification."
+    }
+  ]
+}

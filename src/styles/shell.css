@@ -21,6 +21,18 @@
   --rose-soft: #fae9ed;
   --assistant-ttft: #b4a2d3;
   --assistant-decode: #7b61a8;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-panel: 12px;
+  --control-height: 32px;
+  --app-header-height: 49px;
+  --page-inline-padding: 16px;
+  --page-content-max: 1120px;
 }
 
 * {
@@ -52,7 +64,7 @@ button {
   min-width: 0;
   height: 100%;
   display: grid;
-  grid-template-rows: 49px 43px 50px auto 131px minmax(0, 1fr);
+  grid-template-rows: var(--app-header-height) 43px 50px auto 131px minmax(0, 1fr);
   overflow: hidden;
   background: #fff;
   transition: padding-right 160ms ease;
@@ -63,24 +75,59 @@ button {
 }
 
 .app-header {
-  display: flex;
+  height: var(--app-header-height);
+  display: grid;
+  grid-template-columns: max-content minmax(180px, 1fr) max-content;
   align-items: center;
-  gap: 18px;
-  padding: 0 16px;
+  gap: var(--space-3);
+  padding: 0 var(--page-inline-padding);
   border-bottom: 1px solid var(--border);
   min-width: 0;
+  background: #fff;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
   flex: 0 0 auto;
   color: #262a30;
 }
 
-.brand svg {
+.workspace-brand-nav {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+}
+
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 3px;
+  border-radius: var(--radius-card);
+  background: var(--subtle);
+}
+
+.workspace-tabs button {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: #747c86;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.workspace-tabs button.active {
+  background: #fff;
   color: var(--blue);
+  box-shadow: 0 1px 4px rgb(32 40 50 / 10%);
+  font-weight: 600;
 }
 
 .brand span {
@@ -100,28 +147,42 @@ button {
 .session-picker {
   display: flex;
   align-items: center;
-  gap: 7px;
-  width: min(640px, 58vw);
+  gap: 6px;
+  width: 100%;
   min-width: 0;
   color: var(--muted);
 }
 
+.app-header-context {
+  min-width: 0;
+}
+
+.app-header-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  justify-self: end;
+}
+
 .source-picker {
   position: relative;
-  flex: 0 0 138px;
-  width: 138px;
+  width: fit-content;
+  min-width: 64px;
+  max-width: 136px;
+  flex: 0 1 auto;
 }
 
 .source-picker-trigger {
   width: 100%;
-  height: 32px;
+  height: var(--control-height);
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto 13px;
+  grid-template-columns: minmax(0, 1fr) 13px;
   align-items: center;
-  gap: 5px;
-  padding: 0 8px;
+  gap: 4px;
+  padding: 0 7px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--subtle);
   color: #30343a;
   font-size: 12px;
@@ -140,11 +201,6 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.source-picker-trigger > small {
-  color: #888f99;
-  font-size: 9px;
 }
 
 .source-picker-trigger > svg:last-child {
@@ -199,7 +255,7 @@ button {
 
 .source-picker-menu small {
   color: #89919b;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .source-picker-menu > button > svg:last-child {
@@ -218,11 +274,11 @@ button {
 
 .session-picker select {
   min-width: 0;
-  flex: 1;
-  width: auto;
-  height: 32px;
+  flex: 1 1 auto;
+  width: 0;
+  height: var(--control-height);
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   padding: 0 28px 0 8px;
   background: var(--subtle);
   color: #30343a;
@@ -233,24 +289,6 @@ button {
 .session-picker select:focus {
   border-color: #9bb9f8;
   box-shadow: 0 0 0 2px #e8efff;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-}
-
-.header-actions .export-button {
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.header-actions .export-button.disabled,
-.header-actions .export-button:disabled {
-  opacity: .38;
-  cursor: default;
 }
 
 .live-status {
@@ -271,13 +309,13 @@ button {
 }
 
 .icon-button {
-  width: 32px;
-  height: 32px;
+  width: var(--control-height);
+  height: var(--control-height);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: transparent;
   cursor: pointer;
 }
@@ -293,6 +331,76 @@ button {
 
 .icon-button:disabled:hover {
   background: transparent;
+}
+
+.header-action-menu {
+  position: relative;
+}
+
+.header-action-menu-popover {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 290px;
+  display: grid;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: #fff;
+  box-shadow: 0 12px 32px rgb(31 35 40 / 16%);
+}
+
+.header-action-menu-popover > button,
+.header-action-menu-popover > a,
+.header-action-menu-popover > span {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: #4b535d;
+  text-align: left;
+  text-decoration: none;
+}
+
+.header-action-menu-popover > button,
+.header-action-menu-popover > a {
+  cursor: pointer;
+}
+
+.header-action-menu-popover > button:hover,
+.header-action-menu-popover > a:hover {
+  background: var(--hover);
+}
+
+.header-action-menu-popover > .disabled,
+.header-action-menu-popover > button:disabled {
+  opacity: .42;
+  cursor: default;
+}
+
+.header-action-menu-popover span > span,
+.header-action-menu-popover button > span,
+.header-action-menu-popover a > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.header-action-menu-popover strong {
+  font-size: 12px;
+}
+
+.header-action-menu-popover small {
+  color: #858d97;
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .view-tabs {
@@ -476,7 +584,7 @@ button {
   background: #eef0f2;
   color: #626a75;
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   line-height: 1.4;
 }
@@ -527,7 +635,7 @@ button {
 .session-lineage span {
   max-width: 220px;
   color: #737b86;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .task-state {
@@ -564,7 +672,7 @@ button {
 .task-todo-summary {
   flex: 0 0 auto;
   color: #7d848e;
-  font-size: 9px;
+  font-size: 10px;
   white-space: nowrap;
 }
 
@@ -575,7 +683,7 @@ button {
   background: var(--blue-soft);
   color: var(--blue);
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -688,4 +796,128 @@ button {
   color: #383e46;
   font-size: 11px;
   font-weight: 700;
+}
+
+@media (max-width: 1024px) {
+  .app-header {
+    gap: var(--space-2);
+    padding-right: var(--space-3);
+    padding-left: var(--space-3);
+  }
+
+  .workspace-brand-nav {
+    gap: 10px;
+  }
+
+  .workspace-tabs button {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .source-picker {
+    max-width: 110px;
+  }
+
+  .live-status {
+    margin-right: 2px;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    --app-header-height: 90px;
+  }
+
+  .app-header {
+    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-rows: 42px 40px;
+    gap: 4px 7px;
+    padding: 4px 8px;
+  }
+
+  .workspace-brand-nav {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .app-header-context {
+    min-width: 0;
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .app-header-actions {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .app-header:not(.with-context) {
+    --app-header-height: 49px;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-rows: 41px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+
+  .app-header:not(.with-context) .workspace-brand-nav {
+    grid-column: 1;
+  }
+
+  .app-header:not(.with-context) .app-header-actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .session-picker {
+    gap: 5px;
+  }
+
+  .source-picker {
+    min-width: 64px;
+    max-width: 86px;
+  }
+
+  .live-status {
+    display: none;
+  }
+
+  .view-tabs {
+    gap: 12px;
+    overflow-x: auto;
+    padding: 0 8px;
+    scrollbar-width: none;
+  }
+
+  .view-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .view-tabs button {
+    flex: 0 0 auto;
+    font-size: 12px;
+  }
+
+  .toolbar {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .toolbar-modes button {
+    width: 32px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .toolbar-modes button span {
+    display: none;
+  }
+
+  .toolbar-actions,
+  .search-box {
+    width: 100%;
+  }
+
+  .session-meta dl {
+    display: none;
+  }
 }

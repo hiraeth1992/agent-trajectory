@@ -45,13 +45,7 @@ export function SourcePicker({
         aria-expanded={open}
         onClick={() => setOpen(current => !current)}
       >
-        <SourceIcon
-          source={selected?.source}
-          iconToken={selected?.iconToken}
-          size={16}
-        />
         <span>{selected?.label ?? '全部来源'}</span>
-        <small>{selected?.sessionCountState === 'pending' ? '…' : selected?.sessionCount ?? total}</small>
         <ChevronDown size={13} />
       </button>
       {open && (

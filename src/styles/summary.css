@@ -211,7 +211,7 @@ button.summary-evidence-link:hover {
 .outcome-diagnosis-error {
   max-width: 180px;
   color: #b24545;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.35;
   text-align: right;
   overflow-wrap: anywhere;
@@ -363,7 +363,7 @@ button.summary-evidence-link:hover {
 .summary-stat span {
   overflow: hidden;
   color: #8a919b;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -386,7 +386,7 @@ button.summary-evidence-link:hover {
   grid-column: 2;
   overflow: hidden;
   color: #858d97;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -538,7 +538,7 @@ button.summary-evidence-link:hover {
   border-radius: 4px;
   background: #f5f0e8;
   color: #99651d;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 700;
   white-space: nowrap;
 }
@@ -569,7 +569,7 @@ button.summary-evidence-link:hover {
   margin-top: 3px;
   overflow: hidden;
   color: #747c86;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.5;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -587,7 +587,7 @@ button.summary-evidence-link:hover {
   border-radius: 4px;
   background: #f1f4f7;
   color: #697582;
-  font-size: 7px;
+  font-size: 10px;
   font-style: normal;
 }
 
@@ -615,14 +615,14 @@ button.summary-evidence-link:hover {
 
 .optimization-detail dt {
   color: #7c8490;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 650;
 }
 
 .optimization-detail dd {
   margin: 0;
   color: #505862;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.55;
 }
 
@@ -644,13 +644,13 @@ button.summary-evidence-link:hover {
   border-radius: 5px;
   background: #fff;
   color: #5c7196;
-  font-size: 8px;
+  font-size: 10px;
   cursor: pointer;
 }
 
 .optimization-actions small {
   color: #858d97;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .optimization-actions button:last-of-type {
@@ -686,7 +686,7 @@ button.summary-evidence-link:hover {
 .optimization-empty small {
   margin-top: 3px;
   color: #829088;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.5;
 }
 
@@ -695,7 +695,7 @@ button.summary-evidence-link:hover {
   border-top: 1px solid #edd8b9;
   background: #fff8ed;
   color: #8c641f;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .trajectory-story-panel {
@@ -724,7 +724,7 @@ button.summary-evidence-link:hover {
   border-radius: 5px;
   background: #fff;
   color: #737d89;
-  font-size: 8px;
+  font-size: 10px;
   cursor: pointer;
 }
 
@@ -749,7 +749,7 @@ button.summary-evidence-link:hover {
   min-width: 34px;
   color: #8d949d;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
   text-align: center;
 }
 
@@ -814,7 +814,7 @@ button.summary-evidence-link:hover {
   background: #fff;
   color: #7d8897;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 650;
   transition:
     border-color 130ms ease,
@@ -866,7 +866,7 @@ button.summary-evidence-link:hover {
   width: 100%;
   overflow: hidden;
   color: #59616b;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 620;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -879,7 +879,7 @@ button.summary-evidence-link:hover {
 .story-node > small {
   overflow: hidden;
   color: #949ba4;
-  font-size: 7px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -892,7 +892,7 @@ button.summary-evidence-link:hover {
   border-radius: 999px;
   background: #fae6eb;
   color: #a34659;
-  font-size: 7px;
+  font-size: 10px;
   font-style: normal;
   white-space: nowrap;
 }
@@ -938,13 +938,13 @@ button.summary-evidence-link:hover {
 }
 
 .story-triad-item header strong {
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .story-triad-item header em {
   margin-left: auto;
   color: #969da6;
-  font-size: 7px;
+  font-size: 10px;
   font-style: normal;
   white-space: nowrap;
 }
@@ -954,7 +954,7 @@ button.summary-evidence-link:hover {
   margin: 6px 0 0;
   overflow: visible;
   color: #535d69;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.45;
   white-space: nowrap;
 }
@@ -1018,7 +1018,7 @@ button.summary-evidence-link:hover {
   margin: 0;
   overflow: hidden;
   color: #77808b;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1030,7 +1030,7 @@ button.summary-evidence-link:hover {
   align-items: center;
   gap: 6px;
   color: #6b7480;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .story-selection-reason > svg {
@@ -1051,7 +1051,7 @@ button.summary-evidence-link:hover {
   border-radius: 4px;
   background: #eaf0f8;
   color: #657791;
-  font-size: 7px;
+  font-size: 10px;
   font-style: normal;
   white-space: nowrap;
 }
@@ -1074,7 +1074,7 @@ button.summary-evidence-link:hover {
   gap: 9px;
   color: #838c97;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .story-selection-facts > span {
@@ -1136,7 +1136,7 @@ button.summary-evidence-link:hover {
 .summary-panel-heading small {
   overflow: hidden;
   color: #9399a2;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1183,14 +1183,14 @@ button.summary-evidence-link:hover {
   border-radius: 4px;
   background: #eef1f5;
   color: #7e8792;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .decision-turn-toggle small {
   justify-self: end;
   color: #8d949d;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .decision-steps {
@@ -1262,7 +1262,7 @@ button.summary-evidence-link:hover {
   box-shadow: 0 0 0 1px #b8c0ca;
   color: #fff;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
 }
 
@@ -1336,7 +1336,7 @@ button.summary-evidence-link:hover {
   height: 20px;
   margin: 0;
   padding: 0 6px;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .step-body header strong {
@@ -1353,7 +1353,7 @@ button.summary-evidence-link:hover {
   flex: 0 0 auto;
   margin-left: auto;
   color: #858d97;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .step-body > p {
@@ -1400,7 +1400,7 @@ button.summary-evidence-link:hover {
   border-radius: 4px;
   background: #eaf0f8;
   color: #657791;
-  font-size: 8px;
+  font-size: 10px;
   font-style: normal;
   white-space: nowrap;
 }
@@ -1426,7 +1426,7 @@ button.summary-evidence-link:hover {
 .step-result > span {
   flex: 0 0 auto;
   color: #90969e;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 650;
   text-transform: uppercase;
 }
@@ -1439,7 +1439,7 @@ button.summary-evidence-link:hover {
   margin-top: 8px;
   color: #858d97;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .step-body footer span {
@@ -1501,7 +1501,7 @@ button.summary-evidence-link:hover {
 
 .evaluation-item span {
   color: #8d949d;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 650;
   letter-spacing: .03em;
   text-transform: uppercase;
@@ -1516,7 +1516,7 @@ button.summary-evidence-link:hover {
 .evaluation-item p {
   margin: 4px 0 5px;
   color: #707985;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.5;
 }
 
@@ -1543,7 +1543,7 @@ button.summary-evidence-link:hover {
   align-items: center;
   gap: 5px;
   color: #858d97;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .cost-controls select {
@@ -1553,7 +1553,7 @@ button.summary-evidence-link:hover {
   border-radius: 6px;
   background: #fff;
   color: #626b76;
-  font-size: 9px;
+  font-size: 10px;
   outline: none;
 }
 
@@ -1569,7 +1569,7 @@ button.summary-evidence-link:hover {
   border-radius: 4px;
   background: transparent;
   color: #7b838d;
-  font-size: 9px;
+  font-size: 10px;
   cursor: pointer;
 }
 
@@ -1588,7 +1588,7 @@ button.summary-evidence-link:hover {
   gap: 11px;
   padding: 7px 14px 2px;
   color: #7f8791;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .token-legend button {
@@ -1600,7 +1600,7 @@ button.summary-evidence-link:hover {
   border-radius: 5px;
   background: transparent;
   color: #a1a7af;
-  font-size: 8px;
+  font-size: 10px;
   cursor: pointer;
 }
 
@@ -1679,7 +1679,7 @@ button.summary-evidence-link:hover {
 .cost-rank {
   color: #a0a6ae;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
   text-align: center;
 }
 
@@ -1701,7 +1701,7 @@ button.summary-evidence-link:hover {
 
 .cost-name small {
   color: #969ca4;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .cost-track {
@@ -1734,14 +1734,14 @@ button.summary-evidence-link:hover {
   width: 100%;
   padding-left: 5px;
   color: #a0a5ad;
-  font-size: 7px;
+  font-size: 10px;
   line-height: 10px;
 }
 
 .cost-value {
   color: #626b76;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
   text-align: right;
 }
 
@@ -1755,7 +1755,7 @@ button.summary-evidence-link:hover {
   border-top: 1px solid #eceef1;
   background: #fbfcfd;
   color: #959ba3;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.5;
 }
 
@@ -1781,7 +1781,7 @@ button.summary-evidence-link:hover {
 
 .correction-none small {
   color: #8d9892;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .correction-list {
@@ -1825,7 +1825,7 @@ button.summary-evidence-link:hover {
 .correction-status strong {
   overflow: hidden;
   color: #414850;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1833,7 +1833,7 @@ button.summary-evidence-link:hover {
 .correction-status > span {
   flex: 0 0 auto;
   color: #9299a2;
-  font-size: 7px;
+  font-size: 10px;
 }
 
 .correction-range {
@@ -1841,7 +1841,7 @@ button.summary-evidence-link:hover {
   overflow: hidden;
   color: #75808d;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
   text-overflow: clip;
   white-space: nowrap;
 }
@@ -1868,14 +1868,14 @@ button.summary-evidence-link:hover {
   flex: 0 0 auto;
   padding: 2px 5px;
   border-radius: 4px;
-  font-size: 7px;
+  font-size: 10px;
 }
 
 .correction-stage-content {
   min-width: 0;
   flex: 0 1 auto;
   color: #59616b;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.4;
   outline: none;
 }
@@ -1976,7 +1976,7 @@ button.summary-evidence-link:hover {
 .ai-enhancement-copy small {
   overflow: hidden;
   color: #7d8490;
-  font-size: 8px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2022,14 +2022,14 @@ button.summary-evidence-link:hover {
 .ai-enhancement-modules button strong {
   overflow: hidden;
   color: #545b65;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .ai-enhancement-modules button small {
   color: #969ca5;
-  font-size: 7px;
+  font-size: 10px;
 }
 
 .ai-enhancement-modules button.selected {
@@ -2212,13 +2212,13 @@ button.summary-evidence-link:hover {
 
 .ai-scope-toggle strong {
   color: #4b535d;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-scope-toggle small,
 .ai-scope-toggle > span:last-child {
   color: #8a919a;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-scope-toggle[aria-expanded="true"] {
@@ -2233,7 +2233,7 @@ button.summary-evidence-link:hover {
   outline: 0;
   background: transparent;
   color: #49515c;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-generation-progress {
@@ -2255,12 +2255,12 @@ button.summary-evidence-link:hover {
 
 .ai-generation-progress strong {
   color: #4e435f;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-generation-progress small {
   color: #81778f;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-generation-progress .ai-generating-icon {
@@ -2280,7 +2280,7 @@ button.summary-evidence-link:hover {
   border-radius: 8px;
   background: #eeeafd;
   color: #6d56aa;
-  font-size: 7px;
+  font-size: 10px;
   font-style: normal;
   font-weight: 700;
   letter-spacing: .02em;
@@ -2290,7 +2290,7 @@ button.summary-evidence-link:hover {
   display: block;
   margin-top: 4px;
   color: #737c88;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 400;
   line-height: 1.5;
 }
@@ -2383,17 +2383,17 @@ button.summary-evidence-link:hover {
 
 .ai-data-toggle strong {
   color: #4b535d;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-data-toggle small {
   color: #8a919a;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-data-toggle-action {
   color: #6d56aa;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-summary-mark {
@@ -2429,7 +2429,7 @@ button.summary-evidence-link:hover {
 .ai-summary-intro > small {
   overflow: hidden;
   color: #7d8490;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2493,14 +2493,14 @@ button.summary-evidence-link:hover {
 
 .ai-summary-heading small {
   color: #8b919a;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-config-label {
   display: block;
   margin-bottom: 7px;
   color: #858c96;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: .05em;
   text-transform: uppercase;
@@ -2530,7 +2530,7 @@ button.summary-evidence-link:hover {
   appearance: none;
   background: transparent;
   color: #49515c;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-model-selector span {
@@ -2541,13 +2541,13 @@ button.summary-evidence-link:hover {
 
 .ai-model-selector small {
   color: #8a919b;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-model-selector strong {
   overflow: hidden;
   color: #49515c;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2571,7 +2571,7 @@ button.summary-evidence-link:hover {
   flex-direction: column;
   gap: 4px;
   color: #7f8792;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-model-settings input {
@@ -2583,7 +2583,7 @@ button.summary-evidence-link:hover {
   outline: 0;
   background: #fff;
   color: #424952;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-model-settings select {
@@ -2595,7 +2595,7 @@ button.summary-evidence-link:hover {
   outline: 0;
   background: #fff;
   color: #424952;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-model-settings input:focus {
@@ -2615,14 +2615,14 @@ button.summary-evidence-link:hover {
 
 .ai-model-endpoint-preview span {
   color: #7f8792;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-model-endpoint-preview code {
   overflow: hidden;
   color: #4a515c;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2630,7 +2630,7 @@ button.summary-evidence-link:hover {
 .ai-model-endpoint-preview small {
   grid-column: 2;
   color: #8a919a;
-  font-size: 7px;
+  font-size: 10px;
 }
 
 .ai-model-endpoint-preview small.warning {
@@ -2656,13 +2656,13 @@ button.summary-evidence-link:hover {
 
 .ai-model-management strong {
   color: #4a5059;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-model-management small,
 .ai-model-management-list > span {
   color: #858c96;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.45;
 }
 
@@ -2703,7 +2703,7 @@ button.summary-evidence-link:hover {
   border-radius: 5px;
   background: #fff;
   color: #68717d;
-  font-size: 8px;
+  font-size: 10px;
   cursor: pointer;
 }
 
@@ -2739,12 +2739,12 @@ button.summary-evidence-link:hover {
 
 .ai-model-delete-confirm strong {
   color: #703b3b;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-model-delete-confirm small {
   color: #906767;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-model-delete-confirm button.danger {
@@ -2772,12 +2772,12 @@ button.summary-evidence-link:hover {
 
 .optimization-execution > header strong {
   color: #444c56;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .optimization-execution > header small {
   color: #89919b;
-  font-size: 7px;
+  font-size: 10px;
 }
 
 .optimization-execution > article {
@@ -2801,25 +2801,25 @@ button.summary-evidence-link:hover {
   border-radius: 4px;
   background: #eeeafd;
   color: #6d56aa;
-  font-size: 7px;
+  font-size: 10px;
 }
 
 .optimization-execution > article > div strong {
   color: #444c56;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .optimization-execution > article > div small,
 .optimization-execution > article > footer small {
   color: #858d97;
-  font-size: 7px;
+  font-size: 10px;
   line-height: 1.45;
 }
 
 .optimization-execution > article > p {
   margin: 7px 0;
   color: #59626d;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.55;
 }
 
@@ -2832,7 +2832,7 @@ button.summary-evidence-link:hover {
   background: #252932;
   color: #e4e8ee;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 7px;
+  font-size: 10px;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -2854,7 +2854,7 @@ button.summary-evidence-link:hover {
   border-radius: 5px;
   background: #fff;
   color: #5c7196;
-  font-size: 8px;
+  font-size: 10px;
   cursor: pointer;
 }
 
@@ -2867,7 +2867,7 @@ button.summary-evidence-link:hover {
   background: #252932;
   color: #dfe4eb;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -2877,7 +2877,7 @@ button.summary-evidence-link:hover {
   border-top: 1px solid #efc5cd;
   background: #fff5f6;
   color: #a13e51;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-loading {
@@ -2907,7 +2907,7 @@ button.summary-evidence-link:hover {
 
 .ai-summary-generating small {
   color: #858c96;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-generating-icon {
@@ -2955,7 +2955,7 @@ button.summary-evidence-link:hover {
   border-radius: 5px;
   background: #fff0dc;
   color: #a86610;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 650;
 }
 
@@ -2964,7 +2964,7 @@ button.summary-evidence-link:hover {
   border-bottom: 1px solid #edd8b9;
   background: #fff8ed;
   color: #8c641f;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-summary-result-grid {
@@ -3012,7 +3012,7 @@ button.summary-evidence-link:hover {
   border-radius: 5px;
   background: #eeeafd;
   color: #665392;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-summary-facts {
@@ -3034,7 +3034,7 @@ button.summary-evidence-link:hover {
 
 .ai-summary-facts span {
   color: #6f7e76;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .ai-summary-facts strong {
@@ -3047,7 +3047,7 @@ button.summary-evidence-link:hover {
   grid-column: 1 / -1;
   margin-top: 3px;
   color: #809289;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.45;
 }
 
@@ -3079,7 +3079,7 @@ button.summary-evidence-link:hover {
   background: #eeeafd;
   color: #705a9e;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-semantic-sections article > div {
@@ -3096,13 +3096,13 @@ button.summary-evidence-link:hover {
 .ai-semantic-sections p {
   margin: 5px 0;
   color: #747c87;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.5;
 }
 
 .ai-semantic-sections small {
   color: #8e849f;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-summary-result-footer {
@@ -3114,7 +3114,7 @@ button.summary-evidence-link:hover {
   border-top: 1px solid #e4e5ec;
   background: rgb(251 250 255 / 88%);
   color: #858b96;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .ai-summary-result-footer span {
@@ -3129,7 +3129,7 @@ button.summary-evidence-link:hover {
   border: 0;
   background: transparent;
   color: #6e59a0;
-  font-size: 8px;
+  font-size: 10px;
   cursor: pointer;
 }
 
@@ -3148,7 +3148,51 @@ button.summary-evidence-link:hover {
   }
 }
 
-@media (max-width: 1050px) {
+@media (max-width: 1024px) {
+  .summary-outcome.with-objective {
+    grid-template-columns: 46px minmax(0, 1fr);
+  }
+
+  .summary-outcome.with-objective .outcome-copy {
+    grid-column: 2;
+    padding-right: 132px;
+  }
+
+  .summary-outcome.with-objective .outcome-diagnosis-control {
+    grid-column: 2;
+  }
+
+  .summary-outcome.with-objective .summary-objective {
+    min-height: 0;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    padding: 13px 0 0;
+    border-top: 1px solid #e5e8ec;
+    border-left: 0;
+  }
+
+  .summary-stat-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .summary-stat {
+    border-bottom: 1px solid #e8ebef;
+  }
+
+  .summary-stat:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .summary-stat:nth-child(4),
+  .summary-stat:nth-child(5) {
+    border-bottom: 0;
+  }
+
+  .summary-stat-token {
+    grid-column: span 2;
+    border-right: 0;
+  }
+
   .ai-enhancement-modules {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -3158,10 +3202,6 @@ button.summary-evidence-link:hover {
       34px
       minmax(110px, .6fr)
       repeat(3, minmax(150px, 1fr));
-  }
-
-  .summary-outcome.with-objective {
-    grid-template-columns: 46px minmax(0, 320px) minmax(0, 1fr);
   }
 
   .story-selection {
@@ -3193,11 +3233,23 @@ button.summary-evidence-link:hover {
   .ai-summary-compact-row {
     grid-template-columns: 34px minmax(140px, 1fr) minmax(250px, 1fr) minmax(200px, 280px) auto;
   }
+
+  .summary-stat span,
+  .summary-stat-detail,
+  .summary-panel-heading small,
+  .story-controls button,
+  .story-controls > span,
+  .story-triad-item p,
+  .story-selection-copy > p,
+  .story-selection-reason,
+  .story-selection-facts {
+    font-size: 10px;
+  }
 }
 
 @media (max-width: 720px) {
   .app-shell.view-summary {
-    grid-template-rows: 50px 42px auto minmax(0, 1fr);
+    grid-template-rows: 90px 42px auto minmax(0, 1fr);
   }
 
   .trajectory-summary {
@@ -3284,6 +3336,10 @@ button.summary-evidence-link:hover {
   .summary-stat-token {
     padding-right: 10px;
     padding-left: 10px;
+  }
+
+  .summary-stat-token {
+    grid-column: 1 / -1;
   }
 
   .summary-primary-grid .evaluation-panel .evaluation-list {
@@ -3418,7 +3474,7 @@ button.summary-evidence-link:hover {
   }
 
   .cost-value {
-    font-size: 8px;
+    font-size: 10px;
   }
 
   .token-legend {

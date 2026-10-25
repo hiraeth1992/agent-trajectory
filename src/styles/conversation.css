@@ -62,7 +62,7 @@
 .conversation-message > header time {
   margin-left: auto;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .conversation-locate {
@@ -190,7 +190,7 @@
   border-radius: 4px;
   background: #eef0f2;
   color: #656c75;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -241,7 +241,7 @@
 .conversation-activity-row > time {
   color: #8a9098;
   font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
   text-align: right;
   white-space: nowrap;
 }
@@ -258,7 +258,7 @@
 @media (max-width: 720px) {
   .app-shell.view-conversation,
   .app-shell.view-model-context {
-    grid-template-rows: 50px 42px 48px auto minmax(0, 1fr);
+    grid-template-rows: 90px 42px 48px auto minmax(0, 1fr);
   }
 
   .conversation {

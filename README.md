@@ -38,7 +38,7 @@ npm run pack:tgz
 npx --yes ./agent-trajectory-0.1.0.tgz
 ```
 
-当前压缩包约 200 KiB、解包后不足 1 MiB。启动器只监听随机的 `127.0.0.1` 端口，
+当前压缩包约 290 KiB、解包后约 1.1 MiB。启动器只监听随机的 `127.0.0.1` 端口，
 使用一次性启动 URL 为浏览器建立本机会话；关闭前台进程会同步关闭服务和 Worker。
 常用命令：
 
@@ -46,6 +46,8 @@ npx --yes ./agent-trajectory-0.1.0.tgz
 agent-trajectory                     # 启动或复用现有实例并打开页面
 agent-trajectory start --no-open     # 只启动服务
 agent-trajectory doctor              # 检查三类来源的路径、状态和会话数
+agent-trajectory evaluate            # 运行内置脱敏 Gold benchmark 并生成本地报告
+agent-trajectory calibrate prepare --dataset ~/.agent-trajectory/calibration/real-v1 --count 30
 agent-trajectory setup               # 交互式保存自定义来源路径
 agent-trajectory install-hooks       # 安装三类 Agent 的新会话联动
 agent-trajectory uninstall-hooks     # 只移除本项目安装的联动项
@@ -122,6 +124,9 @@ npm run dev
 
 默认地址：<http://127.0.0.1:4317>
 
+开发命令会同时托管 Vite 页面和本地 API，并监听 `server/`、`src/` 等源码变化自动重启
+后端。这样新增或修改接口时，不会出现“前端已热更新、后端仍是旧版本”的版本错配。
+
 可选配置：
 
 ```bash
@@ -163,6 +168,84 @@ Prompt 显式调用发行包内的 `$trajectory-diagnosis` Skill，并只携带 
 命令都位于当前运行 Agent Trajectory 的本机，因此 Prompt 需要在能够访问该本机路径的新
 会话中执行。
 
+### 本地评测基线
+
+`agent-trajectory evaluate` 运行内置的 12 条脱敏冻结 Gold case，覆盖 DSH、Codex 和
+ZCode 的成功正控、未验证、失败与恢复、运行中、截断、缺少工具结果、未知事件、多要求和
+跨轮承接场景。命令不扫描真实会话、不执行 Agent，也不调用模型；默认在
+`~/.agent-trajectory/evaluations/` 写入权限为 `0600` 的 JSON 与 Markdown：
+
+```bash
+agent-trajectory evaluate
+agent-trajectory evaluate --output-dir ./evaluation-reports
+agent-trajectory evaluate --baseline ./evaluation-reports/baseline.json
+```
+
+报告保留逐 criterion verdict、证据边界、归因、N/A、证据不足和 Evaluator 错误，不合成
+虚假精确总分。baseline 比较要求 dataset/version、evaluator/version、facts schema 和每个
+Target fingerprint 完全一致；否则拒绝给出改善或退化结论。
+
+真实轨迹校准采用显式、私有的三阶段流程：
+
+```bash
+# 1. 从三来源均衡抽取并冻结本机真实候选；这是唯一读取 live source 的阶段
+agent-trajectory calibrate prepare \
+  --dataset ~/.agent-trajectory/calibration/real-v1 \
+  --count 30
+
+# 2. 两位 Reviewer 分别完成 reviewer-a.json / reviewer-b.json 后生成一致性报告和裁决模板
+agent-trajectory calibrate agreement \
+  --dataset ~/.agent-trajectory/calibration/real-v1 \
+  --reviewer-a ~/.agent-trajectory/calibration/real-v1/reviewer-a.json \
+  --reviewer-b ~/.agent-trajectory/calibration/real-v1/reviewer-b.json
+
+# 3. 独立裁决完成后，才允许作为 Gold 运行
+agent-trajectory evaluate \
+  --dataset ~/.agent-trajectory/calibration/real-v1 \
+  --adjudication ~/.agent-trajectory/calibration/real-v1/adjudication.json \
+  --split calibration
+```
+
+`prepare` 在来源 fingerprint 前后一致时才冻结样本，并移除 raw/searchText、重写 session、
+record、event、call、trace/span 标识、替换 Home/工作区路径并再次递归脱敏。候选目录权限
+为 `0700`，文件为 `0600`，且自带忽略全部内容的 `.gitignore`。候选仍可能包含完成评测所
+必需的真实业务文本，因此只能留在本机私有目录，不能提交或上传。
+
+两个 Reviewer 模板不包含本地 Evaluator 的预测，避免标注锚定；`agreement` 要求两份完整
+且 reviewer ID 不同的标注，输出 exact agreement、Cohen's Kappa 和逐项分歧。Reviewer
+原文件保持不变，所有分歧在独立 adjudication 中裁决。manifest/case hash、字段 schema、
+枚举值、Target identity 和 evidence record ID 均 fail closed；未完成或证据悬空的裁决
+不能编译为 Gold。
+
+启动 Agent Trajectory 后，顶层提供两个同级工作区：
+
+- `会话分析`：单条会话的对话、模型上下文、轨迹、过程评测和诊断；
+- `评测中心`：跨会话数据集、人工双标、分歧裁决和批量 EvaluationRun。
+
+评测中心首页先展示数据集概览、隐私审计、四阶段流程、样本 split 和 Reviewer A/B 独立
+进度。点击“开始/继续标注”才进入内部中文标注工作台。标注人身份进入后锁定，页面不会
+加载或展示另一位 Reviewer 的内容，也不会展示 Evaluator 预测。工作台以中文表单显示固定
+枚举，保存时自动写回协议要求的英文值；支持：
+
+- case 进度、来源和 split 列表；
+- 按摘要浏览轨迹，点击后按需读取单条输入/输出；
+- 点击记录直接加入当前 criterion、requirement 或 chain 的证据；
+- 从 user/steering 记录生成待确认的要求候选；
+- revision 乐观锁、原子保存和未保存离开提示；
+- 长记录输入/输出最多传输 256 KiB，并明确显示截断元数据。
+
+工作台只发现 `<data-dir>/calibration/*` 下通过隐私审计的数据集，不接受任意文件路径；
+manifest、隐私审计、Reviewer 和 case 文件必须是真实文件而非符号链接。CLI 和 JSON
+仍是权威协议，工作台只是更易用的受限 Adapter。
+
+顶层 URL 使用 `workspace=evaluation` 表示评测中心；会话分析仍保留原有 `source` 和
+`session` 参数。Reviewer 身份不写入 URL，避免分享链接或浏览器历史暴露另一份 Reviewer
+文件。浏览器前进/后退可以在两个工作区之间恢复导航状态。
+
+外部真实数据集必须显式选择 `--split calibration`、`--split regression`、
+`--split independent` 或 `--split all`。规则开发只能使用 calibration；日常回归使用
+regression；独立集只在最终验收时运行，避免用独立测试结果反向调规则。
+
 生产构建：
 
 ```bash
@@ -178,6 +261,10 @@ npm start
 - DSH model surface replacement fold：append-origin transcript、当前模型上下文和完整
   audit 轨迹分层展示；记录标记 `current / shadowed`，并保留 append/replace 的完整
   replacement/source 关系；非法或重复来源引用 fail closed。
+- DSH `image/offload` 按固定上游语义只修改模型上下文中的图片块，durable transcript
+  与 audit 保持原文；重复、越界、非 current 和 assistant target 均 fail closed。
+- DSH 持久事件词表与固定 Harness commit 做可执行快照比对，`assistant/live-chunk`
+  作为客户端瞬态事件不再被 durable reader 放行；必需消息投影词表单独锁定。
 - DSH 会话谱系原样贯通 `parentSession / origin / delegationDepth`；`goal/change` 折叠为
   当前目标，并按上游 revision/阶段/轮次/时间戳状态机严格 replay，首次失败后冻结在最后
   可信状态；`todo/write` 仅接受完整合法快照、last-write-wins，并在下一次
@@ -216,6 +303,8 @@ npm start
   大输入/输出显式截断，搜索文本由客户端基于脱敏后的可见预览生成。
 - Registry 详情、三来源解析结果和 API revision 历史均使用条目数与估算字节数双重
   有界 LRU；超预算只触发安全重建或完整 snapshot，不影响当前请求。
+- Registry 对同来源同会话的并发详情读取执行 single-flight；成功和失败后都清理在途
+  Promise，避免并发 API、导出和总结请求重复解析同一版本，同时允许失败后重试。
 - 可切换的对话/轨迹视图：对话展示用户和助手正文，运行上下文、推理与工具按轮次折叠。
 - DSH 会话在有 replacement 事实时额外提供“模型上下文”视图；“对话”始终保留 durable
   transcript，“轨迹”始终保留完整审计记录；切换到不支持独立模型上下文的会话时自动
@@ -225,6 +314,23 @@ npm start
   纠错改道链和五维过程评测解释模型做了什么、为什么这样做以及异常是否恢复；所有证据均
   可反向定位到轨迹记录。评测区分轨迹事实、相邻步骤推断和来源未记录，不会在缺少测试、
   断言或业务真值时把“没有报错”表述为“结果正确”。
+- 新增版本化 `local-trajectory-v1` Evaluation Contract，将五维分析映射为
+  `pass / fail / warning / not_applicable / insufficient_evidence / evaluator_error /
+  out_of_scope`，显式隔离分母、证据边界和 Agent/来源/Evaluator 归因。
+- 评测前生成 Judge-ready Facts Quality，检查来源能力与协议、运行态、截断、工具结果
+  缺失、未知事件和 trace 断裂；被短路的 criterion 不计为 Agent 失败，质量报告进入
+  Evaluation 和 AI summary facts hash。
+- 新增保守的 RequirementResult 与 ChainResult：只有逐项或显式承接证据足够时才下结论，
+  多要求不会由整体成功冒充逐项完成，单轮承接明确为 `not_applicable`。
+- 内置 12-case calibration/regression Gold dataset、本地 EvaluationRun、JSON/Markdown
+  报告和严格 baseline diff；重复运行结果稳定并统计 exact、precision/recall、FP/FN、
+  N/A、证据不足、Evaluator 错误、耗时和逐 case 变化。
+- 支持从真实三来源准备私有校准候选，按来源配额和结构多样性抽样；支持独立双标模板、
+  exact/Kappa 一致性报告、分歧裁决以及裁决后外部 frozen dataset 运行。未经裁决的候选
+  不能作为 Gold，独立集和 calibration/regression split 在冻结时固定。
+- `trajectory-diagnosis` 自带 6 条机器 Process Check，检查冻结 Target、overview/findings
+  优先、按需取证、禁止 live source 读取、四段报告和可验证的单一首选建议；规范只读，
+  不改变 Skill 权限或自动触发诊断。
 - “过程评测”下方新增“优化建议”：本地规则默认生成有证据的可执行建议，逐项展示问题、
   原因、推荐措施、实施位置、预期改善、验证方式和判断限制，并支持证据定位与复制。建议
   只用于展示，不会自动修改代码、规则、Hook、插件或环境。

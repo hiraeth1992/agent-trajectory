@@ -12,6 +12,10 @@ import type {
   TransportTrajectoryRecord,
 } from '../src/types'
 import type { AiSummaryGenerationEvent } from '../src/ai-summary-types'
+import type {
+  AnnotationReviewer,
+  AnnotationSaveRequest,
+} from '../src/annotation-types'
 import type { TrajectoryDiagnosisPromptRequest } from '../src/diagnosis-types'
 import { redactSensitive } from '../src/projector-utils'
 import {
@@ -21,6 +25,10 @@ import {
 import { jsonWeight, WeightedLruCache } from './lru'
 import { hasAllowedLocalRequest } from './security'
 import type { SummaryEngine } from './summary/engine'
+import {
+  AnnotationConflictError,
+  type AnnotationWorkspaceStore,
+} from './evaluation/annotation-workspace'
 
 export interface ApiRegistry {
   listSources(): Promise<SourceStatus[]>
@@ -39,10 +47,15 @@ export interface ApiRegistry {
 }
 
 export interface ApiOptions {
+  annotations?: AnnotationWorkspaceStore
   diagnosis?: TrajectoryDiagnosisService
   registry: ApiRegistry
   summary?: SummaryEngine
   streamIntervalMs?: number
+}
+
+function annotationReviewer(value: string | undefined): AnnotationReviewer | undefined {
+  return value === 'reviewer-a' || value === 'reviewer-b' ? value : undefined
 }
 
 export function sendJson(response: ServerResponse, status: number, payload: unknown): void {
@@ -212,12 +225,38 @@ function transportRecord(
   }
 }
 
+function transportModelContextRecordOverrides(
+  overrides: SessionDetail['projection']['modelContextRecordOverrides'],
+): SessionDetail['projection']['modelContextRecordOverrides'] {
+  if (overrides === undefined) return undefined
+  return Object.fromEntries(
+    Object.entries(overrides).map(([recordId, override]) => {
+      const safe = redactSensitive(override) as typeof override
+      return [
+        recordId,
+        {
+          ...safe,
+          ...(safe.input === undefined
+            ? {}
+            : { input: boundedPreview(safe.input) }),
+          ...(safe.output === undefined
+            ? {}
+            : { output: boundedPreview(safe.output) }),
+        },
+      ]
+    }),
+  )
+}
+
 function transportDetail(detail: SessionDetail): TransportSessionDetail {
   return redactSensitive({
     ...detail,
     projection: {
       ...detail.projection,
       records: detail.projection.records.map(transportRecord),
+      modelContextRecordOverrides: transportModelContextRecordOverrides(
+        detail.projection.modelContextRecordOverrides,
+      ),
     },
   }) as TransportSessionDetail
 }
@@ -360,6 +399,111 @@ export async function handleApi(
       response,
       200,
       await options.registry.listSessions(requested === 'all' ? 'all' : sourceId(requested)!),
+    )
+    return true
+  }
+  if (url.pathname === '/api/annotations/datasets') {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    if (request.method !== 'GET') {
+      sendJson(response, 405, { error: 'method not allowed' })
+      return true
+    }
+    sendJson(response, 200, await options.annotations.listDatasets())
+    return true
+  }
+  const annotationRecordMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/(reviewer-a|reviewer-b)\/cases\/([^/]+)\/records\/([^/]+)$/,
+  )
+  if (annotationRecordMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    if (request.method !== 'GET') {
+      sendJson(response, 405, { error: 'method not allowed' })
+      return true
+    }
+    const directoryId = decodePathSegment(annotationRecordMatch[1])
+    const reviewer = annotationReviewer(annotationRecordMatch[2])
+    const caseId = decodePathSegment(annotationRecordMatch[3])
+    const recordId = decodePathSegment(annotationRecordMatch[4])
+    if (directoryId === undefined || reviewer === undefined
+      || caseId === undefined || recordId === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    sendJson(
+      response,
+      200,
+      await options.annotations.record(directoryId, caseId, recordId),
+    )
+    return true
+  }
+  const annotationCaseMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/(reviewer-a|reviewer-b)\/cases\/([^/]+)$/,
+  )
+  if (annotationCaseMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    const directoryId = decodePathSegment(annotationCaseMatch[1])
+    const reviewer = annotationReviewer(annotationCaseMatch[2])
+    const caseId = decodePathSegment(annotationCaseMatch[3])
+    if (directoryId === undefined || reviewer === undefined || caseId === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    if (request.method === 'GET') {
+      sendJson(
+        response,
+        200,
+        await options.annotations.case(directoryId, reviewer, caseId),
+      )
+      return true
+    }
+    if (request.method === 'PUT') {
+      try {
+        const body = await readJsonBody(request, 512 * 1024) as AnnotationSaveRequest
+        sendJson(
+          response,
+          200,
+          await options.annotations.saveCase(directoryId, reviewer, caseId, body),
+        )
+      } catch (error) {
+        if (!(error instanceof AnnotationConflictError)) throw error
+        sendJson(response, 409, { error: error.message })
+      }
+      return true
+    }
+    sendJson(response, 405, { error: 'method not allowed' })
+    return true
+  }
+  const annotationOverviewMatch = url.pathname.match(
+    /^\/api\/annotations\/datasets\/([^/]+)\/(reviewer-a|reviewer-b)$/,
+  )
+  if (annotationOverviewMatch !== null) {
+    if (options.annotations === undefined) {
+      sendJson(response, 503, { error: 'annotation workspace is unavailable' })
+      return true
+    }
+    if (request.method !== 'GET') {
+      sendJson(response, 405, { error: 'method not allowed' })
+      return true
+    }
+    const directoryId = decodePathSegment(annotationOverviewMatch[1])
+    const reviewer = annotationReviewer(annotationOverviewMatch[2])
+    if (directoryId === undefined || reviewer === undefined) {
+      sendJson(response, 400, { error: 'invalid annotation path' })
+      return true
+    }
+    sendJson(
+      response,
+      200,
+      await options.annotations.overview(directoryId, reviewer),
     )
     return true
   }

@@ -110,6 +110,52 @@ describe('SessionSource registry contract', () => {
     expect(load).toHaveBeenCalledTimes(1)
   })
 
+  it('shares one in-flight load for concurrent requests to the same session', async () => {
+    const base = fakeSource('dsh')
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fingerprint = vi.fn(async () => 'v1')
+    const load = vi.fn(async (ref: SourceSessionRef) => {
+      await pending
+      return base.load(ref)
+    })
+    const registry = new SourceRegistry([
+      fakeSource('dsh', { fingerprint, load }),
+    ])
+
+    const requests = Array.from({ length: 10 }, () =>
+      registry.load('dsh', 'local-1'))
+    await vi.waitFor(() => {
+      expect(load).toHaveBeenCalledTimes(1)
+    })
+    release()
+
+    const details = await Promise.all(requests)
+    expect(details.every(detail => detail === details[0])).toBe(true)
+    expect(fingerprint).toHaveBeenCalledTimes(1)
+    expect(load).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears a failed in-flight load before retrying', async () => {
+    const base = fakeSource('dsh')
+    const failure = new Error('projection failed')
+    const load = vi.fn()
+      .mockRejectedValueOnce(failure)
+      .mockImplementation(base.load)
+    const registry = new SourceRegistry([
+      fakeSource('dsh', { load }),
+    ])
+
+    await expect(Promise.all([
+      registry.load('dsh', 'local-1'),
+      registry.load('dsh', 'local-1'),
+    ])).rejects.toBe(failure)
+    expect(await registry.load('dsh', 'local-1')).toBeDefined()
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
   it('evicts the least recently used detail when the cache limit is reached', async () => {
     const base = fakeSource('dsh')
     const [template] = await base.list()

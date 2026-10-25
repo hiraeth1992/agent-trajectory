@@ -250,6 +250,12 @@ export interface TrajectoryTaskState {
   }>
 }
 
+export interface ModelContextRecordOverride {
+  input?: unknown
+  output?: unknown
+  summary: string
+}
+
 export interface TrajectoryProjection {
   header: TrajectorySessionHeader
   records: TrajectoryRecord[]
@@ -262,6 +268,7 @@ export interface TrajectoryProjection {
   unknownEventTypes: string[]
   transcriptRecordIds?: string[]
   modelContextRecordIds?: string[]
+  modelContextRecordOverrides?: Record<string, ModelContextRecordOverride>
   relations?: TrajectoryRelation[]
   coverage?: ProjectionCoverage[]
   coverageSummary?: ProjectionCoverageSummary

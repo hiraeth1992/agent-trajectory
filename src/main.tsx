@@ -7,6 +7,7 @@ import './styles/timeline-ledger.css'
 import './styles/inspector.css'
 import './styles/states-responsive.css'
 import './styles/summary.css'
+import './styles/annotation.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

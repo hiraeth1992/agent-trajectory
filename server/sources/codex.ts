@@ -566,7 +566,7 @@ export class CodexSource implements SessionSource {
           protocol,
         }
       }
-      const degraded = unsupported.length > 0 || headers.malformed || !headers.complete
+      const degraded = unsupported.length > 0 || headers.malformed
       return {
         source: this.id,
         availability: degraded ? 'degraded' : 'available',

@@ -2,7 +2,6 @@ import {
   Activity,
   BarChart3,
   Clock3,
-  Download,
   FileJson,
   Hash,
   Layers3,
@@ -20,12 +19,19 @@ import {
   useRef,
   useState,
 } from 'react'
+import { AppHeader } from './components/AppHeader'
 import { Conversation } from './components/Conversation'
+import { EvaluationCenter } from './components/EvaluationCenter'
+import { HeaderActionMenu } from './components/HeaderActionMenu'
 import { Inspector, type InspectorTab } from './components/Inspector'
 import { SourcePicker } from './components/SourcePicker'
+import { StateView } from './components/StateView'
 import { Timeline } from './components/Timeline'
 import { TrajectorySummary } from './components/TrajectorySummary'
 import { VirtualLedger } from './components/VirtualLedger'
+import {
+  type AppWorkspace,
+} from './components/WorkspaceNav'
 import type {
   SessionDetail,
   SessionDetailDelta,
@@ -51,6 +57,14 @@ type SessionView = 'conversation' | 'model-context' | 'trajectory' | 'summary'
 interface SessionTarget {
   source: SourceId
   sessionId: string
+}
+
+export function workspaceFromLocation(
+  location: Pick<Location, 'search'>,
+): AppWorkspace {
+  return new URLSearchParams(location.search).get('workspace') === 'evaluation'
+    ? 'evaluation'
+    : 'sessions'
 }
 
 function sourceId(value: string | null): SourceId | undefined {
@@ -108,6 +122,9 @@ function applyDetailDelta(current: SessionDetail, delta: SessionDetailDelta): Se
 
 export function App() {
   const initialTarget = useRef(sessionTargetFromLocation(window.location))
+  const [workspaceMode, setWorkspaceMode] = useState<AppWorkspace>(
+    workspaceFromLocation(window.location),
+  )
   const [sources, setSources] = useState<SourceStatus[]>([])
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>(
@@ -139,6 +156,31 @@ export function App() {
   const detailRevision = useRef<{ key: string; revision: string }>()
   const sessionsRef = useRef<SessionSummary[]>([])
   const selectedSessionByFilter = useRef<Partial<Record<SourceFilter, string>>>({})
+
+  const navigateWorkspace = useCallback((
+    next: AppWorkspace,
+    mode: 'push' | 'replace' = 'push',
+  ) => {
+    const url = new URL(window.location.href)
+    if (next === 'evaluation') url.searchParams.set('workspace', 'evaluation')
+    else url.searchParams.delete('workspace')
+    window.history[mode === 'push' ? 'pushState' : 'replaceState'](null, '', url)
+    setWorkspaceMode(next)
+    setSelectedId(undefined)
+  }, [])
+
+  useEffect(() => {
+    const onPopState = () => {
+      setWorkspaceMode(workspaceFromLocation(window.location))
+      const target = sessionTargetFromLocation(window.location)
+      if (target !== undefined) {
+        setSourceFilter(target.source)
+        setSessionTarget(target)
+      }
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
 
   const loadSources = useCallback(async () => {
     const response = await fetch('/api/sources')
@@ -467,9 +509,24 @@ export function App() {
           const record = byId.get(id)
           return record === undefined ? [] : [record]
         })
+    const visible = view === 'model-context'
+      ? records.map((record) => {
+          const override = detail.projection.modelContextRecordOverrides?.[record.id]
+          return override === undefined
+            ? record
+            : {
+                ...record,
+                ...override,
+                searchText: recordSearchText({
+                  ...record,
+                  ...override,
+                }),
+              }
+        })
+      : records
     return normalized === ''
-      ? records
-      : records.filter(record => record.searchText.includes(normalized))
+      ? visible
+      : visible.filter(record => record.searchText.includes(normalized))
   }, [detail, query, view])
 
   const selected = detail?.projection.records.find(record => record.id === selectedId)
@@ -569,56 +626,61 @@ export function App() {
   const useActualDuration = actualDuration && currentCapabilities?.timing !== false
   const blockedSources = sources.filter(source => source.availability === 'blocked')
 
+  if (workspaceMode === 'evaluation') {
+    return <EvaluationCenter onWorkspaceChange={navigateWorkspace} />
+  }
+
   return (
     <main className={`app-shell view-${view}${selected === undefined ? '' : ' inspector-open'}`}>
-      <header className="app-header">
-        <div className="brand">
-          <Activity size={21} />
-          <span>Agent Trajectory</span>
-        </div>
-        <div className="session-picker">
-          <SourcePicker
-            sources={sources}
-            value={sourceFilter}
-            total={availableSessionCount}
-            onChange={(next) => {
-              if (sessionKey !== '') selectedSessionByFilter.current[sourceFilter] = sessionKey
-              setSessionTarget(undefined)
-              setWaitingForSession(false)
-              setSourceFilter(next)
-              const url = new URL(window.location.href)
-              url.searchParams.delete('source')
-              url.searchParams.delete('session')
-              window.history.replaceState(null, '', url)
-            }}
-          />
-          <select
-            value={sessionKey}
-            onChange={(event) => {
-              const next = event.target.value
-              selectedSessionByFilter.current[sourceFilter] = next
-              setSessionKey(next)
-              setSessionTarget(undefined)
-              setWaitingForSession(false)
-              const session = sessions.find(candidate => candidate.id === next)
-              if (session !== undefined) {
+      <AppHeader
+        workspace="sessions"
+        onWorkspaceChange={navigateWorkspace}
+        context={(
+          <div className="session-picker">
+            <SourcePicker
+              sources={sources}
+              value={sourceFilter}
+              total={availableSessionCount}
+              onChange={(next) => {
+                if (sessionKey !== '') selectedSessionByFilter.current[sourceFilter] = sessionKey
+                setSessionTarget(undefined)
+                setWaitingForSession(false)
+                setSourceFilter(next)
                 const url = new URL(window.location.href)
-                url.searchParams.set('source', session.source)
-                url.searchParams.set('session', session.sourceSessionId)
+                url.searchParams.delete('source')
+                url.searchParams.delete('session')
                 window.history.replaceState(null, '', url)
-              }
-            }}
-            aria-label="选择会话"
-          >
-            {sessions.length === 0 && <option value="">无可用会话</option>}
-            {sessions.map(session => (
-              <option value={session.id} key={session.id}>
-                [{sourceLabel(session.source)}] {session.title}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="header-actions">
+              }}
+            />
+            <select
+              value={sessionKey}
+              onChange={(event) => {
+                const next = event.target.value
+                selectedSessionByFilter.current[sourceFilter] = next
+                setSessionKey(next)
+                setSessionTarget(undefined)
+                setWaitingForSession(false)
+                const session = sessions.find(candidate => candidate.id === next)
+                if (session !== undefined) {
+                  const url = new URL(window.location.href)
+                  url.searchParams.set('source', session.source)
+                  url.searchParams.set('session', session.sourceSessionId)
+                  window.history.replaceState(null, '', url)
+                }
+              }}
+              aria-label="选择会话"
+            >
+              {sessions.length === 0 && <option value="">无可用会话</option>}
+              {sessions.map(session => (
+                <option value={session.id} key={session.id}>
+                  [{sourceLabel(session.source)}] {session.title}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        actions={(
+          <>
           {currentSession?.capabilities.live === true && <span className="live-status"><i /> 准实时</span>}
           <button
             className="icon-button"
@@ -631,41 +693,48 @@ export function App() {
           >
             <RefreshCw size={17} />
           </button>
-          <button
-            className="text-button export-button"
-            type="button"
-            disabled={detail === undefined}
-            onClick={exportProjection}
-            aria-label="导出投影"
-            title="导出不含原始事件的当前投影 JSON"
-          >
-            <Download size={16} />
-            <span>投影导出</span>
-          </button>
-          {auditExport === undefined
-            ? (
-                <span
-                  className="text-button export-button disabled"
-                  aria-hidden="true"
-                >
+          <HeaderActionMenu>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={detail === undefined}
+              onClick={exportProjection}
+              aria-label="导出投影"
+            >
+              <FileJson size={16} />
+              <span>
+                <strong>投影导出</strong>
+                <small>仅导出当前结构化投影，不含原始事件</small>
+              </span>
+            </button>
+            {auditExport === undefined
+              ? (
+                <span className="disabled" aria-hidden="true">
                   <FileJson size={16} />
-                  <span>审计导出</span>
+                  <span>
+                    <strong>审计导出</strong>
+                    <small>完整脱敏投影与原始事件</small>
+                  </span>
                 </span>
               )
-            : (
+              : (
                 <a
-                  className="text-button export-button"
                   href={auditExport.href}
                   download={auditExport.filename}
+                  role="menuitem"
                   aria-label="完整审计导出"
-                  title="导出完整、已脱敏的投影与原始事件"
                 >
                   <FileJson size={16} />
-                  <span>审计导出</span>
+                  <span>
+                    <strong>审计导出</strong>
+                    <small>完整导出已脱敏的投影与原始事件</small>
+                  </span>
                 </a>
               )}
-        </div>
-      </header>
+          </HeaderActionMenu>
+          </>
+        )}
+      />
 
       <nav className="view-tabs" aria-label="会话视图" role="tablist">
         <button
@@ -758,50 +827,55 @@ export function App() {
       {error !== undefined && <div className="error-banner">{error}</div>}
       {waitingForSession && sessionTarget !== undefined && detail === undefined
         ? (
-            <div className="loading-state">
-              <Activity size={22} />
-              <span>
-                正在等待 {sourceLabel(sessionTarget.source)} 会话写入…
-              </span>
-            </div>
+            <StateView
+              className="session-page-state"
+              icon={<Activity size={22} />}
+              title="正在等待会话写入"
+              description={`正在等待 ${sourceLabel(sessionTarget.source)} 会话写入…`}
+            />
           )
         : loading && detail === undefined
         ? (
-            <div className="loading-state">
-              <Activity size={22} />
-              <span>正在读取本地会话…</span>
-            </div>
+            <StateView
+              className="session-page-state"
+              icon={<Activity size={22} />}
+              title="正在读取本地会话"
+              description="正在整理来源、会话和轨迹投影…"
+            />
           )
         : detail === undefined
           ? (
-              <div className="empty-state">
-                <FileJson size={28} />
-                <strong>当前筛选没有可用的 Agent 会话</strong>
-                {blockedSources.length === 0
-                  ? <span>未检测到可读取的本地会话</span>
-                  : (
-                      <div className="source-diagnostics">
-                        {blockedSources.map(source => (
-                          <article key={source.source}>
-                            <strong>
-                              {source.label}：
-                              {source.protocol === undefined ? '来源不可用' : '协议暂不兼容'}
-                            </strong>
-                            {source.detail !== undefined && <span>{source.detail}</span>}
-                            {source.protocol !== undefined && (
-                              <>
-                                <span>
-                                  检测到 {source.protocol.detected} · 支持{' '}
-                                  {source.protocol.supported.join('、')}
-                                </span>
-                                <code>{source.protocol.fingerprint}</code>
-                              </>
-                            )}
-                          </article>
-                        ))}
-                      </div>
-                    )}
-              </div>
+              <StateView
+                className="session-page-state"
+                icon={<FileJson size={28} />}
+                title="当前筛选没有可用的 Agent 会话"
+                description={blockedSources.length === 0
+                  ? '未检测到可读取的本地会话'
+                  : undefined}
+              >
+                {blockedSources.length > 0 && (
+                  <div className="source-diagnostics">
+                    {blockedSources.map(source => (
+                      <article key={source.source}>
+                        <strong>
+                          {source.label}：
+                          {source.protocol === undefined ? '来源不可用' : '协议暂不兼容'}
+                        </strong>
+                        {source.detail !== undefined && <span>{source.detail}</span>}
+                        {source.protocol !== undefined && (
+                          <>
+                            <span>
+                              检测到 {source.protocol.detected} · 支持{' '}
+                              {source.protocol.supported.join('、')}
+                            </span>
+                            <code>{source.protocol.fingerprint}</code>
+                          </>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </StateView>
             )
           : (
               <>

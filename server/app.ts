@@ -11,6 +11,7 @@ import {
 } from './api'
 import { TrajectoryDiagnosisService } from './diagnosis/service'
 import { DiagnosisEvidenceStore } from './diagnosis/evidence-store'
+import { AnnotationWorkspaceStore } from './evaluation/annotation-workspace'
 import { assertLoopbackListenHost, hasAllowedLocalRequest } from './security'
 import { SessionActivationHub } from './session-activation'
 import {
@@ -169,6 +170,9 @@ export async function startAgentTrajectoryServer(
     options.diagnosisSkillPath
       ?? path.join(options.root, 'skills', 'trajectory-diagnosis', 'SKILL.md'),
   )
+  const annotations = new AnnotationWorkspaceStore(
+    path.join(summaryDataRoot, 'calibration'),
+  )
   let vite: ViteDevServer | undefined
   if (development) {
     const { createServer: createViteServer } = await import('vite')
@@ -218,6 +222,7 @@ export async function startAgentTrajectoryServer(
         return
       }
       if (await handleApi(request, response, url, {
+        annotations,
         diagnosis,
         registry,
         summary,

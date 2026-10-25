@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   App,
   sessionTargetFromLocation,
+  workspaceFromLocation,
 } from '../src/App'
 import { capabilities, sessionKey } from '../server/sources/types'
 import type {
@@ -124,10 +125,12 @@ async function chooseSource(name: string): Promise<void> {
 }
 
 async function waitForLoadedSession(source: string, id: string): Promise<void> {
+  fireEvent.click(await screen.findByRole('button', { name: '更多操作' }))
   await waitFor(() => {
-    expect(screen.getByRole('link', { name: '完整审计导出' }).getAttribute('href'))
+    expect(screen.getByRole('menuitem', { name: '完整审计导出' }).getAttribute('href'))
       .toBe(`/api/sessions/${source}/${id}/export`)
   })
+  fireEvent.click(screen.getByRole('button', { name: '更多操作' }))
 }
 
 afterEach(() => {
@@ -198,6 +201,8 @@ describe('App request ordering', () => {
 
     render(<App />)
     await screen.findByRole('option', { name: '[DSH API] Discovered session' })
+    expect(screen.getByRole('button', { name: '筛选来源' }).textContent)
+      .not.toContain('1')
     fireEvent.click(screen.getByRole('button', { name: '筛选来源' }))
 
     expect(screen.getByRole('option', { name: /^DSH API/ }).textContent)
@@ -214,6 +219,42 @@ describe('App request ordering', () => {
     expect(sessionTargetFromLocation({
       search: '?source=../../etc&session=thread-one',
     } as Location)).toBeUndefined()
+    expect(workspaceFromLocation({
+      search: '?workspace=evaluation&source=codex&session=thread-one',
+    } as Location)).toBe('evaluation')
+    expect(workspaceFromLocation({
+      search: '?workspace=unknown',
+    } as Location)).toBe('sessions')
+  })
+
+  it('navigates between session analysis and evaluation center through URL history', async () => {
+    const dshSession = summary('dsh', 'workspace-session', 'Workspace session')
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') return response([dshSession])
+      if (url === '/api/sessions/dsh/workspace-session') {
+        return response(detail(dshSession))
+      }
+      if (url === '/api/annotations/datasets') return response([])
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+    await waitForLoadedSession('dsh', 'workspace-session')
+
+    fireEvent.click(screen.getByRole('button', { name: '评测中心' }))
+    expect(await screen.findByText('尚未准备评测数据集')).toBeTruthy()
+    expect(window.location.search).toContain('workspace=evaluation')
+
+    window.history.back()
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(await screen.findByRole('tab', { name: '轨迹评测' })).toBeTruthy()
+    expect(window.location.search).not.toContain('workspace=evaluation')
   })
 
   it('copies a diagnosis prompt for the switched trajectory target', async () => {
@@ -376,10 +417,7 @@ describe('App request ordering', () => {
 
     firstRequest.resolve(response(detail(firstSession)))
 
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: '完整审计导出' }).getAttribute('href'))
-        .toBe('/api/sessions/zcode/second-session/export')
-    })
+    await waitForLoadedSession('zcode', 'second-session')
   })
 
   it('remembers the selected session for each source filter', async () => {
@@ -405,11 +443,12 @@ describe('App request ordering', () => {
     render(<App />)
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '筛选来源' }).textContent)
-        .toContain('3')
+        .toBe('全部来源')
     })
     const sessionSelect = screen.getByRole('combobox', { name: '选择会话' })
     fireEvent.click(screen.getByRole('button', { name: '筛选来源' }))
-    expect(screen.getByRole('option', { name: /^全部来源/ })).toBeTruthy()
+    expect(screen.getByRole('option', { name: /^全部来源/ }).textContent)
+      .toContain('3 个会话')
     expect(screen.getByRole('option', { name: /^ZCode API/ })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '筛选来源' }))
 
@@ -1051,11 +1090,12 @@ describe('App live session state', () => {
 
     dispatch('error')
     expect(await screen.findByText('实时刷新失败，正在等待自动重试')).toBeTruthy()
-    expect(screen.getByRole('link', { name: '完整审计导出' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '更多操作' }))
+    expect(screen.getByRole('menuitem', { name: '完整审计导出' })).toBeTruthy()
 
     dispatch('missing')
     expect(await screen.findByText('会话已被删除或不再可用')).toBeTruthy()
-    expect(screen.queryByRole('link', { name: '完整审计导出' })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: '完整审计导出' })).toBeNull()
     expect(close).toHaveBeenCalled()
   })
 
@@ -1233,6 +1273,71 @@ describe('App conversation view', () => {
     expect(screen.queryByText('Original transcript message')).toBeNull()
   })
 
+  it('applies model-context record overrides without changing the durable conversation', async () => {
+    const currentSession = summary('dsh', 'offload-session', 'Offload session')
+    const original: TrajectoryRecord = {
+      id: 'user:0',
+      source: 'dsh',
+      sourceEventIds: ['0'],
+      fidelity: 'exact',
+      seq: 0,
+      turn: 1,
+      step: 1,
+      kind: 'user',
+      title: '用户',
+      summary: 'Inspect [image]',
+      startTime: 1,
+      endTime: 1,
+      status: 'complete',
+      depth: 0,
+      surface: 'current',
+      input: [
+        { type: 'text', text: 'Inspect' },
+        { type: 'image', attachment: { attachmentId: 'first' } },
+      ],
+      searchText: 'inspect image',
+    }
+    const currentDetail = detailWithRecord(currentSession, original)
+    currentDetail.projection.transcriptRecordIds = [original.id]
+    currentDetail.projection.modelContextRecordIds = [original.id]
+    currentDetail.projection.modelContextRecordOverrides = {
+      [original.id]: {
+        input: [
+          { type: 'text', text: 'Inspect' },
+          {
+            type: 'image',
+            attachment: { attachmentId: 'first' },
+            offloaded: true,
+          },
+        ],
+        summary: 'Inspect [offloaded image]',
+      },
+    }
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') return response([currentSession])
+      if (url === '/api/sessions/dsh/offload-session') return response(currentDetail)
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('tab', { name: '对话' }))
+    expect(await screen.findByText('Inspect')).toBeTruthy()
+    expect(screen.getByText('[image]')).toBeTruthy()
+    expect(screen.queryByText('[offloaded image]')).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: '模型上下文' }))
+    expect(screen.getByText('Inspect')).toBeTruthy()
+    expect(screen.getByText('[offloaded image]')).toBeTruthy()
+    expect(screen.queryByText('[image]')).toBeNull()
+  })
+
   it('returns to the conversation when the selected session has no model context view', async () => {
     const dshSession = summary('dsh', 'surface-session', 'Surface session')
     const zcodeSession = summary('zcode', 'plain-session', 'Plain session')
@@ -1374,12 +1479,14 @@ describe('App conversation view', () => {
     expect(screen.getByText('assistant/message')).toBeTruthy()
     expect(screen.getByText('2', { selector: '.event-type-count' })).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: '导出投影' }))
+    fireEvent.click(screen.getByRole('button', { name: '更多操作' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '导出投影' }))
     expect(createObjectURL).toHaveBeenCalledOnce()
     expect(click).toHaveBeenCalledOnce()
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:projection')
 
-    const audit = screen.getByRole('link', { name: '完整审计导出' })
+    fireEvent.click(screen.getByRole('button', { name: '更多操作' }))
+    const audit = screen.getByRole('menuitem', { name: '完整审计导出' })
     expect(audit.getAttribute('href'))
       .toBe('/api/sessions/zcode/statistics-session/export')
     expect(audit.getAttribute('download')).toBe('zcode-statistics-session.audit.json')

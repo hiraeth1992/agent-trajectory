@@ -8,6 +8,7 @@ import {
   json,
   KIND_LABELS,
 } from '../trajectory-view-model'
+import { StateView } from './StateView'
 
 export type InspectorTab = 'details' | 'raw'
 
@@ -104,9 +105,24 @@ export function Inspector({
       </div>
       {tab === 'raw'
         ? rawLoading
-          ? <div className="raw-inspector">正在读取原始事件…</div>
+          ? (
+              <StateView
+                className="raw-inspector"
+                compact
+                title="正在读取原始事件"
+                description="原始事件按需加载，不会影响当前投影。"
+              />
+            )
           : rawError !== undefined
-            ? <div className="raw-inspector">{rawError}</div>
+            ? (
+                <StateView
+                  className="raw-inspector"
+                  compact
+                  tone="danger"
+                  title="原始事件读取失败"
+                  description={rawError}
+                />
+              )
             : <pre className="raw-inspector">{json(raw)}</pre>
         : (
             <div className="inspector-body">

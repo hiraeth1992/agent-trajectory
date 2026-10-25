@@ -36,9 +36,35 @@ import {
 } from './source-paths'
 import { createSourceRegistry } from './sources/registry'
 import type { SourceId, SourceStatus } from '../src/types'
+import { MINIMAL_GOLD_DATASET } from './evaluation/gold-dataset'
+import {
+  compareHumanAnnotations,
+  createAdjudicationTemplate,
+  loadAdjudicatedDataset,
+  loadCandidateManifest,
+  loadHumanAnnotations,
+  prepareCalibrationCandidates,
+} from './evaluation/calibration'
+import {
+  compareEvaluationRuns,
+  evaluationRunMarkdown,
+  runEvaluationDataset,
+} from './evaluation/runner'
+import type {
+  EvaluationDataset,
+  EvaluationRun,
+  EvaluationSplit,
+} from '../src/evaluation-types'
+import {
+  writePrivateJson,
+  writePrivateJsonExclusive,
+  writePrivateText,
+} from './summary/file-transaction'
 
 type Command =
+  | 'calibrate'
   | 'doctor'
+  | 'evaluate'
   | 'hook'
   | 'install-hooks'
   | 'open'
@@ -47,10 +73,19 @@ type Command =
   | 'uninstall-hooks'
 
 interface CliArguments {
+  adjudication?: string
   command: Command
+  baseline?: string
+  calibrateAction?: 'agreement' | 'prepare'
+  count: number
   dataRoot: string
+  datasetDirectory?: string
   noOpen: boolean
+  outputDirectory?: string
   port?: number
+  reviewerA?: string
+  reviewerB?: string
+  split?: EvaluationSplit | 'all'
   source?: SourceId
   sessionId?: string
   sourcePaths: SourcePathOverrides
@@ -93,11 +128,20 @@ export function parseCliArguments(
 ): CliArguments {
   const positionals: string[] = []
   const sourcePaths: SourcePathOverrides = {}
+  let adjudication: string | undefined
+  let baseline: string | undefined
+  let count = 30
+  let countProvided = false
   let dataRoot = path.resolve(
     environment.AGENT_TRAJECTORY_DATA_DIR ?? defaultDataRoot(homeDirectory),
   )
   let noOpen = false
+  let outputDirectory: string | undefined
   let port: number | undefined
+  let datasetDirectory: string | undefined
+  let reviewerA: string | undefined
+  let reviewerB: string | undefined
+  let split: EvaluationSplit | 'all' | undefined
   for (let index = 0; index < arguments_.length; index++) {
     const argument = arguments_[index]!
     if (!argument.startsWith('--')) {
@@ -120,11 +164,37 @@ export function parseCliArguments(
     else if (argument === '--codex-home') sourcePaths.codexHome = selected
     else if (argument === '--codex-sessions-dir') sourcePaths.codexSessionsDir = selected
     else if (argument === '--zcode-db') sourcePaths.zcodeDatabase = selected
+    else if (argument === '--baseline') baseline = path.resolve(selected)
+    else if (argument === '--output-dir') outputDirectory = path.resolve(selected)
+    else if (argument === '--dataset') datasetDirectory = path.resolve(selected)
+    else if (argument === '--adjudication') adjudication = path.resolve(selected)
+    else if (argument === '--reviewer-a') reviewerA = path.resolve(selected)
+    else if (argument === '--reviewer-b') reviewerB = path.resolve(selected)
+    else if (argument === '--split') {
+      if (selected !== 'all'
+        && selected !== 'calibration'
+        && selected !== 'regression'
+        && selected !== 'independent') {
+        throw new Error(
+          '--split must be all, calibration, regression, or independent',
+        )
+      }
+      split = selected
+    }
+    else if (argument === '--count') {
+      countProvided = true
+      count = Number(selected)
+      if (!Number.isInteger(count) || count < 3 || count > 120) {
+        throw new Error('--count must be an integer from 3 to 120')
+      }
+    }
     else throw new Error(`unknown option: ${argument}`)
   }
   const commandValue = positionals[0] ?? 'start'
   if (![
+    'calibrate',
     'doctor',
+    'evaluate',
     'hook',
     'install-hooks',
     'open',
@@ -135,10 +205,55 @@ export function parseCliArguments(
     throw new Error(`unknown command: ${commandValue}`)
   }
   const command = commandValue as Command
-  const source = positionals[1] === undefined
-    ? undefined
-    : sourceId(positionals[1])
-  if ((command === 'hook' || command === 'open') && source === undefined) {
+  const calibrateAction = command === 'calibrate'
+    && (positionals[1] === 'prepare' || positionals[1] === 'agreement')
+    ? positionals[1]
+    : undefined
+  if (command === 'calibrate' && calibrateAction === undefined) {
+    throw new Error('calibrate requires prepare or agreement')
+  }
+  if (command !== 'evaluate' && (baseline !== undefined || adjudication !== undefined)) {
+    throw new Error('--baseline and --adjudication are only valid with evaluate')
+  }
+  if (command !== 'evaluate' && split !== undefined) {
+    throw new Error('--split is only valid with evaluate')
+  }
+  if (command !== 'evaluate' && command !== 'calibrate' && datasetDirectory !== undefined) {
+    throw new Error('--dataset is only valid with evaluate or calibrate')
+  }
+  if (command !== 'evaluate' && outputDirectory !== undefined) {
+    throw new Error('--output-dir is only valid with evaluate')
+  }
+  if (command !== 'calibrate' && (reviewerA !== undefined || reviewerB !== undefined)) {
+    throw new Error('--reviewer-a and --reviewer-b are only valid with calibrate')
+  }
+  if (command !== 'calibrate' && countProvided) {
+    throw new Error('--count is only valid with calibrate prepare')
+  }
+  if (calibrateAction === 'agreement' && countProvided) {
+    throw new Error('--count is only valid with calibrate prepare')
+  }
+  if (calibrateAction === 'prepare' && (reviewerA !== undefined || reviewerB !== undefined)) {
+    throw new Error('reviewer files are only valid with calibrate agreement')
+  }
+  if (calibrateAction === 'agreement'
+    && (reviewerA === undefined || reviewerB === undefined)) {
+    throw new Error('calibrate agreement requires --reviewer-a and --reviewer-b')
+  }
+  if (command === 'evaluate'
+    && (datasetDirectory === undefined) !== (adjudication === undefined)) {
+    throw new Error('--dataset and --adjudication must be supplied together')
+  }
+  if (command === 'evaluate' && datasetDirectory !== undefined && split === undefined) {
+    throw new Error('external datasets require an explicit --split')
+  }
+  if (command === 'calibrate' && datasetDirectory === undefined) {
+    throw new Error('calibrate requires --dataset')
+  }
+  const selectedSource = command === 'hook' || command === 'open'
+    ? sourceId(positionals[1] ?? '')
+    : undefined
+  if ((command === 'hook' || command === 'open') && selectedSource === undefined) {
     throw new Error(`${command} requires a source: codex, dsh, or zcode`)
   }
   const sessionId = positionals[2]
@@ -146,11 +261,20 @@ export function parseCliArguments(
     throw new Error('open requires a session id')
   }
   return {
+    adjudication,
     command,
+    baseline,
+    calibrateAction,
+    count,
     dataRoot,
+    datasetDirectory,
     noOpen,
+    outputDirectory,
     port,
-    source,
+    reviewerA,
+    reviewerB,
+    split,
+    source: selectedSource,
     sessionId,
     sourcePaths,
   }
@@ -449,6 +573,117 @@ async function doctor(arguments_: CliArguments): Promise<void> {
   }
 }
 
+async function calibrate(arguments_: CliArguments): Promise<void> {
+  const datasetDirectory = arguments_.datasetDirectory!
+  if (arguments_.calibrateAction === 'prepare') {
+    configureWorkerLocations()
+    const paths = await resolvedPaths(arguments_)
+    const registry = createSourceRegistry(paths)
+    try {
+      const prepared = await prepareCalibrationCandidates(
+        registry,
+        datasetDirectory,
+        { count: arguments_.count },
+      )
+      console.log(`Calibration manifest: ${prepared.manifestFile}`)
+      console.log(`Annotation guide: ${prepared.annotationGuideFile}`)
+      console.log(`Reviewer A template: ${prepared.reviewerATemplate}`)
+      console.log(`Reviewer B template: ${prepared.reviewerBTemplate}`)
+      console.log(
+        `Prepared ${prepared.manifest.cases.length} private cases; `
+        + `skipped ${prepared.skipped.length}.`,
+      )
+    } finally {
+      await registry.close()
+    }
+    return
+  }
+  const manifest = await loadCandidateManifest(datasetDirectory)
+  const [reviewerA, reviewerB] = await Promise.all([
+    loadHumanAnnotations(arguments_.reviewerA!, manifest, { complete: true }),
+    loadHumanAnnotations(arguments_.reviewerB!, manifest, { complete: true }),
+  ])
+  const report = compareHumanAnnotations(manifest, reviewerA, reviewerB)
+  const agreementFile = path.join(datasetDirectory, 'agreement.json')
+  const adjudicationFile = path.join(datasetDirectory, 'adjudication.json')
+  await writePrivateJsonExclusive(agreementFile, report)
+  await writePrivateJsonExclusive(
+    adjudicationFile,
+    createAdjudicationTemplate(manifest, 'adjudicator'),
+  )
+  console.log(`Agreement report: ${agreementFile}`)
+  console.log(`Adjudication template: ${adjudicationFile}`)
+  console.log(
+    `Criterion agreement/Kappa: ${
+      report.criterionExactAgreement === undefined
+        ? 'N/A'
+        : `${(report.criterionExactAgreement * 100).toFixed(1)}%`
+    }/${
+      report.criterionKappa === undefined
+        ? 'N/A'
+        : report.criterionKappa.toFixed(3)
+    }; disagreements: ${report.disagreements.length}.`,
+  )
+}
+
+async function evaluate(arguments_: CliArguments): Promise<void> {
+  const baseline = arguments_.baseline === undefined
+    ? undefined
+    : JSON.parse(await fs.readFile(arguments_.baseline, 'utf8')) as EvaluationRun
+  const loadedDataset: EvaluationDataset = arguments_.datasetDirectory === undefined
+    ? MINIMAL_GOLD_DATASET
+    : await loadAdjudicatedDataset(
+        arguments_.datasetDirectory,
+        arguments_.adjudication!,
+      )
+  const selectedSplit = arguments_.split ?? 'all'
+  const dataset: EvaluationDataset = selectedSplit === 'all'
+    ? loadedDataset
+    : {
+        ...loadedDataset,
+        cases: loadedDataset.cases.filter(testCase =>
+          testCase.split === selectedSplit),
+      }
+  if (dataset.cases.length === 0) {
+    throw new Error(`dataset has no ${selectedSplit} cases`)
+  }
+  const run = runEvaluationDataset(dataset)
+  const outputDirectory = arguments_.outputDirectory
+    ?? path.join(arguments_.dataRoot, 'evaluations')
+  const baseName = [
+    dataset.id,
+    dataset.version,
+    selectedSplit,
+    run.runId,
+  ].join('-')
+  const jsonFile = path.join(outputDirectory, `${baseName}.json`)
+  const markdownFile = path.join(outputDirectory, `${baseName}.md`)
+  await Promise.all([
+    writePrivateJson(jsonFile, run),
+    writePrivateText(markdownFile, evaluationRunMarkdown(run)),
+  ])
+  console.log(`Evaluation JSON: ${jsonFile}`)
+  console.log(`Evaluation report: ${markdownFile}`)
+  console.log(
+    `Exact agreement: ${run.aggregate.exactCases}/${run.aggregate.cases}; `
+    + `FP/FN: ${run.aggregate.falsePositives}/${run.aggregate.falseNegatives}`,
+  )
+  if (baseline !== undefined) {
+    const diff = compareEvaluationRuns(baseline, run)
+    const diffFile = path.join(outputDirectory, `${baseName}.diff.json`)
+    await writePrivateJson(diffFile, diff)
+    console.log(`Evaluation diff: ${diffFile}`)
+    if (!diff.comparable) {
+      throw new Error(`baseline is not comparable: ${diff.reasons.join('; ')}`)
+    }
+    console.log(
+      `Improved/regressed/unchanged: ${diff.improvedCaseIds.length}/${
+        diff.regressedCaseIds.length
+      }/${diff.unchangedCaseIds.length}`,
+    )
+  }
+}
+
 async function setup(arguments_: CliArguments): Promise<void> {
   const current = await readConfig(arguments_.dataRoot)
   let next: SourcePathOverrides = {
@@ -524,6 +759,8 @@ export async function runCli(arguments_ = process.argv.slice(2)): Promise<void> 
   const parsed = parseCliArguments(arguments_)
   if (parsed.command === 'start') await start(parsed)
   else if (parsed.command === 'doctor') await doctor(parsed)
+  else if (parsed.command === 'calibrate') await calibrate(parsed)
+  else if (parsed.command === 'evaluate') await evaluate(parsed)
   else if (parsed.command === 'setup') await setup(parsed)
   else if (parsed.command === 'install-hooks') await updateHooks(parsed, false)
   else if (parsed.command === 'uninstall-hooks') await updateHooks(parsed, true)

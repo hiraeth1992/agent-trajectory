@@ -16,14 +16,32 @@ export async function writePrivateJson(
   file: string,
   value: unknown,
 ): Promise<void> {
+  await writePrivateText(file, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+export async function writePrivateText(
+  file: string,
+  value: string,
+): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+    await fs.writeFile(temporary, value, {
       mode: 0o600,
     })
     await fs.rename(temporary, file)
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => {})
   }
+}
+
+export async function writePrivateJsonExclusive(
+  file: string,
+  value: unknown,
+): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  })
 }

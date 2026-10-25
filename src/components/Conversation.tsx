@@ -16,9 +16,14 @@ function textBlocks(value: unknown, type: 'text' | 'reasoning' = 'text'): string
   return value.flatMap((entry) => {
     if (entry === null || typeof entry !== 'object') return []
     const block = entry as Record<string, unknown>
-    return block.type === type && typeof block.text === 'string'
-      ? [block.text]
-      : []
+    if (block.type === type && typeof block.text === 'string') return [block.text]
+    if (type === 'text' && block.type === 'image') {
+      return [block.offloaded === true ? '[offloaded image]' : '[image]']
+    }
+    if (type === 'text' && block.type === 'file') {
+      return [`[file ${typeof block.name === 'string' ? block.name : ''}]`]
+    }
+    return []
   })
 }
 

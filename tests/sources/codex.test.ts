@@ -475,6 +475,36 @@ describe('Codex projector', () => {
 })
 
 describe('Codex source protocol detection', () => {
+  it('keeps supported rollouts available when the bounded probe is incomplete', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-bounded-probe-'))
+    const sessionsRoot = path.join(root, 'sessions')
+    await fs.mkdir(sessionsRoot, { recursive: true })
+    try {
+      await Promise.all(Array.from({ length: 17 }, (_, index) =>
+        fs.writeFile(
+          path.join(sessionsRoot, `rollout-${String(index).padStart(2, '0')}.jsonl`),
+          `${JSON.stringify(row(0, 'session_meta', {
+            id: `session-${index}`,
+            cli_version: '1.0.0',
+          }))}\n`,
+        )))
+
+      expect(await new CodexSource({
+        sessionsRoot,
+        sessionIndexFile: path.join(root, 'session_index.jsonl'),
+      }).probe()).toMatchObject({
+        availability: 'available',
+        reason: 'codex_protocol_probe_bounded',
+        protocol: {
+          detected: 'codex-rollout-v1',
+          supported: ['codex-rollout-v1'],
+        },
+      })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('blocks a well-formed rollout with an unknown header protocol', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-protocol-'))
     const sessionsRoot = path.join(root, 'sessions')

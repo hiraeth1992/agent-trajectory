@@ -55,6 +55,7 @@ export class SourceRegistry {
   private readonly refCache = new Map<SourceId, TimedValue<readonly SourceSessionRef[]>>()
   private readonly knownRefs = new Map<SourceId, Map<string, SourceSessionRef>>()
   private readonly missingRefs = new Map<string, number>()
+  private readonly detailLoads = new Map<string, Promise<SessionDetail | undefined>>()
   private statusCache?: TimedValue<SourceStatus[]>
   private readonly detailCache: WeightedLruCache<string, DetailCacheEntry>
   private readonly projectionWorker?: ProjectionWorkerClient
@@ -160,7 +161,10 @@ export class SourceRegistry {
     )
   }
 
-  async load(source: SourceId, sourceSessionId: string): Promise<SessionDetail | undefined> {
+  private async loadUncached(
+    source: SourceId,
+    sourceSessionId: string,
+  ): Promise<SessionDetail | undefined> {
     const adapter = this.source(source)
     const ref = await this.ref(source, sourceSessionId)
     if (ref === undefined) return undefined
@@ -189,6 +193,18 @@ export class SourceRegistry {
       this.missingRefs.delete(key)
       return loadRef(refreshed)
     }
+  }
+
+  async load(source: SourceId, sourceSessionId: string): Promise<SessionDetail | undefined> {
+    const key = `${source}:${sourceSessionId}`
+    const existing = this.detailLoads.get(key)
+    if (existing !== undefined) return existing
+    let load: Promise<SessionDetail | undefined>
+    load = this.loadUncached(source, sourceSessionId).finally(() => {
+      if (this.detailLoads.get(key) === load) this.detailLoads.delete(key)
+    })
+    this.detailLoads.set(key, load)
+    return load
   }
 
   async raw(

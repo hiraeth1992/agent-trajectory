@@ -5,6 +5,7 @@ import type {
   SummaryPreview,
 } from './ai-summary-types'
 import type { TrajectoryAnalysis } from './trajectory-analysis'
+import { buildFactsQualityReport } from './trajectory-evaluation'
 import { buildTrajectoryStory } from './trajectory-story'
 import type { SessionDetail } from './types'
 import { redactSensitive } from './projector-utils'
@@ -24,10 +25,24 @@ export function buildSummaryFacts(
   const needsSteps = includes(modules, 'outcome', 'objective', 'story', 'evaluation', 'optimization')
   const needsCorrections = includes(modules, 'outcome', 'story', 'evaluation', 'optimization')
   return redactSensitive({
-    schemaVersion: 2,
+    schemaVersion: 3,
     source: detail.summary.source,
     sourceSessionId: detail.summary.sourceSessionId,
     modules,
+    factsQuality: buildFactsQualityReport(detail, {
+      target: {
+        source: detail.summary.source,
+        sourceSessionId: detail.summary.sourceSessionId,
+        mode: 'live',
+        fingerprint: [
+          detail.summary.source,
+          detail.summary.sourceSessionId,
+          detail.summary.rawVersion ?? detail.projection.header.rawVersion ?? 'unknown',
+          detail.summary.updatedAt,
+          detail.summary.size,
+        ].join(':'),
+      },
+    }),
     sessionProvider: detail.projection.header.provider,
     sessionModel: detail.projection.header.model,
     localFacts: analysis.stats,

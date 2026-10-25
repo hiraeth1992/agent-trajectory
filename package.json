@@ -23,7 +23,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "dev": "tsx server/index.ts",
+    "dev": "tsx watch --clear-screen=false server/index.ts",
     "build": "npm run typecheck && npm run build:web && npm run build:cli",
     "build:web": "vite build",
     "build:cli": "node scripts/build-cli.mjs",

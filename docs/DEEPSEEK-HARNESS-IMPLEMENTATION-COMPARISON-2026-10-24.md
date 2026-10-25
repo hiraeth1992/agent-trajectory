@@ -7,6 +7,10 @@
 > 上游固定版本：DeepSeek Harness
 > [`22ddee3792402c3e70ec5f86a63c3e3e895a2f60`](https://github.com/deepseek-ai/deepseek-harness/tree/22ddee3792402c3e70ec5f86a63c3e3e895a2f60)
 
+> 2026-10-25 实施更新：P0 `image/offload` 消息投影、持久事件词表同步门禁、
+> `assistant/live-chunk` 修正、turn 一次分组、Registry 同会话 single-flight 和 Codex
+> 有界探测分级已完成。本文主体保留开发前差距与验收口径，不能再把这些条目视为当前缺口。
+
 ## 结论
 
 当前项目不需要复制 DeepSeek Harness 的 Cordis 或“everything-is-a-plugin”架构。两者职责
