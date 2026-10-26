@@ -55,6 +55,20 @@ interface ReviewerStatus {
   overview?: AnnotationWorkspaceOverview
 }
 
+type DatasetPreparationMode = 'create' | 'regenerate'
+
+function nextIdentifier(
+  current: string,
+  used: ReadonlySet<string>,
+  separator: string,
+): string {
+  const match = /^(.*?)(\d+)$/.exec(current)
+  const prefix = match === null ? `${current}${separator}` : match[1]!
+  let sequence = match === null ? 2 : Number(match[2]) + 1
+  while (used.has(`${prefix}${sequence}`)) sequence++
+  return `${prefix}${sequence}`
+}
+
 function ReviewerCard({
   status,
   onEnter,
@@ -131,6 +145,7 @@ export function EvaluationCenter({
   const runDetailsRequest = useRef<AbortController>()
   const [workflowRevision, setWorkflowRevision] = useState(0)
   const [prepareOpen, setPrepareOpen] = useState(false)
+  const [prepareMode, setPrepareMode] = useState<DatasetPreparationMode>('create')
   const [prepareDirectoryId, setPrepareDirectoryId] = useState('real-v1')
   const [prepareDatasetId, setPrepareDatasetId] = useState(
     'agent-trajectory-private-real',
@@ -141,7 +156,7 @@ export function EvaluationCenter({
   const [preparing, setPreparing] = useState(false)
   const [prepareError, setPrepareError] = useState<string>()
 
-  const loadDatasets = useCallback(async () => {
+  const loadDatasets = useCallback(async (): Promise<AnnotationDatasetSummary[]> => {
     setLoading(true)
     setError(undefined)
     try {
@@ -161,8 +176,10 @@ export function EvaluationCenter({
         if (next !== '') localStorage.setItem('trajectory.evaluationDataset', next)
         return next
       })
+      return result
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
+      return []
     } finally {
       setLoading(false)
     }
@@ -241,6 +258,32 @@ export function EvaluationCenter({
     () => datasets.find(item => item.directoryId === directoryId),
     [datasets, directoryId],
   )
+  const openInitialPreparation = () => {
+    setPrepareMode('create')
+    setPrepareError(undefined)
+    setPrepareOpen(true)
+  }
+  const openRegeneration = (current: AnnotationDatasetSummary) => {
+    const matchingVersions = new Set(datasets
+      .filter(item => item.datasetId === current.datasetId)
+      .map(item => item.datasetVersion))
+    setPrepareMode('regenerate')
+    setPrepareDirectoryId(nextIdentifier(
+      current.directoryId,
+      new Set(datasets.map(item => item.directoryId)),
+      '-v',
+    ))
+    setPrepareDatasetId(current.datasetId)
+    setPrepareVersion(nextIdentifier(
+      current.datasetVersion,
+      matchingVersions,
+      '-',
+    ))
+    setPrepareCount(current.requestedCases)
+    setPrepareAllowPartial(current.allowPartial)
+    setPrepareError(undefined)
+    setPrepareOpen(true)
+  }
   const reviewComplete = workflow?.reviewersComplete === true
   const adjudicationComplete = workflow?.adjudication.complete === true
   const runComplete = (workflow?.runs.length ?? 0) > 0
@@ -333,7 +376,23 @@ export function EvaluationCenter({
           allowPartial: prepareAllowPartial,
         }),
       })
-      if (!response.ok) throw await responseError(response, '评测数据集准备失败')
+      if (!response.ok) {
+        const reason = await responseError(response, '评测数据集准备失败')
+        if (response.status === 409) {
+          const refreshed = await loadDatasets()
+          const existing = refreshed.find(item =>
+            item.directoryId === prepareDirectoryId
+            && item.datasetId === prepareDatasetId
+            && item.datasetVersion === prepareVersion)
+          if (existing !== undefined) {
+            localStorage.setItem('trajectory.evaluationDataset', existing.directoryId)
+            setDirectoryId(existing.directoryId)
+            setPrepareOpen(false)
+            return
+          }
+        }
+        throw reason
+      }
       const result = await response.json() as PrepareEvaluationDatasetResult
       localStorage.setItem('trajectory.evaluationDataset', result.dataset.directoryId)
       setDirectoryId(result.dataset.directoryId)
@@ -432,10 +491,7 @@ export function EvaluationCenter({
                       <button
                         type="button"
                         className="primary"
-                        onClick={() => {
-                          setPrepareError(undefined)
-                          setPrepareOpen(true)
-                        }}
+                        onClick={openInitialPreparation}
                       >
                         准备数据集
                       </button>
@@ -462,10 +518,20 @@ export function EvaluationCenter({
                         ZCode {dataset.sources.zcode}
                       </p>
                     </div>
-                    <span className="evaluation-audit-ok">
-                      <ShieldCheck size={17} />
-                      隐私审计已通过
-                    </span>
+                    <div className="evaluation-hero-actions">
+                      <span className="evaluation-audit-ok">
+                        <ShieldCheck size={17} />
+                        隐私审计已通过
+                      </span>
+                      <button
+                        type="button"
+                        className="evaluation-regenerate-button"
+                        onClick={() => openRegeneration(dataset)}
+                      >
+                        <RefreshCw size={15} />
+                        重新准备
+                      </button>
+                    </div>
                   </section>
 
                   {dataset.allowPartial && (
@@ -825,8 +891,16 @@ export function EvaluationCenter({
           >
             <header>
               <div>
-                <strong id="evaluation-prepare-title">准备真实轨迹评测数据集</strong>
-                <span>创建本机私有的冻结样本，不修改任何来源会话。</span>
+                <strong id="evaluation-prepare-title">
+                  {prepareMode === 'regenerate'
+                    ? '重新准备真实轨迹评测数据集'
+                    : '准备真实轨迹评测数据集'}
+                </strong>
+                <span>
+                  {prepareMode === 'regenerate'
+                    ? '创建新的冻结样本版本，当前版本及其评测记录保持不变。'
+                    : '创建本机私有的冻结样本，不修改任何来源会话。'}
+                </span>
               </div>
               <button
                 type="button"
@@ -901,11 +975,22 @@ export function EvaluationCenter({
               </label>
               <div className="evaluation-prepare-warning" role="note">
                 <AlertTriangle size={17} />
-                <p>
-                  确认后会读取本机 DSH、Codex 和 ZCode 的可用会话，冻结并脱敏副本，
-                  执行隐私审计，然后生成 Reviewer A/B 模板。原始会话保持只读；
-                  冻结样本仍可能包含评测所必需的业务文本，只应保存在本机。
-                </p>
+                {prepareMode === 'regenerate' && dataset !== undefined
+                  ? (
+                      <p>
+                        将创建 {prepareDatasetId}@{prepareVersion || '…'} 并初始化空白的
+                        Reviewer A/B 模板。当前 {dataset.datasetId}@
+                        {dataset.datasetVersion}、已有双标、裁决和 EvaluationRun 均会保留，
+                        可继续从数据集列表切换查看。新版本不会继承旧标注。
+                      </p>
+                    )
+                  : (
+                      <p>
+                        确认后会读取本机 DSH、Codex 和 ZCode 的可用会话，冻结并脱敏副本，
+                        执行隐私审计，然后生成 Reviewer A/B 模板。原始会话保持只读；
+                        冻结样本仍可能包含评测所必需的业务文本，只应保存在本机。
+                      </p>
+                    )}
               </div>
               {prepareError !== undefined && (
                 <p className="evaluation-prepare-error" role="alert">{prepareError}</p>
@@ -933,7 +1018,9 @@ export function EvaluationCenter({
               >
                 {preparing
                   ? <><LoaderCircle className="annotation-spin" size={15} />准备中…</>
-                  : '确认并开始准备'}
+                  : prepareMode === 'regenerate'
+                    ? '开始重新准备'
+                    : '确认并开始准备'}
               </button>
             </footer>
           </section>

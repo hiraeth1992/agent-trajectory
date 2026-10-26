@@ -19,13 +19,6 @@ import {
   resolveSourcePaths,
   type ResolvedSourcePaths,
 } from './source-paths'
-import { SummaryCache } from './summary/cache'
-import { SummaryEngine } from './summary/engine'
-import { SummarySettingsStore } from './summary/settings'
-import { createEncryptedFileSummarySecretStore } from './summary/secret-store'
-import {
-  type SummarySecretStore,
-} from './summary/types'
 import { createSourceRegistry } from './sources/registry'
 
 const mimeTypes: Record<string, string> = {
@@ -59,10 +52,9 @@ export interface AgentTrajectoryServerOptions {
   browserSession?: BrowserSession
   diagnosisEvidenceCommand?: string
   diagnosisSkillPath?: string
+  dataRoot?: string
   sessionActivationHub?: SessionActivationHub
   sourcePaths?: ResolvedSourcePaths
-  summaryDataRoot?: string
-  summarySecretStore?: SummarySecretStore
   staticRoot?: string
 }
 
@@ -142,26 +134,15 @@ export async function startAgentTrajectoryServer(
   const host = assertLoopbackListenHost(options.host)
   const development = options.development ?? false
   const staticRoot = options.staticRoot ?? path.join(options.root, 'dist')
-  const summaryDataRoot = options.summaryDataRoot
+  const dataRoot = options.dataRoot
     ?? path.join(options.root, '.agent-trajectory-local')
-  const summarySecrets = options.summarySecretStore
-    ?? await createEncryptedFileSummarySecretStore(summaryDataRoot)
   const sourcePaths = options.sourcePaths ?? resolveSourcePaths({
     configDirectory: options.root,
   })
   const registry = options.registry ?? createSourceRegistry(sourcePaths)
-  const summary = new SummaryEngine(
-    registry,
-    new SummarySettingsStore(
-      path.join(summaryDataRoot, 'summary-settings.json'),
-      summarySecrets,
-    ),
-    new SummaryCache(path.join(summaryDataRoot, 'summary-cache.json')),
-    summarySecrets,
-  )
   const diagnosis = new TrajectoryDiagnosisService(
     registry,
-    new DiagnosisEvidenceStore(path.join(summaryDataRoot, 'diagnosis-snapshots')),
+    new DiagnosisEvidenceStore(path.join(dataRoot, 'diagnosis-snapshots')),
     options.diagnosisEvidenceCommand
       ?? [
         JSON.stringify(process.execPath),
@@ -172,8 +153,8 @@ export async function startAgentTrajectoryServer(
       ?? path.join(options.root, 'skills', 'trajectory-diagnosis', 'SKILL.md'),
   )
   const annotations = new AnnotationWorkspaceStore(
-    path.join(summaryDataRoot, 'calibration'),
-    path.join(summaryDataRoot, 'evaluations'),
+    path.join(dataRoot, 'calibration'),
+    path.join(dataRoot, 'evaluations'),
     registry,
   )
   const apiState = new ApiSessionState()
@@ -230,7 +211,6 @@ export async function startAgentTrajectoryServer(
         diagnosis,
         registry,
         state: apiState,
-        summary,
       })) return
       if (vite !== undefined) {
         vite.middlewares(request, response, () => {
@@ -257,7 +237,6 @@ export async function startAgentTrajectoryServer(
           closeHttpServer(server),
           vite?.close() ?? Promise.resolve(),
           registry.close?.() ?? Promise.resolve(),
-          summary.close(),
         ])
         apiState.clear()
         options.sessionActivationHub?.close()

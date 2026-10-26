@@ -3,82 +3,64 @@
 [简体中文](README.md) | **English**
 
 Agent Trajectory is a local-first, read-only trajectory viewer for multiple
-coding agents. It converts local sessions from DeepSeek Harness, Codex, and
-ZCode into one unified view for inspecting conversations, model context, tool
-calls, token usage, execution flow, and evaluation results.
+coding agents. It converts local sessions from DeepSeek Harness, Codex,
+Claude Code, Doubao Work, WorkBuddy, Qoder, OpenCode, and ZCode into one
+unified view that helps answer three questions:
 
-The project runs as a local Node.js service and opens in your system browser.
-It does not bundle Chromium. Ordinary browsing neither uploads nor modifies
-source sessions, and optional AI enhancement calls a selected model only after
-an explicit user action.
+- What did the agent actually see and do?
+- Where did time and tokens go, and did the agent recover and verify after a
+  failure?
+- Did trajectory quality really improve across agents or versions?
+
+The project runs as a local Node.js service and opens in your system browser;
+it does not bundle Chromium. Session reading, deterministic trajectory
+evaluation, diagnosis preparation, and the human-evaluation workflow all stay
+local. Agent Trajectory does not modify source sessions or upstream agent
+configuration except when hooks are explicitly installed or removed.
 
 ## Product demo
+
+The animation below shows Session analysis, Trajectory evaluation, and the
+Evaluation center in the current version:
 
 ![Agent Trajectory product demo](docs/assets/readme/product-overview.gif)
 
 ## Highlights
 
-- **View multiple agents together:** Browse DSH, Codex, and ZCode sessions
-  through the same interface.
+- **View eight agents together:** Browse different sources through a shared
+  model of sessions, turns, steps, records, and relationships.
 - **Reconstruct execution:** Inspect messages, reasoning excerpts, tool calls,
-  errors, retries, and timings by turn and step.
-- **Analyze resource usage:** Aggregate tokens, cache reads, TTFT, model time,
-  and tool time.
+  errors, retries, timings, and lineage by turn and step.
 - **Explain context changes:** Distinguish the user-visible conversation, the
-  model's current context, and the complete audit trajectory.
+  context used for the model's next request, and the complete audit trajectory.
+- **Analyze resource usage:** When the source provides the data, aggregate
+  tokens, cache reads, TTFT, model time, and tool time.
 - **Evaluate trajectory quality:** Check goal completion, requirement
   coverage, error recovery, and verification gaps with links to source
   evidence.
-- **Diagnose and calibrate locally:** Generate redacted frozen snapshots for
-  agent diagnosis, double annotation, adjudication, and regression evaluation.
-- **Enhance wording with AI when requested:** Use the current Codex
-  configuration or a custom OpenAI-compatible model.
-- **Protect local data:** Keep source access read-only, bind the service to
-  localhost, and recursively redact sensitive fields.
+- **Close the evaluation loop locally:** Freeze datasets, double-annotate,
+  adjudicate disagreements, compare baselines, and regress badcases.
+- **Protect local data:** Keep source access read-only, bind the service to a
+  loopback address, and recursively redact previews, exports, and evaluation
+  artifacts.
 
 ## Supported data sources
 
-| Source | Default source of truth | Main capabilities |
+| Source | Default source of truth | Main facts currently projected |
 | --- | --- | --- |
-| DeepSeek Harness | `~/.dsh/sessions/**/session.vN.jsonl[.zst\|.zstd]` | v4 sessions, model context, Goal/Todo, lineage, tools, and usage |
-| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | Messages, reasoning, tool calls, completion state, and token usage |
-| ZCode | `~/.zcode/cli/db/db.sqlite` | Messages, tools, model and turn usage, plus optional trace/policy/task data |
+| DeepSeek Harness | `~/.dsh/sessions/**/session.vN.jsonl[.zst\|.zstd]` | v4 sessions, model context, Goal/Todo, nested tools, attachments, lineage, and usage |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | Messages, reasoning excerpts, tool calls, timing, completion state, and token usage |
+| Claude Code | `~/.claude/projects/**/*.jsonl` | Messages, reasoning excerpts, tool calls, attachments, usage, and message relationships |
+| Doubao Work | `~/Library/Application Support/DoubaoWork/Default/.doubaowork/agent_mode/workspace/.sessions` | Messages, tools, attachments, and multi-agent lineage; the protocol omits per-event timing and usage |
+| WorkBuddy | `~/.workbuddy/workbuddy.db` + `projects/**/*.jsonl` | Messages, reasoning excerpts, tools, attachments, timing, usage, trace, and message relationships |
+| Qoder | `~/.qoder-cn/projects/**/*.jsonl` | Messages, reasoning excerpts, nested tools, attachments, timing, usage, and message relationships |
+| OpenCode | `~/.local/share/opencode/opencode.db` | Messages, reasoning excerpts, tools, attachments, timing, usage, and message relationships |
+| ZCode | `~/.zcode/cli/db/db.sqlite` | Messages, tools, model and turn usage, plus trace, lineage, policy, and task data when those tables exist |
 
-When a source omits optional fields, the UI marks the capability as degraded
-instead of inferring facts that are not present.
-
-## Architecture
-
-```text
-DSH JSONL/Zstd ---> DshSource -----+
-Codex JSONL ------> CodexSource ---+--> Projection Worker --> SourceRegistry
-ZCode SQLite -----> SQLite Worker -+                            |
-                                                                v
-                                                       Local API + SSE
-                                                                |
-                                                                v
-                                                        React Web UI
-```
-
-The architecture has four layers:
-
-1. **Source adapters** read the three local formats. DSH and Codex support safe
-   incremental reads; ZCode queries through a read-only SQLite Worker to avoid
-   blocking the main service thread.
-2. **Unified projection** converts source events into common session, turn,
-   step, record, usage, and relationship models while retaining source IDs and
-   fidelity for navigation back to original evidence.
-3. **Service layer** exposes session lists, details, exports, and SSE updates
-   through a Node.js API bound only to `127.0.0.1`. Caches and Workers have
-   explicit capacity limits.
-4. **Presentation layer** provides conversation, model context, trajectory,
-   inspector, process evaluation, and evaluation-center views in the browser.
-
-Parsing logic for each source remains isolated. An unavailable source does not
-block the others. Structures and relationships that cannot be verified fail
-safely instead of being presented as unified facts. Optional AI enhancement is
-an independent branch: it may improve semantic wording but cannot overwrite
-local facts, numbers, states, or evidence relationships.
+"Supported" does not mean that every source contains the same fields. Adapters
+project only facts that can be verified from the source. Missing fields,
+incompatible protocols, and partial parse failures appear as blocked or
+degraded states and projection coverage gaps instead of inferred values.
 
 ## Quick start
 
@@ -102,14 +84,14 @@ To start the service without opening a browser:
 npx agent-trajectory start --no-open
 ```
 
-### Check data sources
+### Check and configure data sources
 
 ```bash
 npx agent-trajectory doctor
 ```
 
-`doctor` reports each source path, availability, session count, and whether
-installed hooks need to be refreshed.
+`doctor` reports the resolved path, availability, and session count for all
+eight sources, plus whether installed hooks need to be refreshed.
 
 If agent data is not in its default location, save paths interactively:
 
@@ -124,6 +106,11 @@ npx agent-trajectory setup \
   --dsh-dir /path/to/dsh/sessions \
   --codex-home /path/to/.codex \
   --codex-sessions-dir /path/to/codex/sessions \
+  --claude-projects-dir /path/to/claude/projects \
+  --doubao-work-sessions-dir /path/to/doubao/.sessions \
+  --workbuddy-home /path/to/.workbuddy \
+  --qoder-projects-dir /path/to/qoder/projects \
+  --opencode-db /path/to/opencode.db \
   --zcode-db /path/to/zcode/db.sqlite
 ```
 
@@ -134,29 +121,33 @@ CLI arguments → ~/.agent-trajectory/config-v1.json → environment → default
 ```
 
 The configuration file supports `${HOME}` and `${CONFIG_DIR}` for portability
-across users and machines.
+across users and machines. Agent Trajectory stores its own runtime state,
+diagnosis snapshots, and evaluation artifacts in `~/.agent-trajectory/` by
+default. Select another directory with `--data-dir` or
+`AGENT_TRAJECTORY_DATA_DIR`.
 
 ## Usage
 
 ### Session analysis
 
-After launch, select a source and session in **Session analysis**. The page
-provides these views:
+After launch, select a source and session in **Session analysis**. An
+unavailable source does not block the others, and newly persisted sessions
+normally appear within about one to two seconds.
+
+The page provides four complementary views:
 
 - **Conversation:** Focuses on user and assistant content while grouping
   runtime context, reasoning, and tools by turn.
-- **Model context:** When the source provides replacement facts, shows what the
-  model actually saw in its next request.
+- **Model context:** Appears only when the source provides replacement facts
+  and shows what the model actually saw in its next request.
 - **Trajectory:** Shows the complete audit record, step relationships, tool
   inputs and outputs, state, timing, and tokens.
-- **Trajectory evaluation:** Explains progress through a storyline, execution
-  outcome, correction chains, and process metrics.
-- **Inspector:** Shows source provenance, relationships, trace/span data,
-  errors, and redacted raw events for an individual record.
+- **Trajectory evaluation:** Explains progress through goals, execution
+  outcomes, a storyline, correction chains, and process metrics.
 
-Search, evidence navigation, and the inspector are shared across views. After
-the current session is persisted, the page usually updates within about one to
-two seconds.
+Search, time ranges, evidence navigation, and the inspector are shared across
+views. The inspector exposes provenance, relationships, trace/span data,
+errors, and redacted raw events loaded on demand for an individual record.
 
 ### Local agent diagnosis
 
@@ -174,32 +165,16 @@ This entry point does not create agent sessions, send messages, or read agent
 credentials automatically. Reports summarize observable decisions, actions,
 and feedback; they neither reveal nor invent hidden chain of thought.
 
-### Optional AI enhancement
-
-Trajectory evaluation uses deterministic local analysis by default and does
-not call a model. You may explicitly run **AI enhancement** to improve the
-Chinese wording of goals, outcomes, storylines, evaluations, and suggestions:
-
-- Reuse the current Codex configuration or add a custom
-  OpenAI-compatible HTTPS or local endpoint.
-- Preview the redacted fact bundle and estimated input tokens before a run.
-- Send only facts required by the selected modules. Any follow-up evidence
-  request is redacted again and size-limited.
-- Require every model response to pass local structure and fact validation;
-  numbers, states, and evidence IDs cannot be changed.
-- Load API keys from environment variables or store them encrypted in the
-  local data directory.
-
-When a remote model endpoint is selected, the redacted facts shown in the
-preview are sent to that provider. Usage, scope, and model selection are always
-explicit. Local analysis makes no model request when AI enhancement is not run.
-
 ### Evaluation center
 
-The **Evaluation center** supports cross-session quality assessment with
-datasets, double annotation by reviewers, disagreement adjudication,
-EvaluationRuns, baseline comparison, and badcase management. Run the bundled
-redacted synthetic dataset directly:
+The **Evaluation center** supports quality assessment across sessions and
+versions. Its browser workflow prepares private datasets, collects double
+annotations, adjudicates disagreements, runs selected splits, chooses
+baselines, and displays badcase summaries. Badcase decisions and retests are
+managed with the CLI casebook commands. All artifacts stay in the current local
+data directory.
+
+The CLI can also run the bundled redacted synthetic contract dataset directly:
 
 ```bash
 npx agent-trajectory evaluate
@@ -235,15 +210,17 @@ npx agent-trajectory evaluate \
   --split regression
 ```
 
-Real candidates may contain business text needed for evaluation. Keep them in
-private local directories and never commit or upload them. The `independent`
-split is reserved for final acceptance to prevent tuning rules against an
-independent test result.
+Real candidates are frozen, redacted, pseudonymized, and privacy-audited, but
+may still contain business text needed for evaluation. Keep them in private
+local directories and never commit or upload them. The `independent` split is
+reserved for final acceptance to prevent tuning rules against an independent
+test result.
 
 ### Automatic session activation
 
-After hooks are installed, a new top-level DSH, Codex, or ZCode session opens
-or reuses Agent Trajectory and switches to that session:
+Automatic activation supports **DSH, Codex, and ZCode only**. After hooks are
+installed, a new top-level session from one of these sources starts or reuses
+Agent Trajectory and switches to that session:
 
 ```bash
 npx agent-trajectory install-hooks
@@ -259,9 +236,11 @@ To remove only the entries installed by this project:
 npx agent-trajectory uninstall-hooks
 ```
 
-Hook installation and removal are the only features that modify agent
-configuration. Changes use project markers and file transactions; any failed
-step restores the original content. Hook failures never block agent sessions.
+The other five sources remain fully discoverable and viewable, but do not
+provide new-session activation. Hook installation and removal are the only
+features that modify upstream agent configuration. Changes use project markers
+and file transactions; any failed step restores the original content. Hook
+failures never block agent sessions.
 
 ## Common commands
 
@@ -269,16 +248,21 @@ step restores the original content. Hook failures never block agent sessions.
 | --- | --- |
 | `agent-trajectory` | Start or reuse an instance and open the page |
 | `agent-trajectory start --no-open` | Start the local service only |
-| `agent-trajectory doctor` | Check source and hook status |
-| `agent-trajectory setup` | Save custom source paths |
-| `agent-trajectory install-hooks` | Install new-session activation |
+| `agent-trajectory doctor` | Check all eight sources and hook status |
+| `agent-trajectory setup` | Save source paths interactively |
+| `agent-trajectory install-hooks` | Install DSH, Codex, and ZCode activation |
 | `agent-trajectory uninstall-hooks` | Remove activation entries installed by this project |
-| `agent-trajectory evaluate` | Run the built-in evaluation and generate a report |
-| `agent-trajectory casebook list` | List local badcases |
-| `agent-trajectory calibrate prepare ...` | Prepare a real-trajectory calibration dataset |
+| `agent-trajectory evaluate` | Run a synthetic or adjudicated dataset and generate a report |
+| `agent-trajectory calibrate prepare ...` | Freeze real-trajectory calibration candidates |
+| `agent-trajectory calibrate agreement ...` | Measure reviewer agreement and create an adjudication template |
+| `agent-trajectory casebook list` | List the local badcase casebook |
+| `agent-trajectory casebook decide ...` | Record a badcase decision |
+| `agent-trajectory casebook retest ...` | Attach an evaluation run as a badcase retest |
 
 All commands accept `--data-dir <path>` to select the local Agent Trajectory
-data directory.
+data directory. Evaluation commands enforce their parameter contracts: an
+external dataset must be paired with adjudication and an explicit
+`calibration`, `regression`, or `independent` split.
 
 ### Offline or internal distribution
 
@@ -300,24 +284,56 @@ and the bundled Zstandard decoder.
 Detail APIs return redacted previews by default. Oversized inputs and outputs
 are explicitly marked as truncated, and raw events are loaded on demand.
 
+## How it works
+
+```text
+DSH / Codex / Claude / Doubao / Qoder files ---> Source adapters --+
+WorkBuddy SQLite + JSONL ----------------------> Read-only Worker --+--> Projection Worker
+OpenCode / ZCode SQLite -----------------------> Read-only Worker --+         |
+                                                                           v
+                                                                  SourceRegistry
+                                                                           |
+                                                                    Local API + SSE
+                                                                           |
+                                                                    React Web UI
+```
+
+1. **Source adapters** scan only allowlisted files under configured roots.
+   SQLite sources query through read-only Workers so database work does not
+   block the main service thread.
+2. **Unified projection** converts source events into common session, turn,
+   step, record, usage, and relationship models while retaining source IDs,
+   evidence IDs, and fidelity.
+3. **Service layer** exposes source probing, session details, raw events on
+   demand, exports, evaluation workflows, and SSE updates through a Node.js API
+   bound only to `127.0.0.1`. Caches and Workers have explicit capacity limits.
+4. **Presentation layer** provides Session analysis and the Evaluation center
+   in the system browser without an embedded browser runtime.
+
+Discovery, parsing, and projection remain isolated for all eight sources. One
+unavailable source or corrupt file does not block the others. Structures and
+relationships that cannot be verified fail safely instead of being presented
+as unified facts.
+
 ## Security and privacy
 
 - The service binds only to `127.0.0.1` and validates the Host header, port,
   and remote address.
 - The client can submit only a source and opaque session ID, never an arbitrary
   local path.
-- DSH and Codex scan only allowlisted files under configured roots; the ZCode
-  database is opened read-only.
+- File-based sources scan only allowlisted files under configured roots;
+  WorkBuddy, OpenCode, and ZCode databases are opened read-only.
 - Credentials, certificates, cookies, browser storage, and model request
   headers are not read.
 - Sensitive keys in tool inputs and outputs, raw events, and exports are
   recursively redacted.
-- Ordinary browsing, projection, diagnosis, and evaluation neither modify
-  source sessions nor execute agent tools.
-- Optional AI enhancement sends previewable redacted facts only after a user
-  action. Remote endpoints are governed by the selected provider's policies.
+- Ordinary browsing, projection, diagnosis preparation, and evaluation do not
+  contact external network services, modify source sessions, or execute agent
+  tools.
 - Diagnosis snapshots, calibration data, evaluation reports, and badcases stay
   in the local data directory.
+- Hooks modify DSH, Codex, and ZCode configuration only after an explicit
+  install or uninstall command, using file transactions for rollback.
 
 See the [Security Policy](SECURITY.md) for the complete security boundary and
 vulnerability-reporting process.
@@ -346,6 +362,11 @@ PORT=4318 npm run dev
 DSH_SESSIONS_DIR=/path/to/sessions npm run dev
 CODEX_HOME=/path/to/.codex npm run dev
 CODEX_SESSIONS_DIR=/path/to/codex/sessions npm run dev
+CLAUDE_PROJECTS_DIR=/path/to/claude/projects npm run dev
+DOUBAO_WORK_SESSIONS_DIR=/path/to/doubao/.sessions npm run dev
+WORKBUDDY_HOME=/path/to/.workbuddy npm run dev
+QODER_PROJECTS_DIR=/path/to/qoder/projects npm run dev
+OPENCODE_DB=/path/to/opencode.db npm run dev
 ZCODE_DB=/path/to/zcode/db.sqlite npm run dev
 ```
 
@@ -360,7 +381,8 @@ npm run build
 npm audit --registry=https://registry.npmjs.org
 ```
 
-When all three sources are available, run a smoke test against real sources:
+For sources covered by the existing real-source verifier, run a read-only
+smoke test:
 
 ```bash
 npm run verify:real-sources
@@ -370,15 +392,6 @@ The verification summary is written to standard output by default and omits
 session content, raw session IDs, home-directory paths, and credentials. An
 output file created with `--output` is still derived from real local sessions
 and must not be committed to a public repository.
-
-## Related documentation
-
-The following project notes are currently maintained in Chinese:
-
-- [Performance and architecture optimization notes](docs/OPTIMIZATION.md)
-- [Capability comparison with upstream projects](docs/UPSTREAM-COMPARISON-2026-10-21.md)
-- [DeepSeek Harness implementation comparison](docs/DEEPSEEK-HARNESS-IMPLEMENTATION-COMPARISON-2026-10-24.md)
-- [Agent evaluation review](docs/AGENT-EVALUATION-REEVALUATION-2026-10-25.md)
 
 ## Contributing
 

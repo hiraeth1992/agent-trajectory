@@ -74,6 +74,12 @@
   font-size: 11px;
 }
 
+.evaluation-hero-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .evaluation-audit-ok {
   display: inline-flex;
   align-items: center;
@@ -85,6 +91,27 @@
   color: #277a50;
   font-size: 10px;
   white-space: nowrap;
+}
+
+.evaluation-regenerate-button {
+  min-height: 31px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: #fff;
+  color: #47515d;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.evaluation-regenerate-button:hover {
+  border-color: #9ab4e7;
+  background: #f7f9fe;
+  color: var(--blue);
 }
 
 .evaluation-empty-actions {
@@ -1799,6 +1826,10 @@
 
   .evaluation-hero {
     flex-direction: column;
+  }
+
+  .evaluation-hero-actions {
+    flex-wrap: wrap;
   }
 
   .evaluation-flow {

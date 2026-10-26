@@ -45,6 +45,16 @@ await Promise.all([
   }),
   build({
     ...shared,
+    entryPoints: [path.join(root, 'server/sources/workbuddy-worker.ts')],
+    outfile: path.join(output, 'lib', 'workbuddy-worker.mjs'),
+  }),
+  build({
+    ...shared,
+    entryPoints: [path.join(root, 'server/sources/opencode-worker.ts')],
+    outfile: path.join(output, 'lib', 'opencode-worker.mjs'),
+  }),
+  build({
+    ...shared,
     banner: { js: '#!/usr/bin/env node' },
     entryPoints: [path.join(root, 'server/diagnosis/evidence-cli.ts')],
     outfile: path.join(output, 'lib', 'diagnosis-evidence.mjs'),

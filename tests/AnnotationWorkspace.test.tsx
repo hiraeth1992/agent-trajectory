@@ -32,7 +32,16 @@ const dataset: AnnotationDatasetSummary = {
   requestedCases: 1,
   skippedCases: 0,
   allowPartial: false,
-  sources: { dsh: 1, codex: 0, zcode: 0 },
+  sources: {
+    dsh: 1,
+    codex: 0,
+    zcode: 0,
+    claude: 0,
+    'doubao-work': 0,
+    workbuddy: 0,
+    qoder: 0,
+    opencode: 0,
+  },
   splits: { calibration: 1, regression: 0, independent: 0 },
   privacyAuditPassed: true,
 }

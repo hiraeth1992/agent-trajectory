@@ -3,63 +3,49 @@
 **简体中文** | [English](README.en.md)
 
 Agent Trajectory 是一个本地优先、只读的多来源 Agent 轨迹查看器。它将
-DeepSeek Harness、Codex 和 ZCode 的本地会话转换为统一视图，帮助你查看对话、
-模型上下文、工具调用、Token 消耗、执行过程和评测结果。
+DeepSeek Harness、Codex、Claude Code、豆包工作、WorkBuddy、Qoder、OpenCode 和
+ZCode 的本地会话转换为统一视图，帮助你回答三个问题：
 
-项目以本地 Node.js 服务运行，通过系统浏览器展示数据。它不携带 Chromium，
-普通浏览不会上传或修改来源会话；可选 AI 增强只有在用户主动触发时才会调用所选模型。
+- Agent 实际看到了什么，又执行了什么？
+- 时间和 Token 花在了哪里，失败后是否完成恢复与验证？
+- 不同 Agent、不同版本之间的轨迹质量是否真的有所改善？
+
+项目以本地 Node.js 服务运行，通过系统浏览器展示数据，不携带 Chromium。会话读取、
+确定性轨迹评测、诊断准备和人工评测工作流均在本机完成；除显式安装或移除 Hook 外，
+Agent Trajectory 不修改来源会话或上游 Agent 配置。
 
 ## 产品演示
+
+下面的动图展示了当前版本的会话分析、轨迹评测和评测中心：
 
 ![Agent Trajectory 产品演示](docs/assets/readme/product-overview.gif)
 
 ## 核心功能
 
-- **统一查看多种 Agent**：使用相同界面浏览 DSH、Codex 和 ZCode 会话。
-- **还原执行过程**：按轮次和步骤查看消息、推理片段、工具调用、错误、重试和耗时。
-- **分析资源消耗**：汇总 Token、缓存读取、TTFT、模型耗时和工具耗时。
-- **解释上下文变化**：区分用户看到的对话、模型当前上下文和完整审计轨迹。
-- **评测轨迹质量**：检查目标完成、要求承接、错误恢复和验证缺口，并定位原始证据。
-- **本地诊断与校准**：生成脱敏冻结快照，支持 Agent 诊断、人工双标、裁决和回归评测。
-- **可选 AI 增强**：使用 Codex 当前配置或自定义 OpenAI-compatible 模型优化语义表达。
-- **保护本地数据**：来源只读、服务仅监听本机、敏感字段递归脱敏。
+- **统一查看 8 种 Agent**：使用同一套会话、轮次、步骤、记录和关系模型浏览不同来源。
+- **还原执行过程**：查看消息、可展示的推理片段、工具调用、错误、重试、耗时和派生关系。
+- **解释上下文变化**：区分用户看到的对话、模型下一次请求的上下文和完整审计轨迹。
+- **分析资源消耗**：在来源提供数据时汇总 Token、缓存读取、TTFT、模型耗时和工具耗时。
+- **评测轨迹质量**：检查目标完成、要求承接、错误恢复和验证缺口，并定位支撑结论的证据。
+- **建立评测闭环**：在本机完成数据冻结、双人标注、分歧裁决、baseline 对比和 badcase 回归。
+- **保护本地数据**：来源只读、服务仅监听回环地址，预览、导出和评测材料递归脱敏。
 
 ## 支持的数据来源
 
-| 来源               | 默认事实源                                              | 主要能力                                    |
-| ---------------- | -------------------------------------------------- | --------------------------------------- |
-| DeepSeek Harness | `~/.dsh/sessions/**/session.vN.jsonl[.zst\|.zstd]` | v4 会话、模型上下文、Goal/Todo、谱系、工具与用量          |
-| Codex            | `~/.codex/sessions/**/rollout-*.jsonl`             | 消息、推理、工具调用、完成状态与 Token 用量               |
-| ZCode            | `~/.zcode/cli/db/db.sqlite`                        | 消息、工具、模型与轮次用量，以及可选 trace/policy/task 能力 |
+| 来源 | 默认事实源 | 当前可投影的主要事实 |
+| --- | --- | --- |
+| DeepSeek Harness | `~/.dsh/sessions/**/session.vN.jsonl[.zst\|.zstd]` | v4 会话、模型上下文、Goal/Todo、嵌套工具、附件、谱系与用量 |
+| Codex | `~/.codex/sessions/**/rollout-*.jsonl` | 消息、推理片段、工具调用、时间、完成状态与 Token 用量 |
+| Claude Code | `~/.claude/projects/**/*.jsonl` | 消息、推理片段、工具调用、附件、用量与消息关系 |
+| 豆包工作 | `~/Library/Application Support/DoubaoWork/Default/.doubaowork/agent_mode/workspace/.sessions` | 消息、工具、附件与多 Agent 派生关系；协议不提供逐事件时间和用量 |
+| WorkBuddy | `~/.workbuddy/workbuddy.db` + `projects/**/*.jsonl` | 消息、推理片段、工具、附件、时间、用量、trace 与消息关系 |
+| Qoder | `~/.qoder-cn/projects/**/*.jsonl` | 消息、推理片段、嵌套工具、附件、时间、用量与消息关系 |
+| OpenCode | `~/.local/share/opencode/opencode.db` | 消息、推理片段、工具、附件、时间、用量与消息关系 |
+| ZCode | `~/.zcode/cli/db/db.sqlite` | 消息、工具、模型与轮次用量，以及数据库存在时的 trace、谱系、policy 和 task |
 
-来源缺少可选字段时，界面会明确标记能力降级，不会推测不存在的事实。
-
-## 架构
-
-```text
-DSH JSONL/Zstd ---> DshSource -----+
-Codex JSONL ------> CodexSource ---+--> 投影 Worker --> SourceRegistry
-ZCode SQLite -----> SQLite Worker -+                         |
-                                                             v
-                                                    本地 API + SSE
-                                                             |
-                                                             v
-                                                    React Web 界面
-```
-
-架构分为四层：
-
-1. **来源适配层**读取三种本地格式。DSH 和 Codex 支持安全增量读取；ZCode 通过只读
-   SQLite Worker 查询，避免阻塞服务主线程。
-2. **统一投影层**将来源事件转换为共同的会话、轮次、步骤、记录、用量和关系模型，
-   同时保留来源 ID 和保真度，便于回到原始证据。
-3. **服务层**通过仅绑定 `127.0.0.1` 的 Node.js API 提供会话列表、详情、导出和
-   SSE 更新；缓存与 Worker 均有容量边界。
-4. **展示层**在浏览器中提供对话、模型上下文、轨迹、检查器、过程评测和评测中心。
-
-不同来源的解析逻辑彼此隔离。一个来源不可用时，不会阻断其他来源；无法验证的结构和
-关联会安全失败，而不是被包装成统一事实。可选 AI 增强作为独立支路工作，只能改进语义
-描述，不能覆盖本地事实、数值、状态或证据关系。
+“支持”不代表所有来源都拥有相同字段。适配器只投影能够从来源验证的事实；字段缺失、
+协议不兼容或部分文件解析失败时，界面会显示 blocked/degraded 状态和投影覆盖率，
+不会用推测值补齐。
 
 ## 快速开始
 
@@ -82,13 +68,13 @@ npx agent-trajectory
 npx agent-trajectory start --no-open
 ```
 
-### 检查数据来源
+### 检查与配置数据来源
 
 ```bash
 npx agent-trajectory doctor
 ```
 
-`doctor` 会显示各来源的路径、可用状态、会话数量，以及 Hook 是否需要刷新。
+`doctor` 会显示 8 个来源的解析路径、可用状态、会话数量，以及 Hook 是否需要刷新。
 
 如果 Agent 数据不在默认位置，可以交互式保存配置：
 
@@ -103,6 +89,11 @@ npx agent-trajectory setup \
   --dsh-dir /path/to/dsh/sessions \
   --codex-home /path/to/.codex \
   --codex-sessions-dir /path/to/codex/sessions \
+  --claude-projects-dir /path/to/claude/projects \
+  --doubao-work-sessions-dir /path/to/doubao/.sessions \
+  --workbuddy-home /path/to/.workbuddy \
+  --qoder-projects-dir /path/to/qoder/projects \
+  --opencode-db /path/to/opencode.db \
   --zcode-db /path/to/zcode/db.sqlite
 ```
 
@@ -112,21 +103,27 @@ npx agent-trajectory setup \
 CLI 参数 → ~/.agent-trajectory/config-v1.json → 环境变量 → 默认目录
 ```
 
-配置文件支持 `${HOME}` 和 `${CONFIG_DIR}`，便于迁移到不同用户或电脑。
+配置文件支持 `${HOME}` 和 `${CONFIG_DIR}`，便于迁移到不同用户或电脑。默认情况下，
+Agent Trajectory 自身的运行状态、诊断快照和评测材料保存在
+`~/.agent-trajectory/`；可通过 `--data-dir` 或 `AGENT_TRAJECTORY_DATA_DIR`
+选择其他目录。
 
 ## 使用说明
 
 ### 会话分析
 
-启动后，在“会话分析”中选择来源和会话。页面提供以下视图：
+启动后，在“会话分析”中选择来源和会话。不可用的来源不会阻断其他来源，新增或更新的
+会话通常会在落盘后约 1–2 秒内出现在页面中。
+
+页面提供四个互补视图：
 
 - **对话**：聚焦用户与助手正文，按轮次折叠运行上下文、推理和工具。
-- **模型上下文**：在来源提供 replacement 事实时，显示模型下一次请求实际看到的内容。
+- **模型上下文**：仅在来源提供 replacement 事实时显示模型下一次请求实际看到的内容。
 - **轨迹**：展示完整审计记录、步骤关系、工具输入输出、状态、耗时和 Token。
-- **轨迹评测**：以故事线、执行结论、纠错链和过程指标解释任务如何推进。
-- **检查器**：查看单条记录的来源、关联、trace/span、错误及脱敏后的原始事件。
+- **轨迹评测**：以目标、执行结论、故事线、纠错链和过程指标解释任务如何推进。
 
-搜索、证据定位和检查器在各视图间共享。当前会话落盘后，页面通常会在约 1–2 秒内更新。
+搜索、时间范围、证据定位和检查器在视图间共享。检查器可查看单条记录的来源、
+关联、trace/span、错误以及按需加载的脱敏原始事件。
 
 ### 本地 Agent 诊断
 
@@ -141,24 +138,13 @@ CLI 参数 → ~/.agent-trajectory/config-v1.json → 环境变量 → 默认目
 该入口不会自动创建 Agent 会话、发送消息或读取 Agent 凭证。报告只总结可观察到的判断、
 行动和反馈，不展示或编造隐藏思维链。
 
-### 可选 AI 增强
-
-轨迹评测默认使用本地确定性分析，不调用模型。你也可以主动运行“AI 增强”，让模型优化
-目标、结果、故事线、评测和建议的中文表达：
-
-- 可以复用 Codex 当前配置，或添加自定义 OpenAI-compatible HTTPS/本地端点；
-- 运行前可在“将发送的信息”中查看脱敏事实包和预估输入 Token；
-- 只发送所选模块需要的事实，模型申请补充证据时还会再次脱敏并限制大小；
-- 模型响应必须通过本地结构和事实校验，不能修改数值、状态和证据 ID；
-- API Key 可来自环境变量，也可以加密保存在本机数据目录。
-
-如果使用远程模型端点，预览中的脱敏事实会发送给该服务商。是否使用、发送范围和模型选择
-均由用户显式决定；不运行 AI 增强时，本地分析不会产生模型请求。
-
 ### 评测中心
 
-“评测中心”用于跨会话质量评估，包含数据集、Reviewer 双标、分歧裁决、
-EvaluationRun、baseline 对比和 badcase 管理。内置脱敏合成数据集可直接运行：
+“评测中心”用于跨会话、跨版本的质量评估。浏览器界面支持准备私有数据集、Reviewer
+双标、分歧裁决、运行指定 split、选择 baseline，以及查看 badcase 汇总。badcase 的
+决策和复测通过 CLI casebook 命令完成。所有数据都保存在当前本机数据目录。
+
+也可以从 CLI 运行内置的脱敏合成契约数据集：
 
 ```bash
 npx agent-trajectory evaluate
@@ -192,13 +178,14 @@ npx agent-trajectory evaluate \
   --split regression
 ```
 
-真实候选可能包含完成评测所必需的业务文本，只应保留在本机私有目录，不要提交或上传。
-`independent` split 仅用于最终验收，避免根据独立测试结果反向调整规则。
+真实候选经过冻结、脱敏、假名化和隐私审计，但仍可能包含完成评测所必需的业务文本，
+只应保留在本机私有目录，不要提交或上传。`independent` split 仅用于最终验收，避免
+根据独立测试结果反向调整规则。
 
 ### 新会话自动联动
 
-安装 Hook 后，新建顶层 DSH、Codex 或 ZCode 会话时，Agent Trajectory 会自动打开或复用
-页面并切换到对应会话：
+自动联动只支持 **DSH、Codex 和 ZCode**。安装 Hook 后，新建这三种来源的顶层会话时，
+Agent Trajectory 会启动或复用本地实例，并切换到对应会话：
 
 ```bash
 npx agent-trajectory install-hooks
@@ -213,24 +200,30 @@ Node 路径、系统、数据目录或版本变化后，重新运行 `install-ho
 npx agent-trajectory uninstall-hooks
 ```
 
-Hook 安装与卸载是唯一会修改 Agent 配置的功能。修改使用项目标记和文件事务，
-任一步失败都会恢复原内容；Hook 失败也不会阻断 Agent 会话。
+其余五种来源仍可正常发现和查看，只是不提供新会话自动激活。Hook 安装与卸载是唯一会
+修改上游 Agent 配置的功能。修改使用项目标记和文件事务，任一步失败都会恢复原内容；
+Hook 失败也不会阻断 Agent 会话。
 
 ## 常用命令
 
-| 命令                                       | 用途            |
-| ---------------------------------------- | ------------- |
-| `agent-trajectory`                       | 启动或复用实例并打开页面  |
-| `agent-trajectory start --no-open`       | 只启动本地服务       |
-| `agent-trajectory doctor`                | 检查来源和 Hook 状态 |
-| `agent-trajectory setup`                 | 保存自定义来源路径     |
-| `agent-trajectory install-hooks`         | 安装新会话联动       |
-| `agent-trajectory uninstall-hooks`       | 移除本项目的联动项     |
-| `agent-trajectory evaluate`              | 运行内置评测并生成报告   |
-| `agent-trajectory casebook list`         | 查看本地 badcase  |
-| `agent-trajectory calibrate prepare ...` | 准备真实轨迹校准数据集   |
+| 命令 | 用途 |
+| --- | --- |
+| `agent-trajectory` | 启动或复用实例并打开页面 |
+| `agent-trajectory start --no-open` | 只启动本地服务 |
+| `agent-trajectory doctor` | 检查 8 个来源和 Hook 状态 |
+| `agent-trajectory setup` | 交互式保存来源路径 |
+| `agent-trajectory install-hooks` | 为 DSH、Codex、ZCode 安装新会话联动 |
+| `agent-trajectory uninstall-hooks` | 移除本项目安装的联动项 |
+| `agent-trajectory evaluate` | 运行合成或已裁决数据集并生成报告 |
+| `agent-trajectory calibrate prepare ...` | 冻结真实轨迹校准候选 |
+| `agent-trajectory calibrate agreement ...` | 计算双标一致性并生成裁决模板 |
+| `agent-trajectory casebook list` | 查看本地 badcase casebook |
+| `agent-trajectory casebook decide ...` | 记录 badcase 决策 |
+| `agent-trajectory casebook retest ...` | 将评测运行记录为 badcase 复测 |
 
-所有命令都可使用 `--data-dir <路径>` 指定 Agent Trajectory 的本地数据目录。
+所有命令都可使用 `--data-dir <路径>` 指定 Agent Trajectory 的本地数据目录。评测命令的
+完整参数约束可直接通过命令报错提示确认；外部数据集必须与 adjudication 一起提供，并显式
+选择 `calibration`、`regression` 或 `independent` split。
 
 ### 离线或内网分发
 
@@ -248,16 +241,43 @@ npx --yes ./agent-trajectory-0.1.0.tgz
 
 详情接口默认只返回脱敏预览；超长输入输出会明确标记截断，原始事件按需加载。
 
+## 工作原理
+
+```text
+DSH / Codex / Claude / 豆包 / Qoder 文件 --------> 来源适配器 ----+
+WorkBuddy SQLite + JSONL -----------------------> 只读 Worker ----+--> 投影 Worker
+OpenCode / ZCode SQLite ------------------------> 只读 Worker ----+        |
+                                                                         v
+                                                                SourceRegistry
+                                                                         |
+                                                               本地 API + SSE
+                                                                         |
+                                                               React Web 界面
+```
+
+1. **来源适配层**只扫描配置根目录中的白名单文件；SQLite 来源通过只读 Worker 查询，
+   避免数据库工作阻塞服务主线程。
+2. **统一投影层**将来源事件转换为共同的会话、轮次、步骤、记录、用量和关系模型，同时
+   保留来源 ID、证据 ID 和保真度。
+3. **服务层**通过仅绑定 `127.0.0.1` 的 Node.js API 提供来源探测、会话详情、按需原始
+   事件、导出、评测工作流和 SSE 更新；缓存与 Worker 均有容量边界。
+4. **展示层**在系统浏览器中提供会话分析与评测中心，不需要内嵌浏览器运行时。
+
+8 个来源的发现、解析和投影逻辑彼此隔离。单个来源不可用或单个文件损坏时，其他来源仍可
+继续工作；无法验证的结构和关联会安全失败，而不是被包装成统一事实。
+
 ## 安全与隐私
 
 - 服务只绑定 `127.0.0.1`，并校验 Host、端口和远端地址。
 - 客户端只能提交来源和 opaque session ID，不能提交任意本地路径。
-- DSH 和 Codex 只扫描预设目录中的白名单文件；ZCode 数据库以只读模式打开。
+- 文件来源只扫描预设目录中的白名单文件；WorkBuddy、OpenCode 和 ZCode 数据库以只读
+  模式打开。
 - 不读取凭证、证书、Cookie、浏览器存储或模型请求头。
 - 工具输入输出、原始事件和导出内容中的敏感键会递归脱敏。
-- 普通浏览、投影、诊断和评测不会修改来源会话或执行 Agent 工具。
-- 可选 AI 增强仅在用户触发后发送界面可预览的脱敏事实；远程端点受对应服务商策略约束。
+- 普通浏览、投影、诊断准备和评测不会访问外部网络、修改来源会话或执行 Agent 工具。
 - 诊断快照、校准数据、评测报告和 badcase 均保存在本机数据目录。
+- Hook 只有在用户显式运行安装或卸载命令后才会修改 DSH、Codex、ZCode 配置，并使用
+  文件事务保证失败回滚。
 
 完整的安全边界和漏洞报告方式见[安全策略](SECURITY.zh-CN.md)。
 
@@ -284,6 +304,11 @@ PORT=4318 npm run dev
 DSH_SESSIONS_DIR=/path/to/sessions npm run dev
 CODEX_HOME=/path/to/.codex npm run dev
 CODEX_SESSIONS_DIR=/path/to/codex/sessions npm run dev
+CLAUDE_PROJECTS_DIR=/path/to/claude/projects npm run dev
+DOUBAO_WORK_SESSIONS_DIR=/path/to/doubao/.sessions npm run dev
+WORKBUDDY_HOME=/path/to/.workbuddy npm run dev
+QODER_PROJECTS_DIR=/path/to/qoder/projects npm run dev
+OPENCODE_DB=/path/to/opencode.db npm run dev
 ZCODE_DB=/path/to/zcode/db.sqlite npm run dev
 ```
 
@@ -298,7 +323,7 @@ npm run build
 npm audit --registry=https://registry.npmjs.org
 ```
 
-在三个来源都可用时，可以运行真实来源冒烟验证：
+对已有真实来源验证脚本覆盖的来源，可以运行只读冒烟验证：
 
 ```bash
 npm run verify:real-sources
@@ -306,13 +331,6 @@ npm run verify:real-sources
 
 验证摘要默认只写到标准输出，不包含会话正文、原始 session ID、主目录路径或凭据。
 如使用 `--output` 保存摘要，该文件仍由本机真实会话派生，不应提交到公开仓库。
-
-## 相关文档
-
-- [性能与架构优化说明](docs/OPTIMIZATION.md)
-- [与上游项目的能力比较](docs/UPSTREAM-COMPARISON-2026-10-21.md)
-- [DeepSeek Harness 实现比较](docs/DEEPSEEK-HARNESS-IMPLEMENTATION-COMPARISON-2026-10-24.md)
-- [Agent 评测复核](docs/AGENT-EVALUATION-REEVALUATION-2026-10-25.md)
 
 ## 参与贡献
 

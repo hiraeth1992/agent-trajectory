@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { startAgentTrajectoryServer } from '../server/app'
 import { ProjectionWorkerClient } from '../server/projection-worker-client'
 import { capabilities, sessionKey } from '../server/sources/types'
-import { MemorySummarySecretStore } from '../server/summary/types'
 import type { SourceId } from '../src/types'
 
 const roots: string[] = []
@@ -54,15 +53,13 @@ describe('server resource ownership', () => {
       root,
       port: 0,
       registry: registry(firstWorker, 'first'),
-      summaryDataRoot: path.join(root, 'first'),
-      summarySecretStore: new MemorySummarySecretStore(),
+      dataRoot: path.join(root, 'first'),
     })
     const second = await startAgentTrajectoryServer({
       root,
       port: 0,
       registry: registry(secondWorker, 'second'),
-      summaryDataRoot: path.join(root, 'second'),
-      summarySecretStore: new MemorySummarySecretStore(),
+      dataRoot: path.join(root, 'second'),
     })
     try {
       await first.close()
@@ -118,15 +115,13 @@ describe('server resource ownership', () => {
       root,
       port: 0,
       registry: makeRegistry('first'),
-      summaryDataRoot: path.join(root, 'first-state'),
-      summarySecretStore: new MemorySummarySecretStore(),
+      dataRoot: path.join(root, 'first-state'),
     })
     const second = await startAgentTrajectoryServer({
       root,
       port: 0,
       registry: makeRegistry('second'),
-      summaryDataRoot: path.join(root, 'second-state'),
-      summarySecretStore: new MemorySummarySecretStore(),
+      dataRoot: path.join(root, 'second-state'),
     })
     try {
       const firstResponse = await fetch(`${first.url}/api/sessions/codex/shared`)

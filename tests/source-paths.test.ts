@@ -27,10 +27,27 @@ describe('source path resolution', () => {
     })
 
     expect(resolved).toEqual({
+      claudeProjectsDir: path.join(home, '.claude', 'projects'),
       codexHome: path.join(home, '.codex'),
       codexSessionIndex: path.join(home, '.codex', 'session_index.jsonl'),
       codexSessionsDir: path.join(home, '.codex', 'sessions'),
+      doubaoWorkSessionsDir: path.join(
+        home,
+        'Library',
+        'Application Support',
+        'DoubaoWork',
+        'Default',
+        '.doubaowork',
+        'agent_mode',
+        'workspace',
+        '.sessions',
+      ),
       dshSessionsDir: path.join(home, '.dsh', 'sessions'),
+      openCodeDatabase: path.join(home, '.local', 'share', 'opencode', 'opencode.db'),
+      qoderProjectsDir: path.join(home, '.qoder-cn', 'projects'),
+      workbuddyDatabase: path.join(home, '.workbuddy', 'workbuddy.db'),
+      workbuddyHome: path.join(home, '.workbuddy'),
+      workbuddyProjectsDir: path.join(home, '.workbuddy', 'projects'),
       zcodeDatabase: path.join(home, '.zcode', 'cli', 'db', 'db.sqlite'),
     })
   })
@@ -39,27 +56,49 @@ describe('source path resolution', () => {
     const home = path.resolve('/tmp/path-priority-home')
     const resolved = resolveSourcePaths({
       cli: {
+        claudeProjectsDir: '${HOME}/cli-claude',
+        doubaoWorkSessionsDir: './cli-doubao',
         dshSessionsDir: '${HOME}/cli-dsh',
+        qoderProjectsDir: '${HOME}/cli-qoder',
+        openCodeDatabase: '${HOME}/cli-opencode.db',
         codexSessionsDir: './cli-codex-sessions',
+        workbuddyHome: '${HOME}/cli-workbuddy',
       },
       config: {
+        claudeProjectsDir: '${HOME}/config-claude',
         dshSessionsDir: '${HOME}/config-dsh',
+        qoderProjectsDir: '${HOME}/config-qoder',
+        openCodeDatabase: '${HOME}/config-opencode.db',
         codexHome: '${HOME}/config-codex',
+        doubaoWorkSessionsDir: '${CONFIG_DIR}/config-doubao',
+        workbuddyHome: '${HOME}/config-workbuddy',
         zcodeDatabase: '${CONFIG_DIR}/zcode.sqlite',
       },
       configDirectory: path.join(home, 'config'),
       environment: {
         DSH_SESSIONS_DIR: path.join(home, 'env-dsh'),
+        QODER_PROJECTS_DIR: path.join(home, 'env-qoder'),
+        OPENCODE_DB: path.join(home, 'env-opencode.db'),
         CODEX_HOME: path.join(home, 'env-codex'),
         CODEX_SESSIONS_DIR: path.join(home, 'env-codex-sessions'),
+        CLAUDE_PROJECTS_DIR: path.join(home, 'env-claude'),
+        DOUBAO_WORK_SESSIONS_DIR: path.join(home, 'env-doubao'),
         ZCODE_DB: path.join(home, 'env-zcode.sqlite'),
+        WORKBUDDY_HOME: path.join(home, 'env-workbuddy'),
       },
       homeDirectory: home,
     })
 
+    expect(resolved.claudeProjectsDir).toBe(path.join(home, 'cli-claude'))
     expect(resolved.dshSessionsDir).toBe(path.join(home, 'cli-dsh'))
+    expect(resolved.qoderProjectsDir).toBe(path.join(home, 'cli-qoder'))
+    expect(resolved.openCodeDatabase).toBe(path.join(home, 'cli-opencode.db'))
     expect(resolved.codexHome).toBe(path.join(home, 'config-codex'))
     expect(resolved.codexSessionsDir).toBe(path.join(home, 'config', 'cli-codex-sessions'))
+    expect(resolved.doubaoWorkSessionsDir).toBe(path.join(home, 'config', 'cli-doubao'))
+    expect(resolved.workbuddyHome).toBe(path.join(home, 'cli-workbuddy'))
+    expect(resolved.workbuddyDatabase).toBe(path.join(home, 'cli-workbuddy', 'workbuddy.db'))
+    expect(resolved.workbuddyProjectsDir).toBe(path.join(home, 'cli-workbuddy', 'projects'))
     expect(resolved.zcodeDatabase).toBe(path.join(home, 'config', 'zcode.sqlite'))
     expect(resolved.codexSessionIndex).toBe(
       path.join(home, 'config-codex', 'session_index.jsonl'),
@@ -73,6 +112,13 @@ describe('source path resolution', () => {
     const dataRoot = path.join(home, '.agent-trajectory')
     const written = await writeConfig(dataRoot, {
       dshSessionsDir: portablePath(path.join(home, '.dsh', 'sessions'), home),
+      qoderProjectsDir: portablePath(path.join(home, '.qoder-cn', 'projects'), home),
+      openCodeDatabase: portablePath(
+        path.join(home, '.local', 'share', 'opencode', 'opencode.db'),
+        home,
+      ),
+      claudeProjectsDir: portablePath(path.join(home, '.claude', 'projects'), home),
+      workbuddyHome: portablePath(path.join(home, '.workbuddy'), home),
       zcodeDatabase: portablePath(path.join(root, 'external', 'db.sqlite'), home),
     })
 
@@ -81,7 +127,11 @@ describe('source path resolution', () => {
     expect(await readConfig(dataRoot)).toEqual({
       version: 1,
       sources: {
+        claudeProjectsDir: '${HOME}/.claude/projects',
         dshSessionsDir: '${HOME}/.dsh/sessions',
+        qoderProjectsDir: '${HOME}/.qoder-cn/projects',
+        openCodeDatabase: '${HOME}/.local/share/opencode/opencode.db',
+        workbuddyHome: '${HOME}/.workbuddy',
         zcodeDatabase: path.join(root, 'external', 'db.sqlite'),
       },
     })

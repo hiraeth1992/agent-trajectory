@@ -3,8 +3,6 @@ import { capabilities } from '../server/sources/types'
 import { analyzeTrajectory } from '../src/trajectory-analysis'
 import {
   analyzeTrajectoryOptimizations,
-  mergeOptimizationSuggestions,
-  type AiOptimization,
 } from '../src/trajectory-optimization'
 import type { SessionDetail, SourceId, TrajectoryRecord } from '../src/types'
 
@@ -45,7 +43,7 @@ describe('trajectory optimization', () => {
     const found = analyzeTrajectory(value).optimizations!
     expect(found).toHaveLength(1)
     expect(found[0]).toMatchObject({
-      category: 'duplicate', occurrences: 3, confidence: 'medium', source: 'local',
+      category: 'duplicate', occurrences: 3, confidence: 'medium',
       evidence: [{ recordId: 'r1', turn: 1, step: 1 }, { recordId: 'r2', turn: 1, step: 2 }, { recordId: 'r3', turn: 1, step: 3 }],
     })
   })
@@ -267,59 +265,4 @@ describe('trajectory optimization', () => {
     ]))).toEqual([])
   })
 
-  it('keeps local evidence and severity authoritative when AI refines a finding', () => {
-    const local = analyzeTrajectoryOptimizations(detail([failed(1), failed(2)]))
-    const proposal: AiOptimization = {
-      findingId: local[0]!.id, category: 'retry', title: '模型标题',
-      observation: '模型描述', cause: '待核实的原因', action: '增加输入校验',
-      target: '工具封装', expectedBenefit: '减少重复错误', verification: '复现错误并核对',
-      limitation: '需人工检查', measures: ['code'], evidenceRecordIds: ['r1'],
-      executionActions: [{
-        kind: 'code',
-        title: '增加输入校验',
-        target: '候选位置：工具调用器',
-        instruction: '在重试前校验输入变化',
-        content: 'validate(input)',
-        verification: '确认相同输入不会原样重试',
-      }],
-    }
-    const merged = mergeOptimizationSuggestions(local, [proposal, proposal], local[0]!.evidence)
-    expect(merged).toHaveLength(1)
-    expect(merged[0]).toMatchObject({
-      source: 'ai', title: local[0]!.title, observation: local[0]!.observation,
-      priority: 'high', evidence: local[0]!.evidence, action: '增加输入校验',
-    })
-    expect(mergeOptimizationSuggestions(local, [
-      { ...proposal, evidenceRecordIds: ['fake'] },
-    ], local[0]!.evidence)).toEqual(local)
-  })
-
-  it('merges AI proposals for the same problem across separate evidence', () => {
-    const proposal: AiOptimization = {
-      findingId: '', category: 'context', title: '压缩重复上下文',
-      observation: '存在重复上下文', cause: '未复用已有上下文',
-      action: '复用已读取的上下文', target: '上下文组装流程',
-      expectedBenefit: '减少上下文开销', verification: '比较调整前后的输入规模',
-      limitation: '需要确认上下文仍然有效', measures: ['workflow'],
-      evidenceRecordIds: ['r1'], executionActions: [{
-        kind: 'workflow',
-        title: '增加上下文复用',
-        target: '上下文组装流程',
-        instruction: '复用未失效的上下文',
-        verification: '确认重复内容只注入一次',
-      }],
-    }
-    const evidence = [
-      { recordId: 'r1', turn: 1, step: 1 },
-      { recordId: 'r2', turn: 1, step: 2 },
-    ]
-
-    const merged = mergeOptimizationSuggestions([], [
-      proposal,
-      { ...proposal, evidenceRecordIds: ['r2'] },
-    ], evidence)
-
-    expect(merged).toHaveLength(1)
-    expect(merged[0]?.evidence).toEqual(evidence)
-  })
 })

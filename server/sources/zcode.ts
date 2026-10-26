@@ -16,6 +16,7 @@ import {
 import type { SessionDetail, SessionSummary, SourceStatus } from '../../src/types'
 import {
   capabilities,
+  completeAudit,
   sessionKey,
   sourceMetadata,
   type SessionSource,
@@ -394,14 +395,14 @@ export class ZcodeSource implements SessionSource {
     return this.sqlite.query<string>('fingerprint', this.assertRef(ref))
   }
 
-  async audit(ref: SourceSessionRef): Promise<readonly unknown[]> {
+  async audit(ref: SourceSessionRef) {
     const sessionId = this.assertRef(ref)
     const result = await this.sqlite.query<ZcodeLoadResult | undefined>(
       'load',
       sessionId,
     )
     if (result === undefined) throw missingSessionError()
-    return [
+    const events = [
       { type: 'session', data: result.session },
       ...result.messages.map(data => ({ type: 'message', data })),
       ...result.parts.map(data => ({ type: 'part', data })),
@@ -413,6 +414,7 @@ export class ZcodeSource implements SessionSource {
         : [{ type: 'session_target', data: result.target }]),
       ...(result.todos ?? []).map(data => ({ type: 'todo', data })),
     ]
+    return completeAudit(events, projectionInput(result))
   }
 
   async load(ref: SourceSessionRef): Promise<SessionDetail> {

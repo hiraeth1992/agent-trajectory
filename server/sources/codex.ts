@@ -17,6 +17,7 @@ import {
 import type { JsonObject, SessionDetail, SessionSummary, SourceStatus } from '../../src/types'
 import {
   capabilities,
+  completeAudit,
   sessionKey,
   sourceMetadata,
   type SessionSource,
@@ -655,6 +656,23 @@ export class CodexSource implements SessionSource {
     return refs.sort((a, b) => b.summary.updatedAt - a.summary.updatedAt)
   }
 
+  async listDetailed() {
+    const refs = await this.list()
+    const failures = [...this.pendingRollouts.keys()].map(file => ({
+      locator: file,
+      reason: 'Codex rollout header is incomplete or unsupported',
+    }))
+    return {
+      refs,
+      diagnostics: {
+        scanned: this.pagesByFile.size + failures.length,
+        loaded: refs.length,
+        failed: failures.length,
+        failures,
+      },
+    }
+  }
+
   async fingerprint(ref: SourceSessionRef): Promise<string> {
     const files = await this.sessionFiles(ref)
     const stats = await Promise.all(files.map(file => fs.stat(file)))
@@ -665,9 +683,9 @@ export class CodexSource implements SessionSource {
     ].join('|')
   }
 
-  async audit(ref: SourceSessionRef): Promise<readonly unknown[]> {
+  async audit(ref: SourceSessionRef) {
     const files = await this.sessionFiles(ref)
-    return (await Promise.all(files.map(async (file, page) =>
+    const events = (await Promise.all(files.map(async (file, page) =>
       (await readJsonlRows<CodexEnvelope>(file)).map(row => ({
         ...row.value,
         metadata: {
@@ -678,6 +696,7 @@ export class CodexSource implements SessionSource {
           line: row.line,
         },
       }))))).flat()
+    return completeAudit(events, { envelopes: events })
   }
 
   async load(ref: SourceSessionRef): Promise<SessionDetail> {

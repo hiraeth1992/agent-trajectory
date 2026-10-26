@@ -284,7 +284,7 @@ describe('DSH source identity', () => {
       const source = new DshSource({ sessionsRoot: root })
       const [ref] = await source.list()
 
-      expect(await source.audit(ref!)).toEqual([header, rawOnly])
+      expect((await source.audit(ref!)).events).toEqual([header, rawOnly])
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

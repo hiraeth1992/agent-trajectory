@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { EvaluationSplit } from '../../src/evaluation-types'
 import type { SessionDetail } from '../../src/types'
 
-export const SAMPLING_POLICY_VERSION = 2
+export const SAMPLING_POLICY_VERSION = 3
 
 export interface SamplingCandidate {
   detail: SessionDetail
@@ -90,12 +90,19 @@ export function rankCandidates<T extends SamplingCandidate>(
 }
 
 function splitTargets(total: number): Record<EvaluationSplit, number> {
+  if (total < 3) {
+    return {
+      calibration: total,
+      regression: 0,
+      independent: 0,
+    }
+  }
   const calibration = Math.ceil(total * 0.5)
-  const regression = Math.floor(total * 0.2)
+  const regression = Math.max(1, Math.floor(total * 0.2))
   return {
-    calibration,
+    calibration: Math.min(calibration, total - 2),
     regression,
-    independent: total - calibration - regression,
+    independent: total - Math.min(calibration, total - 2) - regression,
   }
 }
 
@@ -120,15 +127,27 @@ export function groupAwareSplits<T extends SamplingCandidate>(
   const ordered = [...groups].sort(([leftKey, left], [rightKey, right]) =>
     right.length - left.length
     || seededRank(seed, leftKey).localeCompare(seededRank(seed, rightKey)))
-  for (const [, group] of ordered) {
+  if (values.length >= 3 && ordered.length < 3) {
+    throw new Error(
+      `at least 3 independent candidate groups are required for calibration, regression, and independent splits; found ${ordered.length}`,
+    )
+  }
+  const requiredSplits: EvaluationSplit[] = [
+    'calibration',
+    'independent',
+    'regression',
+  ]
+  for (const [index, [, group]] of ordered.entries()) {
+    const required = requiredSplits[index]
     const split = [...(['calibration', 'regression', 'independent'] as const)]
       .sort((left, right) => {
         const leftNeed = targets[left] - counts[left]
         const rightNeed = targets[right] - counts[right]
         return rightNeed - leftNeed || left.localeCompare(right)
       })[0]
-    for (const value of group) assignments.set(value, split)
-    counts[split] += group.length
+    const selected = required ?? split
+    for (const value of group) assignments.set(value, selected)
+    counts[selected] += group.length
   }
   return assignments
 }

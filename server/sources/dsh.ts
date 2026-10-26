@@ -20,6 +20,7 @@ import type {
 } from '../../src/types'
 import {
   capabilities,
+  completeAudit,
   sessionKey,
   SessionFormatError,
   sourceMetadata,
@@ -479,13 +480,17 @@ export class DshSource implements SessionSource {
     return `${stat.mtimeMs}:${stat.size}`
   }
 
-  async audit(ref: SourceSessionRef): Promise<readonly unknown[]> {
+  async audit(ref: SourceSessionRef) {
     const file = assertRef(ref, this.sessionsRoot)
     const parsed = parseDshJsonl(await decompress(file))
     if (parsed.header.id !== ref.sourceSessionId) {
       throw new Error('DSH session id does not match its safe locator')
     }
-    return [parsed.header, ...parsed.events]
+    const events = [parsed.header, ...parsed.events]
+    return completeAudit(events, {
+      header: parsed.header,
+      events: parsed.events,
+    })
   }
 
   async load(ref: SourceSessionRef): Promise<SessionDetail> {

@@ -20,7 +20,6 @@ import { HoverDetailText } from './HoverDetailText'
 
 interface TrajectoryStoryProps {
   story: Story
-  enhanced?: boolean
   selectedStageId?: string
   onSelectStage: (stageId: string) => void
   onOpenStageDetails: (stageId: string) => void
@@ -41,7 +40,6 @@ function reasonLevelLabel(stage: TrajectoryStoryStage): string {
 
 export function TrajectoryStory({
   story,
-  enhanced = false,
   selectedStageId,
   onSelectStage,
   onOpenStageDetails,
@@ -155,7 +153,6 @@ export function TrajectoryStory({
                 ? '没有可归纳的逻辑步骤'
                 : `${story.stages.length} 个阶段 · 单击查看聚合结论，双击展开下方明细`}
             </small>
-            {enhanced && <em className="ai-enhanced-badge">AI 增强</em>}
           </span>
         </div>
         {story.stages.length > 0 && (

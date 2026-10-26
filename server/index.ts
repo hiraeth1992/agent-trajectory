@@ -22,13 +22,18 @@ const server = await startAgentTrajectoryServer({
   host: process.env.HOST,
   port: process.env.PORT === undefined ? 4317 : Number(process.env.PORT),
   development: !isProduction,
-  summaryDataRoot: dataRoot,
+  dataRoot,
   sourcePaths,
 })
 
 console.log(`Agent Trajectory: ${server.url}`)
 console.log(`DSH sessions: ${sourcePaths.dshSessionsDir}`)
 console.log(`Codex sessions: ${sourcePaths.codexSessionsDir}`)
+console.log(`Claude Code projects: ${sourcePaths.claudeProjectsDir}`)
+console.log(`Doubao Work sessions: ${sourcePaths.doubaoWorkSessionsDir}`)
+console.log(`WorkBuddy home: ${sourcePaths.workbuddyHome}`)
+console.log(`Qoder projects: ${sourcePaths.qoderProjectsDir}`)
+console.log(`OpenCode database: ${sourcePaths.openCodeDatabase}`)
 console.log(`ZCode database: ${sourcePaths.zcodeDatabase}`)
 
 let closing = false

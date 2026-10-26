@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SourceRegistry } from '../../server/sources/registry'
-import { capabilities, sessionKey, type SessionSource, type SourceSessionRef } from '../../server/sources/types'
+import {
+  createSourceRegistry,
+  SourceRegistry,
+} from '../../server/sources/registry'
+import { capabilities, completeAudit, sessionKey, type SessionSource, type SourceSessionRef } from '../../server/sources/types'
+import type { ResolvedSourcePaths } from '../../server/source-paths'
 import type { SessionDetail, SourceId, SourceStatus } from '../../src/types'
 
 function fakeSource(
@@ -58,13 +62,46 @@ function fakeSource(
     probe: async () => status,
     list: async () => [ref],
     load: async () => detail,
-    audit: async () => [],
+    audit: async () => completeAudit([], { events: [] }),
     fingerprint: async () => 'v1',
     ...overrides,
   }
 }
 
 describe('SessionSource registry contract', () => {
+  it('registers all first-batch sources in the default product registry', async () => {
+    const unavailable = '/agent-trajectory-test/source-does-not-exist'
+    const paths: ResolvedSourcePaths = {
+      claudeProjectsDir: unavailable,
+      codexHome: unavailable,
+      codexSessionIndex: unavailable,
+      codexSessionsDir: unavailable,
+      doubaoWorkSessionsDir: unavailable,
+      dshSessionsDir: unavailable,
+      openCodeDatabase: unavailable,
+      qoderProjectsDir: unavailable,
+      workbuddyDatabase: unavailable,
+      workbuddyHome: unavailable,
+      workbuddyProjectsDir: unavailable,
+      zcodeDatabase: unavailable,
+    }
+    const registry = createSourceRegistry(paths)
+    try {
+      expect((await registry.listSources()).map(status => status.source)).toEqual([
+        'dsh',
+        'codex',
+        'claude',
+        'doubao-work',
+        'workbuddy',
+        'qoder',
+        'opencode',
+        'zcode',
+      ])
+    } finally {
+      await registry.close()
+    }
+  })
+
   it('returns lightweight source status before session discovery', async () => {
     const list = vi.fn(async () => {
       throw new Error('slow discovery is not part of a status probe')
@@ -99,6 +136,44 @@ describe('SessionSource registry contract', () => {
     expect(await registry.listSessions()).toMatchObject([
       { source: 'dsh', sourceSessionId: 'local-1' },
     ])
+    expect(await registry.listSources()).toContainEqual(expect.objectContaining({
+      source: 'codex',
+      availability: 'degraded',
+      sessionCountState: 'ready',
+      reason: 'list_failed',
+      detail: '会话列表读取失败：broken source',
+    }))
+  })
+
+  it('marks a source degraded when discovery skips malformed sessions', async () => {
+    const base = fakeSource('claude')
+    const refs = await base.list()
+    const registry = new SourceRegistry([
+      fakeSource('claude', {
+        listDetailed: async () => ({
+          refs,
+          diagnostics: {
+            scanned: 2,
+            loaded: 1,
+            failed: 1,
+            failures: [{
+              locator: '/internal/broken.jsonl',
+              reason: 'invalid JSON at line 2',
+            }],
+          },
+        }),
+      }),
+    ])
+
+    expect(await registry.listSessions('claude')).toHaveLength(1)
+    expect(await registry.listSources()).toMatchObject([{
+      source: 'claude',
+      availability: 'degraded',
+      sessionCount: 1,
+      sessionCountState: 'ready',
+      reason: 'session_discovery_partial',
+      detail: '已读取 1/2 个会话文件；1 个文件解析失败',
+    }])
   })
 
   it('routes only opaque source ids and caches by fingerprint', async () => {

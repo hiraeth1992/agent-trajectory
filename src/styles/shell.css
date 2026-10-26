@@ -272,6 +272,54 @@ button {
   color: #65738a;
 }
 
+.source-brand-icon {
+  display: block;
+  overflow: visible;
+}
+
+.source-brand-icon rect {
+  fill: #65738a;
+}
+
+.source-brand-icon text {
+  fill: #fff;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: -.04em;
+}
+
+.source-brand-icon .source-brand-mark {
+  fill: none;
+  stroke: #fff;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.source-brand-codex rect {
+  fill: #101820;
+}
+
+.source-brand-claude rect {
+  fill: #d97757;
+}
+
+.source-brand-doubao-work rect {
+  fill: #2468f2;
+}
+
+.source-brand-workbuddy rect {
+  fill: #00a889;
+}
+
+.source-brand-qoder rect,
+.source-brand-zcode rect {
+  fill: #111;
+}
+
+.source-brand-opencode rect {
+  fill: #5358e8;
+}
+
 .session-picker select {
   min-width: 0;
   flex: 1 1 auto;

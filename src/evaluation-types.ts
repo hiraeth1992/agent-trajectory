@@ -59,7 +59,7 @@ export interface FactsQualityIssue {
 }
 
 export interface FactsQualityReport {
-  schemaVersion: 3
+  schemaVersion: 4
   coveragePolicyVersion: number
   source: SourceId
   sourceCapabilities: SourceCapabilities
@@ -164,7 +164,7 @@ export interface TrajectoryEvaluation {
   schemaVersion: 1
   evaluatorId: 'local-trajectory'
   evaluatorVersion: '1'
-  factsSchemaVersion: 3
+  factsSchemaVersion: 4
   target: EvaluationTargetRef
   factsHash: string
   factsQuality: FactsQualityReport

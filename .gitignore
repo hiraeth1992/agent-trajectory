@@ -1,10 +1,7 @@
 node_modules/
 dist/
-dist-electron/
 dist-cli/
-release/
 *.tgz
-build/icon.iconset/
 .DS_Store
 *.log
 .env

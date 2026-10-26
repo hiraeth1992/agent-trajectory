@@ -64,8 +64,8 @@ export const LOCAL_TRAJECTORY_EVALUATOR = Object.freeze({
   contextPolicyHash: LOCAL_TRAJECTORY_CONTEXT_POLICY_HASH,
   dependencies: [
     'trajectory-analysis',
-    'facts-quality-v2',
-    'coverage-policy-v2',
+    'facts-quality-v4',
+    'coverage-policy-v3',
   ],
   calibrationStatus: 'synthetic-calibrated',
   gateLevel: 'required',

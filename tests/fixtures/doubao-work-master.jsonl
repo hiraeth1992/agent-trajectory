@@ -1,0 +1,6 @@
+{"role":"user","content":"Research the codebase"}
+{"role":"assistant","content":"I will delegate the research.","tool_calls":[{"id":"call-create","type":"function","function":{"name":"create_agent","arguments":{"agent_type":"researcher","subtask":"Inspect the source"}}}]}
+{"role":"tool","tool_call_id":"call-create","content":"Created agent s_research1 for the research task"}
+{"role":"assistant","tool_calls":[{"id":"call-read","type":"function","function":{"name":"Read","arguments":{"file_path":"/workspace/src/main.ts"}}}]}
+{"role":"tool","tool_call_id":"call-read","content":"export const main = true"}
+{"role":"assistant","content":"Research complete."}

@@ -60,7 +60,7 @@ import {
   writePrivateJson,
   writePrivateJsonExclusive,
   writePrivateText,
-} from './summary/file-transaction'
+} from './file-transaction'
 import {
   defaultCasebookFile,
   EvaluationCasebookStore,
@@ -119,6 +119,16 @@ function configureWorkerLocations(): void {
     distributionRoot,
     'lib',
     'zcode-worker.mjs',
+  )
+  process.env.AGENT_TRAJECTORY_WORKBUDDY_WORKER = path.join(
+    distributionRoot,
+    'lib',
+    'workbuddy-worker.mjs',
+  )
+  process.env.AGENT_TRAJECTORY_OPENCODE_WORKER = path.join(
+    distributionRoot,
+    'lib',
+    'opencode-worker.mjs',
   )
 }
 
@@ -183,8 +193,15 @@ export function parseCliArguments(
         throw new Error('--port must be an integer from 0 to 65535')
       }
     } else if (argument === '--dsh-dir') sourcePaths.dshSessionsDir = selected
+    else if (argument === '--claude-projects-dir') sourcePaths.claudeProjectsDir = selected
     else if (argument === '--codex-home') sourcePaths.codexHome = selected
     else if (argument === '--codex-sessions-dir') sourcePaths.codexSessionsDir = selected
+    else if (argument === '--doubao-work-sessions-dir') {
+      sourcePaths.doubaoWorkSessionsDir = selected
+    }
+    else if (argument === '--workbuddy-home') sourcePaths.workbuddyHome = selected
+    else if (argument === '--qoder-projects-dir') sourcePaths.qoderProjectsDir = selected
+    else if (argument === '--opencode-db') sourcePaths.openCodeDatabase = selected
     else if (argument === '--zcode-db') sourcePaths.zcodeDatabase = selected
     else if (argument === '--baseline') baseline = path.resolve(selected)
     else if (argument === '--output-dir') outputDirectory = path.resolve(selected)
@@ -496,7 +513,7 @@ async function start(arguments_: CliArguments): Promise<void> {
       host: '127.0.0.1',
       port: arguments_.port ?? 0,
       development: false,
-      summaryDataRoot: arguments_.dataRoot,
+      dataRoot: arguments_.dataRoot,
       sourcePaths: paths,
       browserSession,
       diagnosisEvidenceCommand: JSON.stringify(path.join(
@@ -563,6 +580,11 @@ async function doctor(arguments_: CliArguments): Promise<void> {
       codex: paths.codexSessionsDir,
       dsh: paths.dshSessionsDir,
       zcode: paths.zcodeDatabase,
+      claude: paths.claudeProjectsDir,
+      'doubao-work': paths.doubaoWorkSessionsDir,
+      workbuddy: paths.workbuddyHome,
+      qoder: paths.qoderProjectsDir,
+      opencode: paths.openCodeDatabase,
     }
     for (const status of statuses) {
       console.log(statusLine(status, bySource[status.source]))
@@ -841,10 +863,25 @@ async function setup(arguments_: CliArguments): Promise<void> {
       const ask = async (label: string, fallback: string): Promise<string> =>
         (await prompt.question(`${label} [${fallback}]: `)).trim() || fallback
       next = {
+        claudeProjectsDir: portablePath(
+          await ask('Claude Code projects', defaults.claudeProjectsDir),
+        ),
         dshSessionsDir: portablePath(await ask('DSH sessions', defaults.dshSessionsDir)),
         codexHome: portablePath(await ask('Codex home', defaults.codexHome)),
         codexSessionsDir: portablePath(
           await ask('Codex sessions', defaults.codexSessionsDir),
+        ),
+        doubaoWorkSessionsDir: portablePath(
+          await ask('Doubao Work sessions', defaults.doubaoWorkSessionsDir),
+        ),
+        workbuddyHome: portablePath(
+          await ask('WorkBuddy home', defaults.workbuddyHome),
+        ),
+        qoderProjectsDir: portablePath(
+          await ask('Qoder projects', defaults.qoderProjectsDir),
+        ),
+        openCodeDatabase: portablePath(
+          await ask('OpenCode database', defaults.openCodeDatabase),
         ),
         zcodeDatabase: portablePath(await ask('ZCode database', defaults.zcodeDatabase)),
       }

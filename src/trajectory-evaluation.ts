@@ -24,8 +24,8 @@ import type {
 
 export const LOCAL_TRAJECTORY_EVALUATOR_ID = 'local-trajectory'
 export const LOCAL_TRAJECTORY_EVALUATOR_VERSION = '1'
-export const EVALUATION_FACTS_SCHEMA_VERSION = 3
-export const EVALUATION_COVERAGE_POLICY_VERSION = 2
+export const EVALUATION_FACTS_SCHEMA_VERSION = 4
+export const EVALUATION_COVERAGE_POLICY_VERSION = 3
 
 export interface TrajectoryEvaluationOptions {
   target: EvaluationTargetRef
@@ -133,6 +133,16 @@ export function buildFactsQualityReport(
   const coverageGap = detail.projection.coverageSummary?.gap
     ?? Math.max(0, coverageTotal - coverageConsumed)
   const issues: FactsQualityIssue[] = []
+  const coverageCount = coverage.reduce((total, item) => total + item.total, 0)
+  const coverageCountValid = detail.projection.eventCount === 0
+    ? coverage.length === 0
+    : detail.projection.coverage !== undefined
+      && detail.projection.coverageSummary !== undefined
+      && detail.projection.coverageSummary.total === detail.projection.eventCount
+      && detail.projection.coverageSummary.total === coverageCount
+      && detail.projection.coverageSummary.consumed === coverageConsumed
+      && detail.projection.coverageSummary.gap
+        === detail.projection.eventCount - coverageConsumed
 
   if (options.sourceStatus?.availability === 'blocked') {
     issues.push(issue({
@@ -155,6 +165,15 @@ export function buildFactsQualityReport(
       affectedCriterionIds: ALL_CRITERIA,
     }))
   }
+  if (!coverageCountValid) {
+    issues.push(issue({
+      id: 'projection-coverage-incomplete',
+      category: 'coverage',
+      severity: 'blocking',
+      summary: '投影没有提供与原始事件总数一致的覆盖账本。',
+      affectedCriterionIds: ALL_CRITERIA,
+    }))
+  }
   if (detail.projection.unknownEventTypes.length > 0) {
     issues.push(issue({
       id: 'unknown-event-types',
@@ -169,7 +188,8 @@ export function buildFactsQualityReport(
   for (const item of coverage) {
     const gap = item.total - item.consumed
     if (gap <= 0) continue
-    const semanticFailure = item.disposition === 'folded-state'
+    const semanticFailure = item.disposition === 'record'
+      || item.disposition === 'folded-state'
     const unsupported = item.disposition === 'unsupported'
     const requiredRawOnly = item.disposition === 'raw-only'
       && REQUIRED_RAW_ONLY_FACTS.has(item.type)

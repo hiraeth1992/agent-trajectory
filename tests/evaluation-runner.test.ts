@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MINIMAL_GOLD_DATASET } from '../server/evaluation/gold-dataset'
+import { SYNTHETIC_CONTRACT_DATASET } from '../server/evaluation/gold-dataset'
 import { createEvaluationDataset } from '../server/evaluation/identity'
 import {
   compareEvaluationRuns,
@@ -27,24 +27,24 @@ function rebuild(
 
 describe('local evaluation runner', () => {
   it('runs the synthetic contract dataset with stable assertion results', () => {
-    const first = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const first = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
-    const second = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const second = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       createdAt: '2026-10-26T00:00:00.000Z',
     })
 
-    expect(MINIMAL_GOLD_DATASET).toMatchObject({
+    expect(SYNTHETIC_CONTRACT_DATASET).toMatchObject({
       goldCompleteness: 'partial-contract',
       datasetHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       goldHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     })
-    expect(MINIMAL_GOLD_DATASET.cases).toHaveLength(12)
-    expect(new Set(MINIMAL_GOLD_DATASET.cases.map(item => item.target.source)))
+    expect(SYNTHETIC_CONTRACT_DATASET.cases).toHaveLength(12)
+    expect(new Set(SYNTHETIC_CONTRACT_DATASET.cases.map(item => item.target.source)))
       .toEqual(new Set(['dsh', 'codex', 'zcode']))
-    expect(MINIMAL_GOLD_DATASET.cases.filter(item => item.split === 'calibration'))
+    expect(SYNTHETIC_CONTRACT_DATASET.cases.filter(item => item.split === 'calibration'))
       .toHaveLength(6)
-    expect(MINIMAL_GOLD_DATASET.cases.filter(item => item.split === 'regression'))
+    expect(SYNTHETIC_CONTRACT_DATASET.cases.filter(item => item.split === 'regression'))
       .toHaveLength(6)
     expect(first.aggregate).toMatchObject({
       cases: 12,
@@ -79,7 +79,7 @@ describe('local evaluation runner', () => {
   })
 
   it('renders partial assertions without claiming full-Gold exact agreement', () => {
-    const run = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const run = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
     const report = evaluationRunMarkdown(run)
@@ -94,18 +94,18 @@ describe('local evaluation runner', () => {
   })
 
   it('binds run identity and comparability to dataset and Gold contents', () => {
-    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const baseline = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
-    const changedGold = rebuild(MINIMAL_GOLD_DATASET, (draft) => {
+    const changedGold = rebuild(SYNTHETIC_CONTRACT_DATASET, (draft) => {
       draft.cases[0]!.expected[0]!.verdict = 'fail'
     })
     const changedRun = runEvaluationDataset(changedGold, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
 
-    expect(changedGold.datasetHash).toBe(MINIMAL_GOLD_DATASET.datasetHash)
-    expect(changedGold.goldHash).not.toBe(MINIMAL_GOLD_DATASET.goldHash)
+    expect(changedGold.datasetHash).toBe(SYNTHETIC_CONTRACT_DATASET.datasetHash)
+    expect(changedGold.goldHash).not.toBe(SYNTHETIC_CONTRACT_DATASET.goldHash)
     expect(changedRun.runId).not.toBe(baseline.runId)
     expect(compareEvaluationRuns(baseline, changedRun)).toMatchObject({
       comparable: false,
@@ -113,13 +113,13 @@ describe('local evaluation runner', () => {
       reasons: ['Gold hash differs'],
     })
 
-    const tampered = structuredClone(MINIMAL_GOLD_DATASET)
+    const tampered = structuredClone(SYNTHETIC_CONTRACT_DATASET)
     tampered.cases[0]!.description = 'changed without rebuilding identity'
     expect(() => runEvaluationDataset(tampered)).toThrow(/content hash mismatch/)
   })
 
   it('keeps abstentions and evaluator errors out of FP/FN', () => {
-    const abstaining = rebuild(MINIMAL_GOLD_DATASET, (draft) => {
+    const abstaining = rebuild(SYNTHETIC_CONTRACT_DATASET, (draft) => {
       const live = draft.cases.find(item => item.id === 'dsh-live-session')!
       live.expected = [{ criterionId: 'outcome', verdict: 'fail' }]
     })
@@ -130,7 +130,7 @@ describe('local evaluation runner', () => {
       falseNegatives: 0,
     })
 
-    const crashing = rebuild(MINIMAL_GOLD_DATASET, (draft) => {
+    const crashing = rebuild(SYNTHETIC_CONTRACT_DATASET, (draft) => {
       draft.cases = [draft.cases[0]!]
       draft.cases[0]!.expected = [{ criterionId: 'outcome', verdict: 'fail' }]
       ;(draft.cases[0]!.detail.projection as unknown as { records: unknown }).records = undefined
@@ -150,10 +150,10 @@ describe('local evaluation runner', () => {
   })
 
   it('allows evaluator build experiments and gates directional regressions', () => {
-    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const baseline = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       evaluatorBuildHash: 'build-a',
     })
-    const sameOutput = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const sameOutput = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       evaluatorBuildHash: 'build-b',
     })
     expect(compareEvaluationRuns(baseline, sameOutput)).toMatchObject({
@@ -194,7 +194,7 @@ describe('local evaluation runner', () => {
   })
 
   it('treats evaluator crashes as regressions even when mismatch counts do not grow', () => {
-    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET)
+    const baseline = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET)
     const candidate = structuredClone(baseline)
     const first = candidate.cases[0]!
     first.error = 'boom'
@@ -214,7 +214,7 @@ describe('local evaluation runner', () => {
   })
 
   it('gates aggregate classification and coverage regressions', () => {
-    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET)
+    const baseline = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET)
     const falsePositive = structuredClone(baseline)
     falsePositive.aggregate.falsePositives++
     expect(compareEvaluationRuns(baseline, falsePositive)).toMatchObject({
@@ -231,7 +231,7 @@ describe('local evaluation runner', () => {
   })
 
   it('rejects old or incompatible run protocols', () => {
-    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET)
+    const baseline = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET)
     const incompatible = {
       ...structuredClone(baseline),
       schemaVersion: 1,

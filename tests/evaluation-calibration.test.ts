@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -242,6 +243,37 @@ describe('private real-trajectory calibration', () => {
     })])
   })
 
+  it('redacts credentials without rejecting redacted TypeScript authorization fields', async () => {
+    const selected = source()
+    const originalLoad = selected.load
+    selected.load = async (sourceId, sourceSessionId) => {
+      const loaded = await originalLoad(sourceId, sourceSessionId)
+      if (loaded === undefined || sourceId !== 'codex') return loaded
+      loaded.projection.records[1]!.output = [
+        "Type '{ authorization: string; }' is not assignable to SourceAuditBundle.",
+        'Authorization: Basic cHJpdmF0ZTpjcmVkZW50aWFs',
+      ].join('\n')
+      return loaded
+    }
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    roots.push(root)
+
+    const prepared = await prepareCalibrationCandidates(selected, root, {
+      count: 3,
+      datasetId: 'private-real-authorization',
+      datasetVersion: '1',
+    })
+    const serialized = await Promise.all(prepared.manifest.cases.map(candidate =>
+      fs.readFile(path.join(root, candidate.file), 'utf8')))
+
+    expect(serialized.join('\n')).toContain('authorization: <redacted>;')
+    expect(serialized.join('\n')).not.toContain('cHJpdmF0ZTpjcmVkZW50aWFs')
+    expect(await auditCalibrationCandidates(root)).toMatchObject({
+      credentialShapes: 0,
+      passed: true,
+    })
+  })
+
   it('prepares balanced private candidates and blind reviewer templates', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
     roots.push(root)
@@ -260,8 +292,8 @@ describe('private real-trajectory calibration', () => {
       allowPartial: false,
       candidatePoolHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       candidateMultiplier: 4,
-      samplingPolicyVersion: 2,
-      seed: 'private-real-test@1:sampling-v2',
+      samplingPolicyVersion: 3,
+      seed: 'private-real-test@1:sampling-v3',
       groupPolicy: 'source-parent-workspace',
       splitPolicy: 'group-aware-50-20-30',
       independentAccess: 'restricted',
@@ -373,6 +405,40 @@ describe('private real-trajectory calibration', () => {
       splitByGroup.set(candidate.groupHash, splits)
     }
     expect([...splitByGroup.values()].every(splits => splits.size === 1)).toBe(true)
+  })
+
+  it('loads manifests produced by the supported historical sampling policy', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    roots.push(root)
+    const prepared = await prepareCalibrationCandidates(source(), root, {
+      count: 3,
+      datasetId: 'private-real-historical',
+      datasetVersion: '1',
+    })
+    const historical = structuredClone(prepared.manifest)
+    historical.preparation.samplingPolicyVersion = 2
+    historical.preparation.seed = 'private-real-historical@1:sampling-v2'
+    const { contentHash: _contentHash, ...hashable } = historical
+    historical.contentHash = createHash('sha256')
+      .update(JSON.stringify({
+        schemaVersion: hashable.schemaVersion,
+        kind: hashable.kind,
+        id: hashable.id,
+        version: hashable.version,
+        description: hashable.description,
+        preparation: hashable.preparation,
+        cases: hashable.cases,
+      }))
+      .digest('hex')
+    await fs.writeFile(
+      path.join(root, 'manifest.json'),
+      `${JSON.stringify(historical, null, 2)}\n`,
+    )
+
+    await expect(loadCandidateManifest(root)).resolves.toMatchObject({
+      id: 'private-real-historical',
+      preparation: { samplingPolicyVersion: 2 },
+    })
   })
 
   it('binds privacy audits to the exact manifest and audit schema', async () => {

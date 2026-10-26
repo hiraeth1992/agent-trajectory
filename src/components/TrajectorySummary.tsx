@@ -31,16 +31,11 @@ import type {
   TrajectoryAnalysis,
 } from '../trajectory-analysis'
 import type { SourceId, TokenUsage } from '../types'
-import type {
-  AiEvaluationEnhancement,
-  ValidatedAiSummary,
-} from '../ai-summary-types'
 import {
   exclusiveTokenBreakdown,
   selectedTokenTotal,
   TOKEN_BREAKDOWN_KEYS,
   tokenTotal,
-  type ExclusiveTokenBreakdown,
   type TokenBreakdownKey,
 } from '../token-usage'
 import {
@@ -174,12 +169,8 @@ function OutcomeHero({
   source,
   sourceSessionId,
   withObjective = false,
-  aiOutcome,
-  aiObjective,
 }: TrajectorySummaryProps & {
   withObjective?: boolean
-  aiOutcome?: NonNullable<ValidatedAiSummary['modules']['outcome']>['value']
-  aiObjective?: NonNullable<ValidatedAiSummary['modules']['objective']>['value']
 }) {
   return (
     <section
@@ -197,25 +188,17 @@ function OutcomeHero({
       <div className="outcome-copy">
         <span className="summary-eyebrow">
           执行结论 · {confidenceLabel(analysis.outcome.confidence)}
-          {aiOutcome !== undefined && <em className="ai-enhanced-badge">AI 增强</em>}
         </span>
-        <h1>{aiOutcome?.headline ?? analysis.outcome.label}</h1>
+        <h1>{analysis.outcome.label}</h1>
         <p>
-          <HoverDetailText text={aiOutcome?.summary ?? analysis.outcome.summary} />
+          <HoverDetailText text={analysis.outcome.summary} />
         </p>
-        {aiOutcome !== undefined && (
-          <small className="ai-enhanced-detail">
-            验证判断：{aiOutcome.verification}
-            {aiOutcome.unresolved.length > 0
-              ? ` · 待确认：${aiOutcome.unresolved.join('；')}` : ''}
-          </small>
-        )}
       </div>
       <TrajectoryDiagnosisButton
         source={source}
         sourceSessionId={sourceSessionId}
       />
-      {withObjective && <Objective analysis={analysis} enhancement={aiObjective} />}
+      {withObjective && <Objective analysis={analysis} />}
     </section>
   )
 }
@@ -322,35 +305,21 @@ function StatStrip({
 
 function Objective({
   analysis,
-  enhancement,
 }: {
   analysis: TrajectoryAnalysis
-  enhancement?: NonNullable<ValidatedAiSummary['modules']['objective']>['value']
 }) {
   return (
     <section className="summary-objective">
       <header>
         <Target size={16} />
-        <span>
-          {analysis.objectiveLabel}
-          {enhancement !== undefined && <em className="ai-enhanced-badge">AI 增强</em>}
-        </span>
+        <span>{analysis.objectiveLabel}</span>
       </header>
       <strong>
         <HoverDetailText
           placement="below"
-          text={enhancement?.statement ?? analysis.objective}
+          text={analysis.objective}
         />
       </strong>
-      {enhancement !== undefined && (
-        <small className="ai-enhanced-detail">
-          {enhancement.successCriteria.length > 0
-            ? `成功标准：${enhancement.successCriteria.join('；')}` : ''}
-          {enhancement.constraints.length > 0
-            ? ` · 约束：${enhancement.constraints.join('；')}` : ''}
-          {enhancement.evolution !== '' ? ` · 演变：${enhancement.evolution}` : ''}
-        </small>
-      )}
     </section>
   )
 }
@@ -562,14 +531,11 @@ function DecisionPath({
 
 function EvaluationPanel({
   evaluations,
-  enhancements,
   onOpenRecord,
 }: {
   evaluations: AnalysisEvaluation[]
-  enhancements?: AiEvaluationEnhancement[]
   onOpenRecord: (recordId: string) => void
 }) {
-  const enhanced = new Map(enhancements?.map(item => [item.evaluationId, item]) ?? [])
   return (
     <section className="summary-panel evaluation-panel">
       <header className="summary-panel-heading">
@@ -584,23 +550,15 @@ function EvaluationPanel({
       <div className="evaluation-list">
         {evaluations.map((evaluation) => {
           const Icon = evaluationIcon(evaluation)
-          const ai = enhanced.get(evaluation.id)
           return (
             <article className={`evaluation-item grade-${evaluation.grade}`} key={evaluation.id}>
               <div className="evaluation-icon"><Icon size={16} /></div>
               <div>
                 <span>
                   {evaluation.title} · {confidenceLabel(evaluation.confidence)}
-                  {ai !== undefined && <em className="ai-enhanced-badge">AI 增强</em>}
                 </span>
-                <strong>{ai?.label ?? evaluation.label}</strong>
-                <p>{ai?.summary ?? evaluation.summary}</p>
-                {ai !== undefined && (
-                  <small className="ai-enhanced-detail">
-                    {ai.strengths.length > 0 ? `优势：${ai.strengths.join('；')}` : ''}
-                    {ai.risks.length > 0 ? ` · 风险：${ai.risks.join('；')}` : ''}
-                  </small>
-                )}
+                <strong>{evaluation.label}</strong>
+                <p>{evaluation.summary}</p>
                 <EvidenceButton
                   recordId={evaluation.evidenceRecordIds[0]}
                   onOpenRecord={onOpenRecord}
@@ -993,7 +951,6 @@ function SummaryContent(props: TrajectorySummaryProps) {
       <StatStrip analysis={props.analysis} sessionMeta={props.sessionMeta} />
       <TrajectoryStory
         story={story}
-        enhanced={false}
         selectedStageId={selectedStageId}
         onSelectStage={selectStage}
         onOpenStageDetails={openStageDetails}
@@ -1013,7 +970,6 @@ function SummaryContent(props: TrajectorySummaryProps) {
           />
           <OptimizationPanel
             analysis={props.analysis}
-            aiCurrent={false}
             onOpenRecord={props.onOpenRecord}
           />
         </aside>

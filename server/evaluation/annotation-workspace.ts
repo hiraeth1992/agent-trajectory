@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type {
@@ -38,7 +38,7 @@ import type {
 } from '../../src/evaluation-types'
 import type { SessionDetail, TrajectoryRecord } from '../../src/types'
 import { jsonWeight, WeightedLruCache } from '../lru'
-import { writePrivateJson } from '../summary/file-transaction'
+import { writePrivateJson } from '../file-transaction'
 import { defaultCasebookFile, EvaluationCasebookStore } from './casebook'
 import { createEvaluationDataset } from './identity'
 import { compareEvaluationRuns, runEvaluationDataset } from './runner'
@@ -223,7 +223,16 @@ function datasetSummary(
   manifest: EvaluationCandidateManifest,
   privacyAuditPassed: boolean,
 ): AnnotationDatasetSummary {
-  const sources = { dsh: 0, codex: 0, zcode: 0 }
+  const sources = {
+    dsh: 0,
+    codex: 0,
+    zcode: 0,
+    claude: 0,
+    'doubao-work': 0,
+    workbuddy: 0,
+    qoder: 0,
+    opencode: 0,
+  }
   const splits = { calibration: 0, regression: 0, independent: 0 }
   for (const candidate of manifest.cases) {
     sources[candidate.target.source]++
@@ -281,12 +290,17 @@ export class AnnotationWorkspaceStore {
     revision: string
     values: RunIdentityMap
   }>()
+  private readonly casebook: EvaluationCasebookStore
 
   constructor(
     private readonly root: string,
     private readonly evaluationsRoot = path.join(path.dirname(root), 'evaluations'),
     private readonly calibrationSource?: CalibrationSource,
-  ) {}
+  ) {
+    this.casebook = new EvaluationCasebookStore(
+      defaultCasebookFile(path.dirname(this.evaluationsRoot)),
+    )
+  }
 
   private async optionalJson(file: string): Promise<unknown | undefined> {
     try {
@@ -495,9 +509,7 @@ export class AnnotationWorkspaceStore {
     const latestValue = latest === undefined
       ? undefined
       : await this.optionalJson(path.join(this.evaluationsRoot, latest.file)) as EvaluationRun
-    const casebook = await new EvaluationCasebookStore(
-      defaultCasebookFile(path.dirname(this.evaluationsRoot)),
-    ).read()
+    const casebook = await this.casebook.read()
     const datasetCasebook = casebook.entries.filter(entry =>
       entry.candidateManifestHash === dataset.manifest.contentHash
       && [...currentRunIdentities.values()].some(identity =>
@@ -660,9 +672,7 @@ export class AnnotationWorkspaceStore {
             diff,
           )]),
     ])
-    await new EvaluationCasebookStore(
-      defaultCasebookFile(path.dirname(this.evaluationsRoot)),
-    ).syncRun(run)
+    await this.casebook.syncRun(run)
     return {
       run: runDetails(run, request.split),
       diff: diff === undefined
@@ -831,19 +841,44 @@ export class AnnotationWorkspaceStore {
       throw new AnnotationInputError('invalid evaluation dataset directory path')
     }
     try {
-      await fs.lstat(directory)
-      throw new AnnotationConflictError(
-        `evaluation dataset directory already exists: ${request.directoryId}`,
+      const stat = await fs.lstat(directory)
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw new AnnotationConflictError(
+          `evaluation dataset path already exists: ${request.directoryId}`,
+        )
+      }
+      const failedAudit = path.join(directory, 'PRIVACY-AUDIT-FAILED.json')
+      const failedStat = await fs.lstat(failedAudit).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return undefined
+          throw error
+        },
       )
+      if (failedStat?.isFile() === true && !failedStat.isSymbolicLink()) {
+        await fs.mkdir(root, { recursive: true, mode: 0o700 })
+        await fs.rename(directory, path.join(
+          root,
+          `.quarantine-${request.directoryId}-${Date.now()}-${randomUUID()}`,
+        ))
+      } else {
+        throw new AnnotationConflictError(
+          `evaluation dataset directory already exists: ${request.directoryId}`,
+        )
+      }
     } catch (error) {
       if (error instanceof AnnotationConflictError) throw error
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
+    await fs.mkdir(root, { recursive: true, mode: 0o700 })
+    const preparationDirectory = path.join(
+      root,
+      `.${request.directoryId}-${randomUUID()}.preparing`,
+    )
     let prepared
     try {
       prepared = await prepareCalibrationCandidates(
         this.calibrationSource!,
-        directory,
+        preparationDirectory,
         {
           count: request.count,
           allowPartial: request.allowPartial,
@@ -851,7 +886,21 @@ export class AnnotationWorkspaceStore {
           datasetVersion: request.datasetVersion,
         },
       )
+      await fs.rename(preparationDirectory, directory)
     } catch (error) {
+      try {
+        const entries = await fs.readdir(preparationDirectory)
+        if (entries.length === 0) {
+          await fs.rm(preparationDirectory, { recursive: true, force: true })
+        } else {
+          await fs.rename(preparationDirectory, path.join(
+            root,
+            `.quarantine-${request.directoryId}-${Date.now()}-${randomUUID()}`,
+          ))
+        }
+      } catch (cleanupError) {
+        if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanupError
+      }
       const message = error instanceof Error ? error.message : String(error)
       if (message.startsWith('not enough stable source sessions')
         || message.startsWith('calibration directory is not empty')

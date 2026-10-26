@@ -95,7 +95,7 @@ export const LOCAL_TRAJECTORY_EVALUATOR_BUILD_HASH = sha256({
   evaluatorId: LOCAL_TRAJECTORY_EVALUATOR_ID,
   evaluatorVersion: LOCAL_TRAJECTORY_EVALUATOR_VERSION,
   contractHash: LOCAL_TRAJECTORY_CONTRACT_HASH,
-  implementationRevision: 4,
+  implementationRevision: 5,
 })
 
 export function evaluationDatasetHashes(

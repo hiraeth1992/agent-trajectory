@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { promises as fs } from 'node:fs'
@@ -285,6 +286,96 @@ describe('annotation workspace API', () => {
     const [firstResult, duplicateResult] = await Promise.all([first, duplicate])
     expect(firstResult.dataset.datasetHash).toBe(duplicateResult.dataset.datasetHash)
     expect(sourceReads).toBe(1)
+  })
+
+  it('quarantines a failed preparation so the requested directory can be retried', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-api-prepare-'))
+    roots.push(root)
+    const calibrationRoot = path.join(root, 'calibration')
+    const failedRoot = path.join(calibrationRoot, 'real-v2')
+    await fs.mkdir(failedRoot, { recursive: true })
+    await fs.writeFile(
+      path.join(failedRoot, 'PRIVACY-AUDIT-FAILED.json'),
+      '{"passed":false}\n',
+    )
+    const store = new AnnotationWorkspaceStore(
+      calibrationRoot,
+      path.join(root, 'evaluations'),
+      source(),
+    )
+
+    const result = await store.prepareDataset({
+      directoryId: 'real-v2',
+      datasetId: 'private-api-retry',
+      datasetVersion: '2',
+      count: 3,
+      allowPartial: false,
+    })
+
+    expect(result.dataset).toMatchObject({
+      directoryId: 'real-v2',
+      datasetId: 'private-api-retry',
+      datasetVersion: '2',
+    })
+    expect(await fs.access(path.join(failedRoot, 'privacy-audit.json')).then(
+      () => true,
+      () => false,
+    )).toBe(true)
+    const entries = await fs.readdir(calibrationRoot)
+    expect(entries.some(entry =>
+      entry.startsWith('.quarantine-real-v2-'))).toBe(true)
+    expect(entries.some(entry => entry.endsWith('.preparing'))).toBe(false)
+  })
+
+  it('lists a valid dataset created by the supported historical sampling policy', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-api-historical-'))
+    roots.push(root)
+    const calibrationRoot = path.join(root, 'calibration')
+    const datasetRoot = path.join(calibrationRoot, 'real-v1')
+    await prepareCalibrationCandidates(source(), datasetRoot, {
+      count: 3,
+      datasetId: 'private-api-historical',
+      datasetVersion: '1',
+    })
+    const manifestFile = path.join(datasetRoot, 'manifest.json')
+    const manifest = JSON.parse(
+      await fs.readFile(manifestFile, 'utf8'),
+    ) as Record<string, unknown> & {
+      contentHash: string
+      preparation: Record<string, unknown>
+    }
+    manifest.preparation.samplingPolicyVersion = 2
+    manifest.preparation.seed = 'private-api-historical@1:sampling-v2'
+    const hashable = {
+      schemaVersion: manifest.schemaVersion,
+      kind: manifest.kind,
+      id: manifest.id,
+      version: manifest.version,
+      description: manifest.description,
+      preparation: manifest.preparation,
+      cases: manifest.cases,
+    }
+    manifest.contentHash = createHash('sha256')
+      .update(JSON.stringify(hashable))
+      .digest('hex')
+    await fs.writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`)
+    const auditFile = path.join(datasetRoot, 'privacy-audit.json')
+    const audit = JSON.parse(
+      await fs.readFile(auditFile, 'utf8'),
+    ) as Record<string, unknown>
+    audit.manifestHash = manifest.contentHash
+    await fs.writeFile(auditFile, `${JSON.stringify(audit, null, 2)}\n`)
+
+    const store = new AnnotationWorkspaceStore(calibrationRoot)
+
+    await expect(store.listDatasets()).resolves.toEqual([
+      expect.objectContaining({
+        directoryId: 'real-v1',
+        datasetId: 'private-api-historical',
+        datasetVersion: '1',
+        privacyAuditPassed: true,
+      }),
+    ])
   })
 
   it('lists, loads, lazy-reads, saves, and rejects stale revisions', async () => {

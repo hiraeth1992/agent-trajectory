@@ -1,6 +1,15 @@
 export type JsonObject = Record<string, unknown>
 
-export const SOURCE_IDS = ['dsh', 'codex', 'zcode'] as const
+export const SOURCE_IDS = [
+  'dsh',
+  'codex',
+  'zcode',
+  'claude',
+  'doubao-work',
+  'workbuddy',
+  'qoder',
+  'opencode',
+] as const
 export type SourceId = typeof SOURCE_IDS[number]
 
 export function isSourceId(value: unknown): value is SourceId {

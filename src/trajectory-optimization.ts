@@ -27,7 +27,6 @@ export interface OptimizationSuggestion {
   title: string
   priority: 'high' | 'medium' | 'low'
   confidence: 'high' | 'medium' | 'low'
-  source: 'local' | 'ai'
   measures: OptimizationMeasure[]
   effort: 'low' | 'medium' | 'high'
   observation: string
@@ -40,23 +39,6 @@ export interface OptimizationSuggestion {
   executionActions: OptimizationExecutionAction[]
   occurrences: number
   evidence: Array<{ recordId: string; turn: number; step: number }>
-}
-
-/** AI supplies semantic proposals only; locations, counts and local findings stay authoritative. */
-export interface AiOptimization {
-  findingId: string
-  category: OptimizationCategory
-  title: string
-  observation: string
-  cause: string
-  action: string
-  target: string
-  expectedBenefit: string
-  verification: string
-  limitation: string
-  executionActions: OptimizationExecutionAction[]
-  measures: OptimizationMeasure[]
-  evidenceRecordIds: string[]
 }
 
 export interface OptimizationContext {
@@ -355,7 +337,6 @@ function suggestion(group: Group): OptimizationSuggestion {
     category,
     priority: category === 'retry' ? 'high' : 'medium',
     confidence: category === 'environment' ? 'high' : 'medium',
-    source: 'local',
     effort: 'low',
     observation: category === 'duplicate'
       ? `观察到 ${group.count} 次参数和结果相同的只读调用，期间未记录相关修改。`
@@ -500,7 +481,6 @@ export function analyzeTrajectoryOptimizations(
       category: 'retry',
       priority: 'high',
       confidence: 'high',
-      source: 'local',
       effort: 'medium',
       observation: '轨迹中观察到一个错误在会话结束前没有后续成功恢复证据。',
       occurrences: 1,
@@ -533,7 +513,6 @@ export function analyzeTrajectoryOptimizations(
       category: 'detour',
       priority: 'medium',
       confidence: 'medium',
-      source: 'local',
       effort: 'low',
       observation: `第 ${failureTurn} 轮观察到 ${turnFailures.length} 个不同失败，之后均出现了成功动作。`,
       occurrences: turnFailures.length,
@@ -550,7 +529,6 @@ export function analyzeTrajectoryOptimizations(
       category: 'verification',
       priority: 'medium',
       confidence: 'low',
-      source: 'local',
       effort: 'low',
       observation: '轨迹中最后的文件修改之后，未观察到成功的测试、构建或检查记录。',
       occurrences: 1,
@@ -563,55 +541,4 @@ export function analyzeTrajectoryOptimizations(
     || rank[a.confidence] - rank[b.confidence]
     || b.occurrences - a.occurrences
     || a.id.localeCompare(b.id)).slice(0, 24)
-}
-
-/** A current AI draft can refine a finding, never its measured evidence or severity. */
-export function mergeOptimizationSuggestions(
-  local: OptimizationSuggestion[],
-  proposals: AiOptimization[],
-  evidence: OptimizationSuggestion['evidence'],
-): OptimizationSuggestion[] {
-  const locations = new Map(evidence.map(item => [item.recordId, item]))
-  const result = [...local]
-  const seen = new Set<string>()
-  for (const proposal of proposals.slice(0, 8)) {
-    const references = [...new Set(proposal.evidenceRecordIds)]
-    if (references.length === 0 || references.some(id => !locations.has(id))) continue
-    const index = result.findIndex(item => item.id === proposal.findingId)
-    if (proposal.findingId !== '' && index < 0) continue
-    if (index >= 0) {
-      const original = result[index]!
-      if (seen.has(original.id) || proposal.category !== original.category
-        || references.some(id => !original.evidence.some(item => item.recordId === id))) continue
-      result[index] = {
-        ...original,
-        source: 'ai',
-        cause: proposal.cause,
-        action: proposal.action,
-        target: proposal.target,
-        expectedBenefit: proposal.expectedBenefit,
-        verification: proposal.verification,
-        limitation: `${original.limitation} ${proposal.limitation}`,
-        measures: proposal.measures,
-        executionActions: proposal.executionActions,
-      }
-      seen.add(original.id)
-    } else {
-      // Novel semantic findings must not duplicate a local finding's category/evidence.
-      if (result.some(item => item.category === proposal.category
-        && item.evidence.some(ref => references.includes(ref.recordId)))) continue
-      result.push({
-        ...proposal,
-        id: `optimization:ai:${proposal.category}:${references.slice().sort().join(':')}`,
-        source: 'ai',
-        priority: 'low',
-        confidence: 'low',
-        effort: 'medium',
-        occurrences: 0,
-        limitation: `AI 推断，需核实前提；不证明全局最短路径或工具缺失。${proposal.limitation}`,
-        evidence: references.map(id => locations.get(id)!),
-      })
-    }
-  }
-  return mergeEquivalentSuggestions(result)
 }

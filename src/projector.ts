@@ -925,22 +925,6 @@ function firstTokenTime(stream: unknown): number | undefined {
   return undefined
 }
 
-function lastStreamTime(stream: unknown): number | undefined {
-  let latest: number | undefined
-  for (const itemValue of asArray(stream)) {
-    const item = object(itemValue)
-    let value = number(item.time)
-    const time0 = number(item.time0)
-    if (time0 !== undefined) {
-      let elapsed = 0
-      for (const delta of asArray(item.dt)) elapsed += number(delta) ?? 0
-      value = time0 + elapsed
-    }
-    if (value !== undefined) latest = Math.max(latest ?? value, value)
-  }
-  return latest
-}
-
 function sourceLabel(sourceValue: unknown): string {
   const source = object(sourceValue)
   const kind = string(source.kind) ?? 'context'

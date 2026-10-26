@@ -8,9 +8,16 @@ import { jsonWeight, WeightedLruCache } from '../lru'
 import { ProjectionWorkerClient } from '../projection-worker-client'
 import type { ResolvedSourcePaths } from '../source-paths'
 import { CodexSource } from './codex'
+import { ClaudeCodeSource } from './claude-code'
 import { DshSource } from './dsh'
+import { DoubaoWorkSource } from './doubao-work'
+import { OpenCodeSource } from './opencode'
+import { QoderSource } from './qoder'
+import { WorkBuddySource } from './workbuddy'
 import {
   capabilities,
+  type SourceAuditBundle,
+  type SourceListDiagnostics,
   sourceMetadata,
   type SessionSource,
   type SourceSessionRef,
@@ -50,10 +57,28 @@ function failedStatus(source: SessionSource, _error: unknown): SourceStatus {
   }
 }
 
+function withListDiagnostics(
+  status: SourceStatus,
+  diagnostics: SourceListDiagnostics | undefined,
+): SourceStatus {
+  return diagnostics !== undefined && diagnostics.failed > 0
+    ? {
+        ...status,
+        availability: 'degraded',
+        reason: 'session_discovery_partial',
+        detail: `已读取 ${diagnostics.loaded}/${diagnostics.scanned} 个会话文件；${
+          diagnostics.failed
+        } 个文件解析失败`,
+      }
+    : status
+}
+
 export class SourceRegistry {
   private readonly sources: ReadonlyMap<SourceId, SessionSource>
   private readonly refCache = new Map<SourceId, TimedValue<readonly SourceSessionRef[]>>()
   private readonly knownRefs = new Map<SourceId, Map<string, SourceSessionRef>>()
+  private readonly listDiagnostics = new Map<SourceId, SourceListDiagnostics>()
+  private readonly listFailures = new Map<SourceId, string>()
   private readonly missingRefs = new Map<string, number>()
   private readonly detailLoads = new Map<string, Promise<SessionDetail | undefined>>()
   private statusCache?: TimedValue<SourceStatus[]>
@@ -83,12 +108,38 @@ export class SourceRegistry {
     const now = Date.now()
     const cached = this.refCache.get(id)
     if (!fresh && cached !== undefined && cached.expiresAt > now) return cached.value
-    const value = this.source(id).list().then(refs => {
-      this.knownRefs.set(id, new Map(refs.map(ref => [ref.sourceSessionId, ref])))
-      for (const ref of refs) this.missingRefs.delete(`${id}:${ref.sourceSessionId}`)
-      this.statusCache = undefined
-      return refs
-    })
+    const source = this.source(id)
+    const value = (
+      source.listDetailed === undefined
+        ? source.list().then(refs => ({
+            refs,
+            diagnostics: {
+              scanned: refs.length,
+              loaded: refs.length,
+              failed: 0,
+              failures: [],
+            },
+          }))
+        : source.listDetailed()
+    ).then(
+      (result) => {
+        const refs = result.refs
+        this.listFailures.delete(id)
+        this.listDiagnostics.set(id, result.diagnostics)
+        this.knownRefs.set(id, new Map(refs.map(ref => [ref.sourceSessionId, ref])))
+        for (const ref of refs) this.missingRefs.delete(`${id}:${ref.sourceSessionId}`)
+        this.statusCache = undefined
+        return refs
+      },
+      (error) => {
+        this.listFailures.set(
+          id,
+          error instanceof Error ? error.message : String(error),
+        )
+        this.statusCache = undefined
+        throw error
+      },
+    )
     this.refCache.set(id, { expiresAt: now + CACHE_WINDOW_MS, value })
     return value
   }
@@ -106,19 +157,30 @@ export class SourceRegistry {
         }
         if (!fresh) {
           const known = this.knownRefs.get(source.id)
-          return {
+          const listFailure = this.listFailures.get(source.id)
+          if (listFailure !== undefined) {
+            return {
+              ...status,
+              availability: 'degraded' as const,
+              sessionCount: known?.size ?? 0,
+              sessionCountState: 'ready' as const,
+              reason: 'list_failed',
+              detail: `会话列表读取失败：${listFailure}`,
+            }
+          }
+          return withListDiagnostics({
             ...status,
             sessionCount: known?.size ?? status.sessionCount,
             sessionCountState: known === undefined ? 'pending' as const : 'ready' as const,
-          }
+          }, this.listDiagnostics.get(source.id))
         }
         try {
           const refs = await this.refs(source.id, fresh)
-          return {
+          return withListDiagnostics({
             ...status,
             sessionCount: refs.length,
             sessionCountState: 'ready' as const,
-          }
+          }, this.listDiagnostics.get(source.id))
         } catch {
           return {
             ...status,
@@ -158,6 +220,7 @@ export class SourceRegistry {
         0,
       ),
       missingReferences: this.missingRefs.size,
+      sourceListFailures: this.listFailures.size,
       projectionWorker: this.projectionWorker?.metrics() ?? null,
       sources: Object.fromEntries([...this.sources].map(([id, source]) => [
         id,
@@ -237,7 +300,7 @@ export class SourceRegistry {
   async audit(
     source: SourceId,
     sourceSessionId: string,
-  ): Promise<readonly unknown[] | undefined> {
+  ): Promise<SourceAuditBundle | undefined> {
     const adapter = this.source(source)
     const ref = await this.ref(source, sourceSessionId)
     if (ref === undefined) return undefined
@@ -295,6 +358,27 @@ export function createSourceRegistry(paths: ResolvedSourcePaths): SourceRegistry
     new CodexSource({
       sessionsRoot: paths.codexSessionsDir,
       sessionIndexFile: paths.codexSessionIndex,
+      projectionWorker,
+    }),
+    new ClaudeCodeSource({
+      projectsRoot: paths.claudeProjectsDir,
+      projectionWorker,
+    }),
+    new DoubaoWorkSource({
+      sessionsRoot: paths.doubaoWorkSessionsDir,
+      projectionWorker,
+    }),
+    new WorkBuddySource({
+      database: paths.workbuddyDatabase,
+      projectsDir: paths.workbuddyProjectsDir,
+      projectionWorker,
+    }),
+    new QoderSource({
+      projectsRoot: paths.qoderProjectsDir,
+      projectionWorker,
+    }),
+    new OpenCodeSource({
+      database: paths.openCodeDatabase,
       projectionWorker,
     }),
     new ZcodeSource({

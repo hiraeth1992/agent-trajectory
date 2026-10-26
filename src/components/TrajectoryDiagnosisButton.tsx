@@ -67,7 +67,7 @@ export function TrajectoryDiagnosisButton({
         title={error}
       >
         {preparing
-          ? <LoaderCircle className="ai-loading" size={14} />
+          ? <LoaderCircle className="loading-spinner" size={14} />
           : <ScanSearch size={14} />}
         <span>本地 Agent 诊断</span>
       </button>

@@ -34,7 +34,16 @@ const dataset: AnnotationDatasetSummary = {
   requestedCases: 30,
   skippedCases: 0,
   allowPartial: false,
-  sources: { dsh: 10, codex: 10, zcode: 10 },
+  sources: {
+    dsh: 10,
+    codex: 10,
+    zcode: 10,
+    claude: 0,
+    'doubao-work': 0,
+    workbuddy: 0,
+    qoder: 0,
+    opencode: 0,
+  },
   splits: { calibration: 15, regression: 6, independent: 9 },
   privacyAuditPassed: true,
 }
@@ -174,10 +183,113 @@ describe('EvaluationCenter', () => {
     })).toBeTruthy()
   })
 
-  it('shows the evaluation workflow and independent reviewer progress', async () => {
+  it('enters an existing matching dataset when preparation reports a conflict', async () => {
+    let listed = false
     vi.stubGlobal('fetch', vi.fn(async (
       input: RequestInfo | URL,
       init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets' && init?.method === 'POST') {
+        listed = true
+        return response({
+          code: 'annotation_conflict',
+          error: 'evaluation dataset directory already exists: private-v1',
+        }, 409)
+      }
+      if (url === '/api/annotations/datasets') {
+        return response(listed ? [dataset] : [])
+      }
+      if (url.endsWith('/reviewer-a')) return response(overview('reviewer-a', 0))
+      if (url.endsWith('/reviewer-b')) return response(overview('reviewer-b', 0))
+      if (url.endsWith('/workflow')) return response(workflow)
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<EvaluationCenter onWorkspaceChange={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: '准备数据集' }))
+    fireEvent.change(screen.getByLabelText('目录标识'), {
+      target: { value: 'private-v1' },
+    })
+    fireEvent.change(screen.getByLabelText('数据集 ID'), {
+      target: { value: 'private-real' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: '确认并开始准备' }))
+
+    expect(await screen.findByRole('heading', { name: 'private-real' })).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(localStorage.getItem('trajectory.evaluationDataset')).toBe('private-v1')
+  })
+
+  it('prepares a new dataset version without replacing the current one', async () => {
+    const regenerated: AnnotationDatasetSummary = {
+      ...dataset,
+      directoryId: 'private-v2',
+      datasetVersion: '2',
+      datasetHash: 'b'.repeat(64),
+    }
+    let datasets = [dataset]
+    const requests: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets' && init?.method === 'POST') {
+        requests.push(JSON.parse(String(init.body)))
+        datasets = [dataset, regenerated]
+        return response({ dataset: regenerated, skipped: 0 }, 201)
+      }
+      if (url === '/api/annotations/datasets') return response(datasets)
+      if (url.endsWith('/reviewer-a')) return response(overview('reviewer-a', 0))
+      if (url.endsWith('/reviewer-b')) return response(overview('reviewer-b', 0))
+      if (url.endsWith('/workflow')) {
+        return response({
+          ...workflow,
+          datasetHash: url.includes('private-v2')
+            ? regenerated.datasetHash
+            : dataset.datasetHash,
+        })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<EvaluationCenter onWorkspaceChange={vi.fn()} />)
+    await screen.findByRole('heading', { name: 'private-real' })
+    fireEvent.click(screen.getByRole('button', { name: '重新准备' }))
+
+    expect(screen.getByRole('dialog', {
+      name: '重新准备真实轨迹评测数据集',
+    })).toBeTruthy()
+    expect((screen.getByLabelText('目录标识') as HTMLInputElement).value)
+      .toBe('private-v2')
+    expect((screen.getByLabelText('数据集 ID') as HTMLInputElement).value)
+      .toBe('private-real')
+    expect((screen.getByLabelText('版本') as HTMLInputElement).value).toBe('2')
+    expect((screen.getByLabelText('样本数') as HTMLInputElement).value).toBe('30')
+    expect(screen.getByText(/已有双标、裁决和 EvaluationRun 均会保留/)).toBeTruthy()
+    expect(screen.getByText(/新版本不会继承旧标注/)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '开始重新准备' }))
+
+    await waitFor(() => {
+      expect(localStorage.getItem('trajectory.evaluationDataset')).toBe('private-v2')
+      expect((screen.getByLabelText('数据集') as HTMLSelectElement).value)
+        .toBe('private-v2')
+    })
+    expect(requests).toEqual([{
+      directoryId: 'private-v2',
+      datasetId: 'private-real',
+      datasetVersion: '2',
+      count: 30,
+      allowPartial: false,
+    }])
+    expect(datasets).toEqual([dataset, regenerated])
+  })
+
+  it('shows the evaluation workflow and independent reviewer progress', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
     ) => {
       const url = String(input)
       if (url === '/api/annotations/datasets') return response([dataset])
@@ -216,7 +328,6 @@ describe('EvaluationCenter', () => {
   it('enters one locked reviewer workspace and returns to the center', async () => {
     vi.stubGlobal('fetch', vi.fn(async (
       input: RequestInfo | URL,
-      init?: RequestInit,
     ) => {
       const url = String(input)
       if (url === '/api/annotations/datasets') return response([dataset])

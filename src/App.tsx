@@ -60,6 +60,18 @@ interface SessionTarget {
   sessionId: string
 }
 
+function isLoadableSession(session: SessionSummary): boolean {
+  return session.formatStatus === undefined || session.formatStatus === 'current'
+}
+
+function formatStatusMessage(session: SessionSummary): string {
+  if (session.formatDetail !== undefined) return session.formatDetail
+  if (session.formatStatus === 'migration-required') return '该会话需要迁移适配器后才能读取。'
+  if (session.formatStatus === 'unsupported-future') return '该会话版本高于当前支持范围。'
+  if (session.formatStatus === 'corrupt') return '该会话文件损坏或格式不完整。'
+  return '该会话当前不可读取。'
+}
+
 export function workspaceFromLocation(
   location: Pick<Location, 'search'>,
 ): AppWorkspace {
@@ -187,7 +199,24 @@ export function App() {
   const loadSources = useCallback(async () => {
     const response = await fetch('/api/sources')
     if (!response.ok) throw new Error(`来源状态加载失败 (${response.status})`)
-    setSources(await response.json() as SourceStatus[])
+    const loaded = await response.json() as SourceStatus[]
+    setSources((current) => {
+      const currentBySource = new Map(current.map(status => [
+        status.source,
+        status,
+      ]))
+      return loaded.map((status) => {
+        const previous = currentBySource.get(status.source)
+        return status.sessionCountState !== 'ready'
+          && previous?.sessionCountState === 'ready'
+          ? {
+              ...status,
+              sessionCount: previous.sessionCount,
+              sessionCountState: previous.sessionCountState,
+            }
+          : status
+      })
+    })
   }, [])
 
   const loadSessions = useCallback(async (signal: AbortSignal) => {
@@ -214,20 +243,35 @@ export function App() {
       : result.find(session =>
           session.source === sessionTarget.source
           && session.sourceSessionId === sessionTarget.sessionId)
-    const loadable = (session: SessionSummary) =>
-      session.formatStatus === undefined || session.formatStatus === 'current'
     setWaitingForSession(sessionTarget !== undefined && targeted === undefined)
+    if (targeted !== undefined && !isLoadableSession(targeted)) {
+      setSessionKey('')
+      setDetail(undefined)
+      detailRef.current = undefined
+      detailRevision.current = undefined
+      setLoading(false)
+      return
+    }
+    if (sessionTarget === undefined && !result.some(isLoadableSession)) {
+      setSessionKey('')
+      setDetail(undefined)
+      detailRef.current = undefined
+      detailRevision.current = undefined
+      setLoading(false)
+      return
+    }
     setSessionKey((current) => {
       const remembered = selectedSessionByFilter.current[sourceFilter]
       const next = targeted?.id
         ?? (sessionTarget !== undefined
           ? ''
           : remembered !== undefined && result.some(session =>
-              session.id === remembered && loadable(session))
+              session.id === remembered && isLoadableSession(session))
             ? remembered
-            : result.some(session => session.id === current && loadable(session))
+            : result.some(session =>
+                session.id === current && isLoadableSession(session))
               ? current
-              : result.find(loadable)?.id ?? '')
+              : result.find(isLoadableSession)?.id ?? '')
       if (next !== '') selectedSessionByFilter.current[sourceFilter] = next
       return next
     })
@@ -235,7 +279,9 @@ export function App() {
       setDetail(undefined)
       setLoading(false)
     }
-  }, [sessionTarget, sourceFilter])
+    void loadSources().catch(caught =>
+      setError(caught instanceof Error ? caught.message : String(caught)))
+  }, [loadSources, sessionTarget, sourceFilter])
 
   const loadDetail = useCallback(async (source: SourceId, id: string, quiet = false) => {
     const key = `${source}:${id}`
@@ -464,7 +510,7 @@ export function App() {
       const remainingSessions = sessionsRef.current.filter(
         session => session.id !== currentSessionKey,
       )
-      const fallbackSessionKey = remainingSessions[0]?.id ?? ''
+      const fallbackSessionKey = remainingSessions.find(isLoadableSession)?.id ?? ''
       sessionsRef.current = remainingSessions
       setSessions(remainingSessions)
       setSessionKey(current =>
@@ -639,6 +685,18 @@ export function App() {
   const currentCapabilities = detail?.summary.capabilities
   const useActualDuration = actualDuration && currentCapabilities?.timing !== false
   const blockedSources = sources.filter(source => source.availability === 'blocked')
+  const targetedSession = sessionTarget === undefined
+    ? undefined
+    : sessions.find(session =>
+        session.source === sessionTarget.source
+        && session.sourceSessionId === sessionTarget.sessionId)
+  const unavailableSession = targetedSession !== undefined
+    && !isLoadableSession(targetedSession)
+    ? targetedSession
+    : sessionTarget === undefined
+      && !sessions.some(isLoadableSession)
+      ? sessions.find(session => !isLoadableSession(session))
+      : undefined
 
   if (workspaceMode === 'evaluation') {
     return <EvaluationCenter onWorkspaceChange={navigateWorkspace} />
@@ -850,7 +908,16 @@ export function App() {
       </section>}
 
       {error !== undefined && <div className="error-banner">{error}</div>}
-      {waitingForSession && sessionTarget !== undefined && detail === undefined
+      {unavailableSession !== undefined && detail === undefined
+        ? (
+            <StateView
+              className="session-page-state"
+              icon={<FileJson size={28} />}
+              title="该 Agent 会话当前不可读取"
+              description={formatStatusMessage(unavailableSession)}
+            />
+          )
+        : waitingForSession && sessionTarget !== undefined && detail === undefined
         ? (
             <StateView
               className="session-page-state"

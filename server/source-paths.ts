@@ -5,9 +5,14 @@ import path from 'node:path'
 const CONFIG_VERSION = 1
 
 export interface SourcePathOverrides {
+  claudeProjectsDir?: string
   codexHome?: string
   codexSessionsDir?: string
+  doubaoWorkSessionsDir?: string
   dshSessionsDir?: string
+  openCodeDatabase?: string
+  qoderProjectsDir?: string
+  workbuddyHome?: string
   zcodeDatabase?: string
 }
 
@@ -17,10 +22,17 @@ export interface AgentTrajectoryConfig {
 }
 
 export interface ResolvedSourcePaths {
+  claudeProjectsDir: string
   codexHome: string
   codexSessionIndex: string
   codexSessionsDir: string
+  doubaoWorkSessionsDir: string
   dshSessionsDir: string
+  openCodeDatabase: string
+  qoderProjectsDir: string
+  workbuddyDatabase: string
+  workbuddyHome: string
+  workbuddyProjectsDir: string
   zcodeDatabase: string
 }
 
@@ -41,12 +53,21 @@ function configuredString(value: unknown): string | undefined {
 function normalizedOverrides(value: unknown): SourcePathOverrides {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
   const source = value as Record<string, unknown>
-  return {
-    codexHome: configuredString(source.codexHome),
-    codexSessionsDir: configuredString(source.codexSessionsDir),
-    dshSessionsDir: configuredString(source.dshSessionsDir),
-    zcodeDatabase: configuredString(source.zcodeDatabase),
-  }
+  const entries = [
+    ['claudeProjectsDir', configuredString(source.claudeProjectsDir)],
+    ['codexHome', configuredString(source.codexHome)],
+    ['codexSessionsDir', configuredString(source.codexSessionsDir)],
+    ['doubaoWorkSessionsDir', configuredString(source.doubaoWorkSessionsDir)],
+    ['dshSessionsDir', configuredString(source.dshSessionsDir)],
+    ['openCodeDatabase', configuredString(source.openCodeDatabase)],
+    ['qoderProjectsDir', configuredString(source.qoderProjectsDir)],
+    ['workbuddyHome', configuredString(source.workbuddyHome)],
+    ['zcodeDatabase', configuredString(source.zcodeDatabase)],
+  ] as const
+  return Object.fromEntries(entries.filter((entry): entry is [
+    typeof entry[0],
+    string,
+  ] => entry[1] !== undefined))
 }
 
 function storedConfig(value: unknown): AgentTrajectoryConfig {
@@ -167,16 +188,59 @@ export function resolveSourcePaths(
     configuredString(environment.CODEX_SESSIONS_DIR),
     path.join(codexHome, 'sessions'),
   ), homeDirectory, configDirectory)
+  const workbuddyHome = expandPath(selected(
+    cli.workbuddyHome,
+    config.workbuddyHome,
+    configuredString(environment.WORKBUDDY_HOME),
+    path.join(homeDirectory, '.workbuddy'),
+  ), homeDirectory, configDirectory)
   return {
+    claudeProjectsDir: expandPath(selected(
+      cli.claudeProjectsDir,
+      config.claudeProjectsDir,
+      configuredString(environment.CLAUDE_PROJECTS_DIR),
+      path.join(homeDirectory, '.claude', 'projects'),
+    ), homeDirectory, configDirectory),
     codexHome,
     codexSessionIndex: path.join(codexHome, 'session_index.jsonl'),
     codexSessionsDir,
+    doubaoWorkSessionsDir: expandPath(selected(
+      cli.doubaoWorkSessionsDir,
+      config.doubaoWorkSessionsDir,
+      configuredString(environment.DOUBAO_WORK_SESSIONS_DIR),
+      path.join(
+        homeDirectory,
+        'Library',
+        'Application Support',
+        'DoubaoWork',
+        'Default',
+        '.doubaowork',
+        'agent_mode',
+        'workspace',
+        '.sessions',
+      ),
+    ), homeDirectory, configDirectory),
     dshSessionsDir: expandPath(selected(
       cli.dshSessionsDir,
       config.dshSessionsDir,
       configuredString(environment.DSH_SESSIONS_DIR),
       path.join(homeDirectory, '.dsh', 'sessions'),
     ), homeDirectory, configDirectory),
+    openCodeDatabase: expandPath(selected(
+      cli.openCodeDatabase,
+      config.openCodeDatabase,
+      configuredString(environment.OPENCODE_DB),
+      path.join(homeDirectory, '.local', 'share', 'opencode', 'opencode.db'),
+    ), homeDirectory, configDirectory),
+    qoderProjectsDir: expandPath(selected(
+      cli.qoderProjectsDir,
+      config.qoderProjectsDir,
+      configuredString(environment.QODER_PROJECTS_DIR),
+      path.join(homeDirectory, '.qoder-cn', 'projects'),
+    ), homeDirectory, configDirectory),
+    workbuddyDatabase: path.join(workbuddyHome, 'workbuddy.db'),
+    workbuddyHome,
+    workbuddyProjectsDir: path.join(workbuddyHome, 'projects'),
     zcodeDatabase: expandPath(selected(
       cli.zcodeDatabase,
       config.zcodeDatabase,

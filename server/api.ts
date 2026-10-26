@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   isSourceId,
@@ -12,7 +14,6 @@ import {
   type TransportSessionDetail,
   type TransportTrajectoryRecord,
 } from '../src/types'
-import type { AiSummaryGenerationEvent } from '../src/ai-summary-types'
 import type {
   AnnotationReviewer,
   AnnotationSaveRequest,
@@ -30,11 +31,8 @@ import { hasAllowedLocalRequest } from './security'
 import {
   SessionFormatError,
   sourceApplicationIcons,
+  type SourceAuditBundle,
 } from './sources/types'
-import {
-  SummaryRequestError,
-  type SummaryEngine,
-} from './summary/engine'
 import {
   AnnotationConflictError,
   AnnotationInputError,
@@ -56,7 +54,7 @@ export interface ApiRegistry {
   audit?(
     source: SourceId,
     sourceSessionId: string,
-  ): Promise<readonly unknown[] | undefined>
+  ): Promise<SourceAuditBundle | undefined>
 }
 
 export interface ApiOptions {
@@ -64,7 +62,6 @@ export interface ApiOptions {
   diagnosis?: TrajectoryDiagnosisService
   registry: ApiRegistry
   state?: ApiSessionState
-  summary?: SummaryEngine
   streamIntervalMs?: number
 }
 
@@ -99,11 +96,22 @@ async function sendSourceIcon(
 ): Promise<void> {
   for (const file of sourceApplicationIcons(source)) {
     try {
-      const body = await fs.readFile(file)
+      const extension = path.extname(file).toLowerCase()
+      const body = extension === '.icns'
+        ? await convertIcnsToPng(file)
+        : await fs.readFile(file)
+      const contentType = extension === '.svg'
+        ? 'image/svg+xml'
+        : extension === '.webp'
+          ? 'image/webp'
+          : 'image/png'
       response.writeHead(200, {
-        'Content-Type': path.extname(file) === '.svg' ? 'image/svg+xml' : 'image/png',
+        'Content-Type': contentType,
         'Content-Length': body.byteLength,
         'Cache-Control': 'private, max-age=3600',
+        ...(extension === '.svg'
+          ? { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" }
+          : {}),
         'X-Content-Type-Options': 'nosniff',
       })
       response.end(body)
@@ -113,6 +121,26 @@ async function sendSourceIcon(
     }
   }
   sendJson(response, 404, { error: 'source application icon unavailable' })
+}
+
+async function convertIcnsToPng(file: string): Promise<Buffer> {
+  const temporaryRoot = await fs.mkdtemp(
+    path.join(tmpdir(), 'agent-trajectory-source-icon-'),
+  )
+  const output = path.join(temporaryRoot, 'icon.png')
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        '/usr/bin/sips',
+        ['-s', 'format', 'png', file, '--out', output],
+        { timeout: 5_000, windowsHide: true },
+        error => error === null ? resolve() : reject(error),
+      )
+    })
+    return await fs.readFile(output)
+  } finally {
+    await fs.rm(temporaryRoot, { recursive: true, force: true }).catch(() => {})
+  }
 }
 
 function sendDownloadJson(
@@ -802,185 +830,6 @@ async function routeApi(
     }
     return true
   }
-  if (url.pathname === '/api/summary/settings') {
-    if (options.summary === undefined) {
-      sendJson(response, 503, { error: 'AI summary is unavailable' })
-      return true
-    }
-    if (request.method === 'GET') {
-      sendJson(response, 200, await options.summary.readSettings())
-      return true
-    }
-    if (request.method === 'PUT') {
-      sendJson(response, 200, await options.summary.updateSettings(
-        await readJsonBody(request),
-      ))
-      return true
-    }
-    sendJson(response, 405, { error: 'method not allowed' })
-    return true
-  }
-  if (url.pathname === '/api/summary/models') {
-    if (options.summary === undefined) {
-      sendJson(response, 503, { error: 'AI summary is unavailable' })
-      return true
-    }
-    if (request.method === 'DELETE') {
-      sendJson(response, 200, await options.summary.removeModel(
-        await readJsonBody(request),
-      ))
-      return true
-    }
-    sendJson(response, 405, { error: 'method not allowed' })
-    return true
-  }
-  if (url.pathname === '/api/summary/models/restore') {
-    if (options.summary === undefined) {
-      sendJson(response, 503, { error: 'AI summary is unavailable' })
-      return true
-    }
-    if (request.method === 'POST') {
-      sendJson(response, 200, await options.summary.restoreModel(
-        await readJsonBody(request),
-      ))
-      return true
-    }
-    sendJson(response, 405, { error: 'method not allowed' })
-    return true
-  }
-  const credentialMatch = url.pathname.match(/^\/api\/summary\/adapters\/([^/]+)\/credential$/)
-  if (credentialMatch !== null) {
-    if (options.summary === undefined) {
-      sendJson(response, 503, { error: 'AI summary is unavailable' })
-      return true
-    }
-    const adapterId = decodePathSegment(credentialMatch[1])
-    if (adapterId === undefined) {
-      sendJson(response, 400, { error: 'invalid path encoding' })
-      return true
-    }
-    if (request.method !== 'PUT' && request.method !== 'DELETE') {
-      sendJson(response, 405, { error: 'method not allowed' })
-      return true
-    }
-    const body = request.method === 'PUT'
-      ? await readJsonBody(request) as Record<string, unknown>
-      : {}
-    const key = typeof body.apiKey === 'string' ? body.apiKey : undefined
-    if (request.method === 'PUT' && key === undefined) {
-      throw new HttpError('missing apiKey', 400, 'invalid_summary_credential')
-    }
-    await options.summary.setCredential(adapterId, request.method === 'DELETE' ? undefined : key)
-    sendJson(response, 200, { ok: true })
-    return true
-  }
-  const summaryMatch = url.pathname.match(
-    /^\/api\/sessions\/([^/]+)\/([^/]+)\/ai-summary(?:\/(preview|generate|generate-stream))?$/,
-  )
-  if (summaryMatch !== null) {
-    if (options.summary === undefined) {
-      sendJson(response, 503, { error: 'AI summary is unavailable' })
-      return true
-    }
-    const decodedSource = decodePathSegment(summaryMatch[1])
-    const id = decodePathSegment(summaryMatch[2])
-    const action = summaryMatch[3]
-    if (decodedSource === undefined || id === undefined) {
-      sendJson(response, 400, { error: 'invalid path encoding' })
-      return true
-    }
-    const source = sourceId(decodedSource)
-    if (source === undefined) {
-      sendJson(response, 400, { error: 'invalid source' })
-      return true
-    }
-    if (action === undefined && request.method === 'GET') {
-      sendJson(response, 200, await options.summary.options(source, id))
-      return true
-    }
-    if (action === 'preview' && request.method === 'GET') {
-      const modules = url.searchParams.getAll('module')
-      sendJson(response, 200, await options.summary.preview(
-        source,
-        id,
-        modules.length === 0 ? undefined : modules,
-      ))
-      return true
-    }
-    if ((action === 'generate' || action === 'generate-stream')
-      && request.method === 'POST') {
-      const body = await readJsonBody(request) as Record<string, unknown>
-      const adapterId = typeof body.adapterId === 'string' ? body.adapterId : undefined
-      const model = typeof body.model === 'string' ? body.model : undefined
-      const modules = Array.isArray(body.modules) ? body.modules : undefined
-      if (adapterId === undefined || model === undefined || modules === undefined) {
-        sendJson(response, 400, { error: 'missing adapterId, model, or modules' })
-        return true
-      }
-      const controller = new AbortController()
-      const abort = () => controller.abort()
-      request.once('aborted', abort)
-      response.once('close', abort)
-      try {
-        if (action === 'generate-stream') {
-          response.writeHead(200, {
-            'Content-Type': 'application/x-ndjson; charset=utf-8',
-            'Cache-Control': 'no-store',
-            'X-Content-Type-Options': 'nosniff',
-          })
-        }
-        const sendEvent = action === 'generate-stream'
-          ? (event: AiSummaryGenerationEvent) => {
-              if (!response.destroyed && !response.writableEnded) {
-                response.write(`${JSON.stringify(event)}\n`)
-              }
-            }
-          : undefined
-        const generateRequest = {
-          adapterId,
-          model,
-          remember: body.remember !== false,
-          modules,
-        }
-        const summary = sendEvent === undefined
-          ? await options.summary.generate(
-              source,
-              id,
-              generateRequest,
-              controller.signal,
-            )
-          : await options.summary.generate(
-              source,
-              id,
-              generateRequest,
-              controller.signal,
-              progress => sendEvent({ type: 'progress', ...progress }),
-            )
-        if (!controller.signal.aborted) {
-          if (sendEvent === undefined) sendJson(response, 200, summary)
-          else {
-            sendEvent({ type: 'result', summary })
-            response.end()
-          }
-        }
-      } catch (error) {
-        if (action !== 'generate-stream') throw error
-        if (!controller.signal.aborted) {
-          response.write(`${JSON.stringify({
-            type: 'error',
-            error: error instanceof Error ? error.message : String(error),
-          } satisfies AiSummaryGenerationEvent)}\n`)
-          response.end()
-        }
-      } finally {
-        request.off('aborted', abort)
-        response.off('close', abort)
-      }
-      return true
-    }
-    sendJson(response, 405, { error: 'method not allowed' })
-    return true
-  }
   const rawMatch = url.pathname.match(
     /^\/api\/sessions\/([^/]+)\/([^/]+)\/records\/([^/]+)\/raw$/,
   )
@@ -1022,13 +871,24 @@ async function routeApi(
     if (detail === undefined) {
       sendJson(response, 404, { error: 'session not found' })
     } else {
-      const sourceEvents = await options.registry.audit?.(source, id)
+      const audit = await options.registry.audit?.(source, id)
+      const auditMetadata = audit === undefined
+        ? {
+            completeness: 'partial' as const,
+            omitted: ['source audit adapter unavailable'],
+          }
+        : {
+            completeness: audit.completeness,
+            reconstruction: audit.reconstruction,
+            omitted: audit.omitted,
+          }
       sendDownloadJson(response, downloadFilename(source, id), {
         format: 'agent-trajectory-audit',
-        version: 2,
-        complete: sourceEvents !== undefined,
+        version: 3,
+        complete: audit?.completeness === 'complete',
         detail: auditDetail(detail),
-        sourceEvents: redactSensitive(sourceEvents ?? []),
+        sourceEvents: redactSensitive(audit?.events ?? []),
+        audit: redactSensitive(auditMetadata),
       })
     }
     return true
@@ -1156,14 +1016,6 @@ export async function handleApi(
     }
     if (error instanceof SessionFormatError) {
       sendError(response, 409, new HttpError(error.message, 409, error.code))
-      return true
-    }
-    if (error instanceof SummaryRequestError) {
-      sendError(
-        response,
-        error.status,
-        new HttpError(error.message, error.status, error.code),
-      )
       return true
     }
     throw error

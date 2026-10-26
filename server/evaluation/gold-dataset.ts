@@ -29,6 +29,11 @@ const SOURCE_CAPABILITIES: Record<SourceId, SourceCapabilities> = {
   ),
   codex: capabilities('messages', 'tools', 'timing', 'usage', 'live'),
   zcode: capabilities('messages', 'tools', 'timing', 'usage', 'live', 'trace', 'policy'),
+  claude: capabilities(),
+  'doubao-work': capabilities(),
+  workbuddy: capabilities(),
+  qoder: capabilities(),
+  opencode: capabilities(),
 }
 
 function summary(source: SourceId, caseId: string): SessionSummary {
@@ -134,8 +139,19 @@ function detail(
       startTime: Math.min(...records.map(item => item.startTime)),
       endTime: Math.max(...records.map(item => item.endTime ?? item.startTime)),
       eventCount: records.length,
-      eventTypeCounts: {},
+      eventTypeCounts: { record: records.length },
       unknownEventTypes: [],
+      coverage: [{
+        type: 'record',
+        total: records.length,
+        consumed: records.length,
+        disposition: 'record',
+      }],
+      coverageSummary: {
+        total: records.length,
+        consumed: records.length,
+        gap: 0,
+      },
       turnEnds: Object.fromEntries(turnNumbers.map(number => [
         number,
         { time: number * 1_000 + 900, reason: 'complete' },
@@ -449,6 +465,3 @@ export const SYNTHETIC_CONTRACT_DATASET = createEvaluationDataset({
   goldCompleteness: 'partial-contract',
   cases,
 })
-
-/** @deprecated Use SYNTHETIC_CONTRACT_DATASET. */
-export const MINIMAL_GOLD_DATASET = SYNTHETIC_CONTRACT_DATASET

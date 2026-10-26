@@ -17,6 +17,31 @@ afterEach(async () => {
 })
 
 describe('evaluate command', () => {
+  it('parses first-batch source path overrides without changing the command', () => {
+    expect(parseCliArguments([
+      'doctor',
+      '--claude-projects-dir',
+      './claude-projects',
+      '--doubao-work-sessions-dir',
+      './doubao-sessions',
+      '--workbuddy-home',
+      './workbuddy',
+      '--qoder-projects-dir',
+      './qoder-projects',
+      '--opencode-db',
+      './opencode.db',
+    ])).toMatchObject({
+      command: 'doctor',
+      sourcePaths: {
+        claudeProjectsDir: './claude-projects',
+        doubaoWorkSessionsDir: './doubao-sessions',
+        workbuddyHome: './workbuddy',
+        qoderProjectsDir: './qoder-projects',
+        openCodeDatabase: './opencode.db',
+      },
+    })
+  })
+
   it('parses evaluation paths outside source configuration', () => {
     const parsed = parseCliArguments([
       'evaluate',

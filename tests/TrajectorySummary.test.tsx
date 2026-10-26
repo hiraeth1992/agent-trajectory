@@ -381,8 +381,6 @@ describe('TrajectorySummary diagnosis entry', () => {
     const diagnosis = screen.getByRole('button', { name: '本地 Agent 诊断' })
     expect(outcome?.contains(diagnosis)).toBe(true)
     expect(diagnosis.querySelector('svg')).not.toBeNull()
-    expect(screen.queryByRole('combobox', { name: '选择增强模型' })).toBeNull()
-    expect(screen.queryByRole('button', { name: /重算范围/ })).toBeNull()
 
     fireEvent.click(diagnosis)
 
@@ -412,7 +410,6 @@ describe('TrajectorySummary optimization panel', () => {
       title: '为参数错误增加重试前检查',
       priority: 'high',
       confidence: 'high',
-      source: 'local',
       measures: ['code', 'hook'],
       effort: 'low',
       observation: '观察到相同参数错误重复出现。',

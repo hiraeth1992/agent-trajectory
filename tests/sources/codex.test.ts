@@ -80,6 +80,29 @@ describe('Codex JSONL parser', () => {
 })
 
 describe('Codex projector', () => {
+  it('reports a known but unprojected world-state event as a coverage gap', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'session_meta', { id: 'session-coverage' }),
+      row(1, 'world_state', {
+        turn_id: 'turn-1',
+        workspace_changes: ['src/example.ts'],
+      }),
+    ])
+
+    expect(projection.unknownEventTypes).toEqual([])
+    expect(projection.coverage).toContainEqual(expect.objectContaining({
+      type: 'world_state',
+      total: 1,
+      consumed: 0,
+      disposition: 'unsupported',
+    }))
+    expect(projection.coverageSummary).toEqual({
+      total: 2,
+      consumed: 1,
+      gap: 1,
+    })
+  })
+
   it('classifies platform context separately from human messages', () => {
     const turnId = 'turn-context'
     const message = (

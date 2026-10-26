@@ -7,6 +7,10 @@ import type {
   TrajectoryRecord,
 } from '../../src/types'
 import {
+  projectedSourceEventIds,
+  projectionCoverage,
+} from '../../src/projection-coverage'
+import {
   asFiniteNumber as number,
   asJsonObject as object,
   asString as string,
@@ -497,6 +501,8 @@ export function projectZcodeTrajectory(input: ZcodeProjectionInput): TrajectoryP
   input.modelUsage.forEach(usage => count(`model_usage/${usage.status}`))
   input.toolUsage.forEach(usage => count(`tool_usage/${usage.status}`))
   input.turnUsage.forEach(usage => count(`turn_usage/${usage.status}`))
+  if (input.target !== undefined) count('session_target')
+  ;(input.todos ?? []).forEach(() => count('todo'))
   const unknownEventTypes = [...new Set(input.parts.flatMap((part) => {
     const type = string(part.data.type) ?? 'unknown'
     return KNOWN_PART_TYPES.has(type) ? [] : [type]
@@ -550,6 +556,63 @@ export function projectZcodeTrajectory(input: ZcodeProjectionInput): TrajectoryP
   const latestModelRecord = latestModelUsage.find(row => row.model_id !== '')
   const latestProviderRecord = latestModelRecord
     ?? latestModelUsage.find(row => row.provider_id !== '')
+  const eventCount = input.messages.length
+    + input.parts.length
+    + input.modelUsage.length
+    + input.toolUsage.length
+    + input.turnUsage.length
+    + (input.target === undefined ? 0 : 1)
+    + (input.todos?.length ?? 0)
+  const projectedEvents = projectedSourceEventIds(records)
+  const coverage = projectionCoverage(eventTypeCounts, eventCount, (type) => {
+    if (type === 'message/user' || type === 'message/assistant') {
+      return {
+        disposition: 'record',
+        consumed: input.messages.filter(message =>
+          `message/${string(message.data.role) ?? 'unknown'}` === type
+          && projectedEvents.has(message.id)).length,
+      }
+    }
+    if (type === 'part/text' || type === 'part/reasoning' || type === 'part/tool') {
+      return {
+        disposition: 'record',
+        consumed: input.parts.filter(part =>
+          `part/${string(part.data.type) ?? 'unknown'}` === type
+          && projectedEvents.has(part.id)).length,
+      }
+    }
+    if (type.startsWith('model_usage/')) {
+      return {
+        disposition: 'folded-state',
+        consumed: input.modelUsage.filter(usage =>
+          `model_usage/${usage.status}` === type
+          && projectedEvents.has(usage.id)).length,
+      }
+    }
+    if (type.startsWith('tool_usage/')) {
+      return {
+        disposition: 'folded-state',
+        consumed: input.toolUsage.filter(usage =>
+          `tool_usage/${usage.status}` === type
+          && projectedEvents.has(usage.id)).length,
+      }
+    }
+    if (type.startsWith('turn_usage/')
+      || type === 'session_target' || type === 'todo') {
+      return { disposition: 'folded-state' }
+    }
+    if (type === 'part/step-start' || type === 'part/step-finish'
+      || type === 'part/timeline') {
+      return {
+        disposition: 'raw-only',
+        reason: 'timeline metadata is retained for audit but has no visible record',
+      }
+    }
+    return {
+      disposition: 'unsupported',
+      reason: 'ZCode fact type does not have a semantic projector',
+    }
+  })
   return {
     header: {
       source: 'zcode',
@@ -572,13 +635,10 @@ export function projectZcodeTrajectory(input: ZcodeProjectionInput): TrajectoryP
     ],
     startTime,
     endTime,
-    eventCount: input.messages.length
-      + input.parts.length
-      + input.modelUsage.length
-      + input.toolUsage.length
-      + input.turnUsage.length,
+    eventCount,
     eventTypeCounts,
     unknownEventTypes,
+    ...coverage,
     taskState: input.target === undefined && (input.todos?.length ?? 0) === 0
       ? undefined
       : {

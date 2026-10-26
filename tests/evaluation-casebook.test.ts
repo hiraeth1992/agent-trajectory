@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { EvaluationCasebookStore } from '../server/evaluation/casebook'
-import { MINIMAL_GOLD_DATASET } from '../server/evaluation/gold-dataset'
+import { SYNTHETIC_CONTRACT_DATASET } from '../server/evaluation/gold-dataset'
 import { runEvaluationDataset } from '../server/evaluation/runner'
 
 const roots: string[] = []
@@ -18,7 +18,7 @@ describe('evaluation badcase casebook', () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-casebook-'))
     roots.push(root)
     const store = new EvaluationCasebookStore(path.join(root, 'casebook.json'))
-    const baseline = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const baseline = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
     const failing = structuredClone(baseline)
@@ -91,7 +91,7 @@ describe('evaluation badcase casebook', () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-casebook-'))
     roots.push(root)
     const store = new EvaluationCasebookStore(path.join(root, 'casebook.json'))
-    const passing = runEvaluationDataset(MINIMAL_GOLD_DATASET, {
+    const passing = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
       createdAt: '2026-10-25T00:00:00.000Z',
     })
     const failing = structuredClone(passing)
@@ -126,5 +126,38 @@ describe('evaluation badcase casebook', () => {
       status: 'resolved',
       lastSeenRunId: 'passing-run',
     })
+  })
+
+  it('serializes read-modify-write transactions across store instances', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-casebook-'))
+    roots.push(root)
+    const file = path.join(root, 'casebook.json')
+    const left = new EvaluationCasebookStore(file)
+    const right = new EvaluationCasebookStore(file)
+    const baseline = runEvaluationDataset(SYNTHETIC_CONTRACT_DATASET, {
+      createdAt: '2026-10-25T00:00:00.000Z',
+    })
+    const failing = (caseIndex: number, runId: string) => {
+      const run = structuredClone(baseline)
+      run.runId = runId
+      run.cases = [run.cases[caseIndex]!]
+      run.cases[0]!.mismatches = [{
+        criterionId: 'outcome',
+        expected: 'pass',
+        actual: 'fail',
+      }]
+      return run
+    }
+
+    await Promise.all([
+      left.syncRun(failing(0, 'concurrent-left')),
+      right.syncRun(failing(1, 'concurrent-right')),
+    ])
+
+    const stored = await left.read()
+    expect(new Set(stored.entries.map(entry => entry.caseId))).toEqual(new Set([
+      baseline.cases[0]!.caseId,
+      baseline.cases[1]!.caseId,
+    ]))
   })
 })

@@ -6,14 +6,12 @@ import {
   Lightbulb,
   LocateFixed,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
-  AiOptimization,
   OptimizationExecutionAction,
   OptimizationMeasure,
   OptimizationSuggestion,
 } from '../trajectory-optimization'
-import { mergeOptimizationSuggestions } from '../trajectory-optimization'
 import type { TrajectoryAnalysis } from '../trajectory-analysis'
 
 const MEASURE_LABELS: Record<OptimizationMeasure, string> = {
@@ -51,28 +49,12 @@ function executionActionText(action: OptimizationExecutionAction): string {
 
 export function OptimizationPanel({
   analysis,
-  aiOptimizations,
-  aiCurrent,
   onOpenRecord,
 }: {
   analysis: TrajectoryAnalysis
-  aiOptimizations?: AiOptimization[]
-  aiCurrent: boolean
   onOpenRecord: (recordId: string) => void
 }) {
-  const local = analysis.optimizations ?? []
-  const evidence = useMemo(() => analysis.steps.flatMap(step =>
-    step.recordIds.map(recordId => ({
-      recordId,
-      turn: step.turn,
-      step: step.step,
-    }))), [analysis.steps])
-  const suggestions = useMemo(
-    () => aiCurrent && aiOptimizations !== undefined
-      ? mergeOptimizationSuggestions(local, aiOptimizations, evidence)
-      : local,
-    [aiCurrent, aiOptimizations, evidence, local],
-  )
+  const suggestions = analysis.optimizations ?? []
   const [showAll, setShowAll] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const [copiedAction, setCopiedAction] = useState<string>()
@@ -146,7 +128,6 @@ export function OptimizationPanel({
                             <i key={measure}>{MEASURE_LABELS[measure]}</i>
                           ))}
                           <i>{confidenceLabel(item.confidence)}</i>
-                          {item.source === 'ai' && <i>AI 深化</i>}
                         </span>
                       </span>
                       {open ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
@@ -232,9 +213,6 @@ export function OptimizationPanel({
               )}
             </div>
           )}
-      {aiOptimizations !== undefined && !aiCurrent && (
-        <div className="optimization-stale">会话已更新，AI 建议已过期；当前展示本地建议。</div>
-      )}
     </section>
   )
 }

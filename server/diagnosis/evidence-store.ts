@@ -11,7 +11,7 @@ import type {
   SessionDetail,
   TransportSessionDetail,
 } from '../../src/types'
-import { writePrivateJson } from '../summary/file-transaction'
+import { writePrivateJson } from '../file-transaction'
 
 const SNAPSHOT_SCHEMA_VERSION = 1
 const SNAPSHOT_FILE = /^[A-Za-z0-9_-]{20,80}\.json$/

@@ -15,6 +15,26 @@ import {
   type CodexEnvelope,
 } from './projectors/codex'
 import {
+  projectClaudeCodeTrajectory,
+  type ClaudeCodeEnvelope,
+} from './projectors/claude-code'
+import {
+  projectDoubaoWorkTrajectory,
+  type DoubaoWorkProjectionInput,
+} from './projectors/doubao-work'
+import {
+  projectOpenCodeTrajectory,
+  type OpenCodeProjectionInput,
+} from './projectors/opencode'
+import {
+  projectQoderTrajectory,
+  type QoderProjectionInput,
+} from './projectors/qoder'
+import {
+  projectWorkBuddyTrajectory,
+  type WorkBuddyProjectionInput,
+} from './projectors/workbuddy'
+import {
   projectZcodeTrajectory,
   type ZcodeProjectionInput,
 } from './projectors/zcode'
@@ -31,6 +51,11 @@ interface ProjectionRequest {
   header?: SessionHeader
   events?: SessionEvent[]
   envelopes?: CodexEnvelope[]
+  claudeEnvelopes?: ClaudeCodeEnvelope[]
+  doubaoWork?: DoubaoWorkProjectionInput
+  opencode?: OpenCodeProjectionInput
+  qoder?: QoderProjectionInput
+  workbuddy?: WorkBuddyProjectionInput
   zcode?: ZcodeProjectionInput
 }
 
@@ -141,6 +166,36 @@ function codexProjection(request: ProjectionRequest): TrajectoryProjection | und
 function project(request: ProjectionRequest): TrajectoryProjection | undefined {
   if (request.source === 'dsh') return dshProjection(request)
   if (request.source === 'codex') return codexProjection(request)
+  if (request.source === 'claude') {
+    if (request.claudeEnvelopes === undefined) {
+      throw new Error('invalid Claude Code projection request')
+    }
+    return projectClaudeCodeTrajectory(request.claudeEnvelopes)
+  }
+  if (request.source === 'doubao-work') {
+    if (request.doubaoWork === undefined) {
+      throw new Error('invalid Doubao Work projection request')
+    }
+    return projectDoubaoWorkTrajectory(request.doubaoWork)
+  }
+  if (request.source === 'workbuddy') {
+    if (request.workbuddy === undefined) {
+      throw new Error('invalid WorkBuddy projection request')
+    }
+    return projectWorkBuddyTrajectory(request.workbuddy)
+  }
+  if (request.source === 'qoder') {
+    if (request.qoder === undefined) {
+      throw new Error('invalid Qoder projection request')
+    }
+    return projectQoderTrajectory(request.qoder)
+  }
+  if (request.source === 'opencode') {
+    if (request.opencode === undefined) {
+      throw new Error('invalid OpenCode projection request')
+    }
+    return projectOpenCodeTrajectory(request.opencode)
+  }
   if (request.zcode === undefined) throw new Error('invalid ZCode projection request')
   return projectZcodeTrajectory(request.zcode)
 }

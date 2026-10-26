@@ -83,8 +83,21 @@ function detail(records: TrajectoryRecord[]): SessionDetail {
       startTime: 1_000,
       endTime: 7_000,
       eventCount: records.length,
-      eventTypeCounts: {},
+      eventTypeCounts: { record: records.length },
       unknownEventTypes: [],
+      coverage: records.length === 0
+        ? []
+        : [{
+            type: 'record',
+            total: records.length,
+            consumed: records.length,
+            disposition: 'record',
+          }],
+      coverageSummary: {
+        total: records.length,
+        consumed: records.length,
+        gap: 0,
+      },
       turnEnds: Object.fromEntries(turnNumbers.map(number => [
         number,
         { time: number * 1_000 + 500, reason: 'complete' },
@@ -117,6 +130,56 @@ const status: SourceStatus = {
 }
 
 describe('trajectory evaluation contract', () => {
+  it('fails closed when a non-empty projection omits its coverage ledger', () => {
+    const value = detail([record('tool-coverage')])
+    delete value.projection.coverage
+    delete value.projection.coverageSummary
+
+    const report = buildFactsQualityReport(value, {
+      target,
+      sourceStatus: status,
+    })
+
+    expect(report.ready).toBe(false)
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      id: 'projection-coverage-incomplete',
+      severity: 'blocking',
+      affectedCriterionIds: expect.arrayContaining([
+        'outcome',
+        'reliability',
+        'recovery',
+        'efficiency',
+        'observability',
+      ]),
+    }))
+  })
+
+  it('blocks evaluation when a record event is present but not projected', () => {
+    const value = detail([record('tool-coverage-gap')])
+    value.projection.coverage = [{
+      type: 'tool',
+      total: 1,
+      consumed: 0,
+      disposition: 'record',
+    }]
+    value.projection.coverageSummary = {
+      total: 1,
+      consumed: 0,
+      gap: 1,
+    }
+
+    const report = buildFactsQualityReport(value, {
+      target,
+      sourceStatus: status,
+    })
+
+    expect(report.ready).toBe(false)
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      id: 'coverage-gap:tool',
+      severity: 'blocking',
+    }))
+  })
+
   it('maps local analysis into versioned verdicts with isolated denominators', () => {
     const value = detail([
       record('user-1', {
@@ -139,11 +202,11 @@ describe('trajectory evaluation contract', () => {
       schemaVersion: 1,
       evaluatorId: 'local-trajectory',
       evaluatorVersion: '1',
-      factsSchemaVersion: 3,
+      factsSchemaVersion: 4,
       target,
       factsQuality: {
-        schemaVersion: 3,
-        coveragePolicyVersion: 2,
+        schemaVersion: 4,
+        coveragePolicyVersion: 3,
         ready: true,
       },
     })
@@ -279,7 +342,7 @@ describe('trajectory evaluation contract', () => {
     })
     expect(evaluation.factsQuality).toMatchObject({
       ready: false,
-      coveragePolicyVersion: 2,
+      coveragePolicyVersion: 3,
       stats: {
         coverageTotal: 3,
         coverageConsumed: 1,

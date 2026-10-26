@@ -8,6 +8,10 @@ import type {
   TrajectoryTurnSummary,
 } from '../../src/types'
 import {
+  projectedSourceEventIds,
+  projectionCoverage,
+} from '../../src/projection-coverage'
+import {
   asArray as array,
   asFiniteNumber as number,
   asJsonObject as object,
@@ -724,6 +728,42 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
   const latestModel = [...turns.values()]
     .reverse()
     .find(turn => turn.model !== undefined)?.model
+  const projectedEvents = projectedSourceEventIds(records)
+  const coverage = projectionCoverage(eventTypeCounts, sorted.length, (type) => {
+    if (type === 'session_meta' || type === 'turn_context'
+      || type === 'token_usage_record') {
+      return { disposition: 'folded-state' }
+    }
+    if (type === 'response_item/message'
+      || type === 'response_item/reasoning'
+      || type === 'response_item/function_call'
+      || type === 'response_item/function_call_output'
+      || type === 'response_item/custom_tool_call'
+      || type === 'response_item/custom_tool_call_output'
+      || type === 'event_msg/item_completed') {
+      return {
+        disposition: 'record',
+        consumed: sorted.filter((envelope) => {
+          const selected = `${envelope.type ?? 'unknown'}${
+            typeof envelope.payload.type === 'string'
+              ? `/${envelope.payload.type}`
+              : ''
+          }`
+          return selected === type
+            && projectedEvents.has(envelopeSourceId(envelope))
+        }).length,
+      }
+    }
+    if (type === 'event_msg/task_started'
+      || type === 'event_msg/task_complete'
+      || type === 'event_msg/turn_aborted') {
+      return { disposition: 'folded-state' }
+    }
+    return {
+      disposition: 'unsupported',
+      reason: 'Codex event or payload type does not have a semantic projector',
+    }
+  })
 
   return {
     header: {
@@ -748,6 +788,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     eventCount: sorted.length,
     eventTypeCounts,
     unknownEventTypes: [...unknownEventTypes].sort(),
+    ...coverage,
     turnEnds: Object.fromEntries([...turns.values()]
       .filter(turn => turn.completedAt !== undefined)
       .map(turn => [turn.number, {

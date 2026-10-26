@@ -8,7 +8,7 @@ import type {
   BadcaseRetestOutcome,
   EvaluationRun,
 } from '../../src/evaluation-types'
-import { SerialTransaction, writePrivateJson } from '../summary/file-transaction'
+import { runFileTransaction, writePrivateJson } from '../file-transaction'
 
 const ENTRY_ID = /^[a-f0-9]{24}$/
 const MAX_NOTE_LENGTH = 2_000
@@ -88,12 +88,10 @@ function retestOutcome(
 }
 
 export class EvaluationCasebookStore {
-  private readonly transaction = new SerialTransaction()
-
   constructor(private readonly file: string) {}
 
   async read(): Promise<BadcaseCasebook> {
-    return this.transaction.run(async () => this.readUnlocked())
+    return runFileTransaction(this.file, async () => this.readUnlocked())
   }
 
   private async readUnlocked(): Promise<BadcaseCasebook> {
@@ -108,7 +106,7 @@ export class EvaluationCasebookStore {
   }
 
   async syncRun(run: EvaluationRun): Promise<BadcaseCasebook> {
-    return this.transaction.run(async () => {
+    return runFileTransaction(this.file, async () => {
       const current = await this.readUnlocked()
       const observed = observedSubjects(run)
       const now = run.createdAt
@@ -181,7 +179,7 @@ export class EvaluationCasebookStore {
     if (selectedNote !== undefined && selectedNote.length > MAX_NOTE_LENGTH) {
       throw new Error(`badcase decision note exceeds ${MAX_NOTE_LENGTH} characters`)
     }
-    return this.transaction.run(async () => {
+    return runFileTransaction(this.file, async () => {
       const current = await this.readUnlocked()
       const entry = current.entries.find(candidate => candidate.id === id)
       if (entry === undefined) throw new Error('badcase entry not found')
@@ -201,7 +199,7 @@ export class EvaluationCasebookStore {
     run: EvaluationRun,
   ): Promise<BadcaseCasebook> {
     if (!ENTRY_ID.test(id)) throw new Error('invalid badcase entry id')
-    return this.transaction.run(async () => {
+    return runFileTransaction(this.file, async () => {
       const current = await this.readUnlocked()
       const entry = current.entries.find(candidate => candidate.id === id)
       if (entry === undefined) throw new Error('badcase entry not found')

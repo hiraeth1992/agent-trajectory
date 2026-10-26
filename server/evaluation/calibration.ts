@@ -21,7 +21,6 @@ import type {
   RequirementState,
 } from '../../src/evaluation-types'
 import { recordSearchText, redactSensitive } from '../../src/projector-utils'
-import { analyzeTrajectory } from '../../src/trajectory-analysis'
 import {
   isSourceId,
   type SessionDetail,
@@ -31,7 +30,7 @@ import {
   type TransportTrajectoryRecord,
   type TrajectoryRecord,
 } from '../../src/types'
-import { writePrivateJson } from '../summary/file-transaction'
+import { writePrivateJson } from '../file-transaction'
 import { createEvaluationDataset } from './identity'
 import {
   candidateGroupKey,
@@ -57,6 +56,10 @@ const RECORD_ID = /^record-\d{3,}$/
 const PRIVACY_AUDIT_VERSION = 2
 const PRIVACY_AUDITOR_ID = 'agent-trajectory-calibration-privacy'
 const PRIVACY_AUDITOR_VERSION = '2'
+const SUPPORTED_SAMPLING_POLICY_VERSIONS = new Set([
+  2,
+  SAMPLING_POLICY_VERSION,
+])
 const VERDICTS = new Set<EvaluationVerdict>([
   'pass',
   'fail',
@@ -226,12 +229,32 @@ function hasHomePathShape(value: string): boolean {
       .test(value)
 }
 
-function hasCredentialShape(value: string): boolean {
+function stringHasCredentialShape(value: string): boolean {
   if (/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g
     .test(value)) return true
+  if ([...value.matchAll(
+    /\bAuthorization\s*:\s*(?:Basic|Bearer)\s+([^\s"',}\]]+)/gi,
+  )].some(match => !match[1]!.startsWith('<redacted>'))) return true
   return [...value.matchAll(
-    /\bAuthorization\s*:\s*(?:(?:Basic|Bearer)\s+)?([^\s"',}\]]+)/gi,
-  )].some(match => match[1] !== '<redacted>')
+    /\bAuthorization\s*:\s*([A-Za-z0-9._~+/=-]{16,})/gi,
+  )].some(match => !match[1]!.startsWith('<redacted>'))
+}
+
+function hasCredentialShape(value: unknown, key = ''): boolean {
+  if (/password|passwd|secret|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie/i
+    .test(key) || /^token$/i.test(key)) {
+    return value !== '<redacted>'
+      && value !== undefined
+      && value !== null
+  }
+  if (typeof value === 'string') return stringHasCredentialShape(value)
+  if (Array.isArray(value)) return value.some(item => hasCredentialShape(item))
+  if (value !== null && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>).some(
+      ([childKey, child]) => hasCredentialShape(child, childKey),
+    )
+  }
+  return false
 }
 
 function normalizedRelativeFile(value: string): string {
@@ -764,7 +787,31 @@ export async function prepareCalibrationCandidates(
   if (interleaved.length < Math.min(options.count, enabled.length)) {
     throw new Error('not enough stable source sessions to represent enabled sources')
   }
+  const eligibleSources = selectedBySource
+    .filter(group => group.pool.length > 0)
+    .map(group => group.pool[0]!.summary.source)
+  const representedSources = new Set(interleaved.map(candidate =>
+    candidate.summary.source))
+  const missingSources = eligibleSources.filter(source =>
+    !representedSources.has(source))
+  if (missingSources.length > 0) {
+    throw new Error(
+      `selected candidates do not represent enabled stable sources: ${missingSources.join(', ')}`,
+    )
+  }
   const splits = groupAwareSplits(interleaved, seed)
+  const splitCounts = new Map<EvaluationSplit, number>()
+  for (const candidate of interleaved) {
+    const split = splits.get(candidate)
+    if (split !== undefined) splitCounts.set(split, (splitCounts.get(split) ?? 0) + 1)
+  }
+  const emptySplits = (['calibration', 'regression', 'independent'] as const)
+    .filter(split => (splitCounts.get(split) ?? 0) === 0)
+  if (emptySplits.length > 0) {
+    throw new Error(
+      `candidate groups cannot populate required splits: ${emptySplits.join(', ')}`,
+    )
+  }
 
   await assertEmptyDirectory(root)
   await privateDirectory(root)
@@ -773,7 +820,7 @@ export async function prepareCalibrationCandidates(
     mode: 0o600,
   })
   const refs: EvaluationCandidateRef[] = []
-  for (const [index, candidate] of interleaved.entries()) {
+  for (const candidate of interleaved) {
     const id = caseId(candidate.summary.source, candidate.fingerprint)
     const detail = sanitizeCalibrationDetail(candidate.detail, id)
     const payload: EvaluationCandidateFile = {
@@ -894,7 +941,7 @@ export async function auditCalibrationCandidates(
     forbiddenRecordFields += detail.projection.records.filter(record =>
       'raw' in record || 'searchText' in record).length
     if (hasHomePathShape(serialized)) homePathShapes++
-    if (hasCredentialShape(serialized)) credentialShapes++
+    if (hasCredentialShape(parsed)) credentialShapes++
     if (detail.summary.source !== candidate.target.source
       || detail.summary.sourceSessionId !== candidate.id
       || detail.projection.header.source !== candidate.target.source
@@ -1124,7 +1171,9 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
   const poolHash = string(preparation.candidatePoolHash, 'candidate pool hash')
   const seed = string(preparation.seed, 'sampling seed')
   if (!/^[a-f0-9]{64}$/.test(poolHash)
-    || preparation.samplingPolicyVersion !== SAMPLING_POLICY_VERSION
+    || !SUPPORTED_SAMPLING_POLICY_VERSIONS.has(
+      preparation.samplingPolicyVersion as number,
+    )
     || preparation.groupPolicy !== 'source-parent-workspace'
     || preparation.splitPolicy !== 'group-aware-50-20-30'
     || preparation.independentAccess !== 'restricted') {

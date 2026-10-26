@@ -209,6 +209,121 @@ describe('App request ordering', () => {
       .toContain('1 个会话')
   })
 
+  it('keeps degraded source diagnostics out of the source picker', async () => {
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') {
+        return response([{
+          ...statuses[0],
+          availability: 'degraded',
+          sessionCount: 1,
+          sessionCountState: 'ready',
+          reason: 'session_discovery_partial',
+          detail: '已读取 1/2 个会话文件；1 个文件解析失败',
+        } satisfies SourceStatus])
+      }
+      if (url === '/api/sessions?source=all') return response([])
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: '筛选来源' }))
+
+    expect(screen.queryByText('已读取 1/2 个会话文件；1 个文件解析失败'))
+      .toBeNull()
+    expect(screen.getByRole('option', { name: /^DSH API/ }).textContent)
+      .toBe('DSH API0 个会话')
+  })
+
+  it('shows an unavailable state without loading a migration-required session', async () => {
+    const legacy = {
+      ...summary('dsh', 'legacy-session', 'Legacy session'),
+      formatStatus: 'migration-required' as const,
+      formatDetail: 'Session v3 需要只读迁移适配器',
+    }
+    const requested: string[] = []
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      requested.push(url)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') return response([legacy])
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+
+    expect(await screen.findByText('该 Agent 会话当前不可读取')).toBeTruthy()
+    expect(screen.getByText('Session v3 需要只读迁移适配器')).toBeTruthy()
+    expect(screen.queryByText('正在读取本地会话')).toBeNull()
+    expect(requested).not.toContain('/api/sessions/dsh/legacy-session')
+  })
+
+  it('loads a usable session when an unavailable session is also listed', async () => {
+    const current = summary('dsh', 'current-session', 'Current session')
+    const legacy = {
+      ...summary('dsh', 'legacy-session', 'Legacy session'),
+      formatStatus: 'migration-required' as const,
+      formatDetail: 'Session v3 需要只读迁移适配器',
+    }
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') return response([current, legacy])
+      if (url === '/api/sessions/dsh/current-session') {
+        return response(detail(current))
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+
+    await waitForLoadedSession('dsh', 'current-session')
+    expect(screen.queryByText('该 Agent 会话当前不可读取')).toBeNull()
+  })
+
+  it('does not load an unavailable deep-linked session', async () => {
+    const corrupt = {
+      ...summary('dsh', 'corrupt-session', 'Corrupt session'),
+      formatStatus: 'corrupt' as const,
+      formatDetail: '会话尾部包含损坏记录',
+    }
+    window.history.replaceState(
+      null,
+      '',
+      '/?source=dsh&session=corrupt-session',
+    )
+    const requested: string[] = []
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      requested.push(url)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=dsh') return response([corrupt])
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+
+    expect(await screen.findByText('该 Agent 会话当前不可读取')).toBeTruthy()
+    expect(screen.getByText('会话尾部包含损坏记录')).toBeTruthy()
+    expect(requested).not.toContain('/api/sessions/dsh/corrupt-session')
+  })
+
   it('parses a source-qualified session deep link without accepting invalid sources', () => {
     expect(sessionTargetFromLocation({
       search: '?source=codex&session=thread%2Fone',

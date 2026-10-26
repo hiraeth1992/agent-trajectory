@@ -6,6 +6,11 @@ import type {
   TrajectoryProjection,
 } from '../src/types'
 import type { CodexEnvelope } from './projectors/codex'
+import type { ClaudeCodeEnvelope } from './projectors/claude-code'
+import type { DoubaoWorkProjectionInput } from './projectors/doubao-work'
+import type { OpenCodeProjectionInput } from './projectors/opencode'
+import type { QoderProjectionInput } from './projectors/qoder'
+import type { WorkBuddyProjectionInput } from './projectors/workbuddy'
 import type { ZcodeProjectionInput } from './projectors/zcode'
 import { workerLocation } from './worker-location'
 
@@ -43,6 +48,11 @@ interface ProjectionMessage {
   header?: SessionHeader
   events?: SessionEvent[]
   envelopes?: CodexEnvelope[]
+  claudeEnvelopes?: ClaudeCodeEnvelope[]
+  doubaoWork?: DoubaoWorkProjectionInput
+  opencode?: OpenCodeProjectionInput
+  qoder?: QoderProjectionInput
+  workbuddy?: WorkBuddyProjectionInput
   zcode?: ZcodeProjectionInput
 }
 
@@ -101,6 +111,66 @@ export class ProjectionWorkerClient {
       mode: 'snapshot',
       envelopes: allEnvelopes,
     })
+  }
+
+  async projectClaudeCode(
+    key: string,
+    envelopes: ClaudeCodeEnvelope[],
+  ): Promise<TrajectoryProjection> {
+    return this.requireProjection(await this.send({
+      source: 'claude',
+      key,
+      mode: 'snapshot',
+      claudeEnvelopes: envelopes,
+    }))
+  }
+
+  async projectDoubaoWork(
+    key: string,
+    input: DoubaoWorkProjectionInput,
+  ): Promise<TrajectoryProjection> {
+    return this.requireProjection(await this.send({
+      source: 'doubao-work',
+      key,
+      mode: 'snapshot',
+      doubaoWork: input,
+    }))
+  }
+
+  async projectWorkBuddy(
+    key: string,
+    input: WorkBuddyProjectionInput,
+  ): Promise<TrajectoryProjection> {
+    return this.requireProjection(await this.send({
+      source: 'workbuddy',
+      key,
+      mode: 'snapshot',
+      workbuddy: input,
+    }))
+  }
+
+  async projectQoder(
+    key: string,
+    input: QoderProjectionInput,
+  ): Promise<TrajectoryProjection> {
+    return this.requireProjection(await this.send({
+      source: 'qoder',
+      key,
+      mode: 'snapshot',
+      qoder: input,
+    }))
+  }
+
+  async projectOpenCode(
+    key: string,
+    input: OpenCodeProjectionInput,
+  ): Promise<TrajectoryProjection> {
+    return this.requireProjection(await this.send({
+      source: 'opencode',
+      key,
+      mode: 'snapshot',
+      opencode: input,
+    }))
   }
 
   async projectZcode(
