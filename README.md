@@ -1,11 +1,17 @@
 # Agent Trajectory
 
+**简体中文** | [English](README.en.md)
+
 Agent Trajectory 是一个本地优先、只读的多来源 Agent 轨迹查看器。它将
 DeepSeek Harness、Codex 和 ZCode 的本地会话转换为统一视图，帮助你查看对话、
 模型上下文、工具调用、Token 消耗、执行过程和评测结果。
 
 项目以本地 Node.js 服务运行，通过系统浏览器展示数据。它不携带 Chromium，
 普通浏览不会上传或修改来源会话；可选 AI 增强只有在用户主动触发时才会调用所选模型。
+
+## 产品演示
+
+![Agent Trajectory 产品演示](docs/assets/readme/product-overview.gif)
 
 ## 核心功能
 
@@ -253,7 +259,7 @@ npx --yes ./agent-trajectory-0.1.0.tgz
 - 可选 AI 增强仅在用户触发后发送界面可预览的脱敏事实；远程端点受对应服务商策略约束。
 - 诊断快照、校准数据、评测报告和 badcase 均保存在本机数据目录。
 
-完整的安全边界和漏洞报告方式见 [SECURITY.md](SECURITY.md)。
+完整的安全边界和漏洞报告方式见[安全策略](SECURITY.zh-CN.md)。
 
 ## 本地开发
 
@@ -310,9 +316,9 @@ npm run verify:real-sources
 
 ## 参与贡献
 
-提交修改前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。请只使用合成 fixture，
+提交修改前请阅读[贡献指南](CONTRIBUTING.zh-CN.md)。请只使用合成 fixture，
 不要提交真实 Agent 会话、本地路径、凭证、私有 Prompt 或未脱敏导出。
 
 ## 许可证
 
-本项目采用 [MIT License](LICENSE)。
+本项目采用 [MIT License 英文原文](LICENSE)。[中文翻译](LICENSE.zh-CN.md)仅供参考。

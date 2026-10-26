@@ -1,5 +1,7 @@
 # Code of Conduct
 
+**English** | [简体中文](CODE_OF_CONDUCT.zh-CN.md)
+
 ## Our standards
 
 We are committed to a welcoming, respectful, and harassment-free community.

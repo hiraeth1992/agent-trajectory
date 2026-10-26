@@ -1,5 +1,7 @@
 # Contributing to Agent Trajectory
 
+**English** | [简体中文](CONTRIBUTING.zh-CN.md)
+
 Thanks for helping improve Agent Trajectory.
 
 Participation in this project is governed by the
