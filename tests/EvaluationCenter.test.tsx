@@ -87,6 +87,73 @@ afterEach(() => {
 })
 
 describe('EvaluationCenter', () => {
+  it('does not display an evaluation result completed for a previous dataset', async () => {
+    const secondDataset = {
+      ...dataset,
+      directoryId: 'private-v2',
+      datasetId: 'private-real-v2',
+      datasetHash: 'b'.repeat(64),
+    }
+    let resolveRun!: (value: Response) => void
+    const pendingRun = new Promise<Response>(resolve => {
+      resolveRun = resolve
+    })
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets') {
+        return response([dataset, secondDataset])
+      }
+      if (url.endsWith('/reviewer-a')) {
+        return response({
+          ...overview('reviewer-a', 30),
+          dataset: url.includes('private-v2') ? secondDataset : dataset,
+        })
+      }
+      if (url.endsWith('/reviewer-b')) {
+        return response({
+          ...overview('reviewer-b', 30),
+          dataset: url.includes('private-v2') ? secondDataset : dataset,
+        })
+      }
+      if (url.endsWith('/workflow')) {
+        return response({
+          ...workflow,
+          reviewersComplete: true,
+          adjudication: { exists: true, complete: true },
+        })
+      }
+      if (url.endsWith('/workflow/run') && init?.method === 'POST') {
+        return pendingRun
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<EvaluationCenter onWorkspaceChange={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', {
+      name: '运行 EvaluationRun',
+    }))
+    fireEvent.change(screen.getByRole('combobox', { name: /数据集/ }), {
+      target: { value: 'private-v2' },
+    })
+    resolveRun(response({
+      run: {
+        runId: 'run-for-private-v1',
+        createdAt: '2026-10-26T00:00:00.000Z',
+        split: 'calibration',
+        assertionAgreement: 1,
+        exactAgreement: 1,
+        evaluatorError: 0,
+        cases: [],
+      },
+    } satisfies EvaluationRunResult))
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(screen.queryByText('run-for-private-v1')).toBeNull()
+  })
+
   it('distinguishes an outdated backend from an empty evaluation dataset', async () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
       response({ error: 'not found' }, 404)))

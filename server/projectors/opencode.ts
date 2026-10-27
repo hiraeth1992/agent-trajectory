@@ -19,6 +19,10 @@ import {
   projectedRecord,
   redactSensitive,
 } from '../../src/projector-utils'
+import {
+  recordTimeBounds,
+  rollupTurns,
+} from './projection-rollup'
 
 export interface OpenCodeSessionRow {
   id: string
@@ -312,13 +316,8 @@ export function projectOpenCodeTrajectory(
         }
       })
       const turnState = turns.get(turn)
-      if (turnState !== undefined) {
-        turns.set(turn, {
-          ...turnState,
-          usage: assistantUsage ?? turnState.usage,
-          model: selectedModel.model ?? turnState.model,
-          status: assistantStatus,
-        })
+      if (turnState !== undefined && selectedModel.model !== undefined) {
+        turns.set(turn, { ...turnState, model: selectedModel.model })
       }
       continue
     }
@@ -372,10 +371,12 @@ export function projectOpenCodeTrajectory(
     eventTypeCounts[message.type] = (eventTypeCounts[message.type] ?? 0) + 1
   }
   const model = modelRef(input.session.model)
-  const times = records.flatMap(record => [
-    record.startTime,
-    ...(record.endTime === null ? [] : [record.endTime]),
-  ]).filter(value => value > 0)
+  const bounds = recordTimeBounds(
+    records,
+    input.session.time_created,
+    input.session.time_updated,
+  )
+  const turnSummaries = rollupTurns([...turns.values()], records)
   const projectedEvents = projectedSourceEventIds(records)
   const coverage = projectionCoverage(eventTypeCounts, messages.length, (type) => {
     if (type === 'user' || type === 'assistant' || type === 'compaction') {
@@ -405,20 +406,20 @@ export function projectOpenCodeTrajectory(
       rawVersion: input.session.version,
     },
     records,
-    turns: [...turns.values()],
+    turns: turnSummaries,
     lanes: [
       { id: 'input', label: '输入' },
       { id: 'model', label: '模型' },
       { id: 'tools', label: '工具' },
     ],
-    startTime: times.length === 0 ? input.session.time_created : Math.min(...times),
-    endTime: times.length === 0 ? input.session.time_updated : Math.max(...times),
+    startTime: bounds.startTime,
+    endTime: bounds.endTime,
     eventCount: messages.length,
     eventTypeCounts,
     unknownEventTypes: [...new Set(messages.flatMap(message =>
       KNOWN_MESSAGE_TYPES.has(message.type) ? [] : [message.type]))].sort(),
     ...coverage,
-    turnEnds: Object.fromEntries([...turns.values()].flatMap(turn =>
+    turnEnds: Object.fromEntries(turnSummaries.flatMap(turn =>
       turn.endTime === null ? [] : [[turn.number, {
         time: turn.endTime,
         reason: turn.status,

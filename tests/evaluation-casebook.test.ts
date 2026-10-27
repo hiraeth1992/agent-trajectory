@@ -85,6 +85,20 @@ describe('evaluation badcase casebook', () => {
       runId: 'incompatible-run',
       outcome: 'inconclusive',
     }))
+
+    const unasserted = structuredClone(fixed)
+    unasserted.runId = 'unasserted-run'
+    unasserted.cases[0]!.assertions = unasserted.cases[0]!.assertions.filter(
+      assertion => assertion.subject !== entry.subject,
+    )
+    unasserted.cases[0]!.mismatches = []
+    const withoutAssertion = await store.recordRetest(entry.id, unasserted)
+    expect(withoutAssertion.entries[0]?.retests).toContainEqual(
+      expect.objectContaining({
+        runId: 'unasserted-run',
+        outcome: 'inconclusive',
+      }),
+    )
   })
 
   it('automatically resolves previously open subjects when a later run passes', async () => {

@@ -39,6 +39,7 @@ interface PendingProjection {
   reject(error: Error): void
   enqueuedAt: number
   sentAt: number
+  timer: NodeJS.Timeout
 }
 
 interface ProjectionMessage {
@@ -55,6 +56,14 @@ interface ProjectionMessage {
   workbuddy?: WorkBuddyProjectionInput
   zcode?: ZcodeProjectionInput
 }
+
+interface ProjectionWorkerClientOptions {
+  maxPending?: number
+  requestTimeoutMs?: number
+}
+
+const DEFAULT_MAX_PENDING = 64
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 
 export class ProjectionWorkerClient {
   private worker?: Worker
@@ -74,10 +83,20 @@ export class ProjectionWorkerClient {
   private workerStateEntries = 0
   private workerStateBytes = 0
 
+  private readonly workerFactory: WorkerFactory
+  private readonly maxPendingRequests: number
+  private readonly requestTimeoutMs: number
+
   constructor(
-    private readonly workerFactory: WorkerFactory = (filename, options) =>
+    workerFactory: WorkerFactory = (filename, options) =>
       new Worker(filename, options),
-  ) {}
+    options: ProjectionWorkerClientOptions = {},
+  ) {
+    this.workerFactory = workerFactory
+    this.maxPendingRequests = options.maxPending ?? DEFAULT_MAX_PENDING
+    this.requestTimeoutMs = options.requestTimeoutMs
+      ?? DEFAULT_REQUEST_TIMEOUT_MS
+  }
 
   async projectDsh(
     key: string,
@@ -249,6 +268,11 @@ export class ProjectionWorkerClient {
 
   private send(message: ProjectionMessage): Promise<ProjectionReply> {
     if (this.closed) return Promise.reject(new Error('projection worker is closed'))
+    if (this.pending.size >= this.maxPendingRequests) {
+      return Promise.reject(new Error(
+        `projection worker queue is full (${this.maxPendingRequests})`,
+      ))
+    }
     const worker = this.ensureWorker()
     const requestId = ++this.requestId
     const enqueuedAt = performance.now()
@@ -260,16 +284,29 @@ export class ProjectionWorkerClient {
       if (message.mode === 'append') this.appends++
       else this.snapshots++
       this.payloadBytes += payloadBytes
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(requestId)
+        if (pending === undefined) return
+        this.pending.delete(requestId)
+        if (this.pending.size === 0) worker.unref()
+        pending.reject(new Error(
+          `projection worker request timed out after ${this.requestTimeoutMs} ms`,
+        ))
+      }, this.requestTimeoutMs)
+      timer.unref()
       this.pending.set(requestId, {
         resolve,
         reject,
         enqueuedAt,
         sentAt,
+        timer,
       })
       this.maxPending = Math.max(this.maxPending, this.pending.size)
       try {
         worker.postMessage({ requestId, sentAt, ...message })
       } catch (caught) {
+        const pending = this.pending.get(requestId)
+        if (pending !== undefined) clearTimeout(pending.timer)
         this.pending.delete(requestId)
         if (this.pending.size === 0) worker.unref()
         reject(caught instanceof Error ? caught : new Error(String(caught)))
@@ -294,6 +331,7 @@ export class ProjectionWorkerClient {
       const pending = this.pending.get(reply.requestId)
       if (pending === undefined) return
       this.pending.delete(reply.requestId)
+      clearTimeout(pending.timer)
       const completedAt = performance.now()
       const roundTrip = completedAt - pending.enqueuedAt
       const queueWait = Math.max(
@@ -348,7 +386,10 @@ export class ProjectionWorkerClient {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error)
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(error)
+    }
     this.pending.clear()
   }
 }

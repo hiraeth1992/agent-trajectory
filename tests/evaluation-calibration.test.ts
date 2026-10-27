@@ -65,6 +65,8 @@ function record(
       cmd: 'pwd',
       cwd: '/Users/private-user/project',
       authorization: `Bearer private-token-${id}`,
+      auth_token: `private-auth-token-${id}`,
+      private_key: `private-signing-key-${id}`,
     },
     output: [
       '/Users/private-user/project',
@@ -215,7 +217,7 @@ describe('private real-trajectory calibration', () => {
     const serialized = JSON.stringify(safe)
 
     expect(serialized).not.toMatch(
-      /private-user|private-codex-session|private-token|raw-private|private search|source-private|call-private|trace-private|span-private/,
+      /private-user|private-codex-session|private-token|private-auth-token|private-signing-key|raw-private|private search|source-private|call-private|trace-private|span-private/,
     )
     expect(safe.summary).toMatchObject({
       id: 'codex:real-codex-anonymous',
@@ -292,9 +294,9 @@ describe('private real-trajectory calibration', () => {
       allowPartial: false,
       candidatePoolHash: expect.stringMatching(/^[a-f0-9]{64}$/),
       candidateMultiplier: 4,
-      samplingPolicyVersion: 3,
-      seed: 'private-real-test@1:sampling-v3',
-      groupPolicy: 'source-parent-workspace',
+      samplingPolicyVersion: 4,
+      seed: 'private-real-test@1:sampling-v4',
+      groupPolicy: 'source-lineage-workspace',
       splitPolicy: 'group-aware-50-20-30',
       independentAccess: 'restricted',
     })
@@ -370,6 +372,32 @@ describe('private real-trajectory calibration', () => {
       cases: expect.any(Array),
     })
     expect(partial.manifest.cases).toHaveLength(3)
+  })
+
+  it('uses session identity as well as fingerprint when naming candidates', async () => {
+    const values = ['first', 'second', 'third'].map((id, index) => {
+      const value = detail('codex', id)
+      value.summary.cwd = `/workspace/${index}`
+      return value
+    })
+    const selected: CalibrationSource = {
+      listSources: async () => [status('codex')],
+      listSessions: async () => values.map(value => value.summary),
+      fingerprint: async () => 'shared-fingerprint',
+      load: async (_source, sourceSessionId) =>
+        structuredClone(values.find(value =>
+          value.summary.sourceSessionId === sourceSessionId)),
+    }
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'trajectory-calibration-'))
+    roots.push(root)
+
+    const prepared = await prepareCalibrationCandidates(selected, root, {
+      count: 3,
+      datasetId: 'private-real-collision',
+      datasetVersion: '1',
+    })
+
+    expect(new Set(prepared.manifest.cases.map(item => item.id)).size).toBe(3)
   })
 
   it('keeps seeded sampling and group-aware splits reproducible', async () => {

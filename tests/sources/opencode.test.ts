@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProjectionWorkerClient } from '../../server/projection-worker-client'
 import { OpenCodeSource } from '../../server/sources/opencode'
+import { projectOpenCodeTrajectory } from '../../server/projectors/opencode'
 
 const roots: string[] = []
 const sources: OpenCodeSource[] = []
@@ -209,6 +210,70 @@ async function fixture(): Promise<string> {
 }
 
 describe('OpenCode source', () => {
+  it('aggregates all model usage in a turn and keeps running tools live', () => {
+    const session = {
+      id: 'session-rollup',
+      parent_id: null,
+      directory: '/workspace',
+      title: 'Rollup',
+      version: '1',
+      model: null,
+      cost: 0,
+      tokens_input: 0,
+      tokens_output: 0,
+      tokens_reasoning: 0,
+      tokens_cache_read: 0,
+      tokens_cache_write: 0,
+      time_created: 1_000,
+      time_updated: 2_000,
+    }
+    const projection = projectOpenCodeTrajectory({
+      session,
+      messages: [{
+        id: 'user-1',
+        type: 'user',
+        seq: 0,
+        time_created: 1_000,
+        time_updated: 1_000,
+        data: { text: 'Run' },
+      }, {
+        id: 'assistant-1',
+        type: 'assistant',
+        seq: 1,
+        time_created: 1_100,
+        time_updated: 1_200,
+        data: {
+          content: [{ type: 'text', text: 'First' }],
+          tokens: { input: 10, output: 2 },
+        },
+      }, {
+        id: 'assistant-2',
+        type: 'assistant',
+        seq: 2,
+        time_created: 1_300,
+        time_updated: 1_400,
+        data: {
+          content: [{
+            type: 'tool',
+            id: 'call-1',
+            name: 'bash',
+            state: { status: 'running', input: { cmd: 'npm test' } },
+          }],
+          tokens: { input: 20, output: 3 },
+        },
+      }],
+    })
+
+    expect(projection.turns[0]).toMatchObject({
+      status: 'running',
+      usage: {
+        inputTokens: 30,
+        outputTokens: 5,
+        totalTokens: 35,
+      },
+    })
+  })
+
   it('loads official SQLite sessions, messages, tools, usage, and lineage', async () => {
     const database = await fixture()
     const projectionWorker = new ProjectionWorkerClient()

@@ -38,7 +38,7 @@ import type {
 } from '../../src/evaluation-types'
 import type { SessionDetail, TrajectoryRecord } from '../../src/types'
 import { jsonWeight, WeightedLruCache } from '../lru'
-import { writePrivateJson } from '../file-transaction'
+import { runFileTransaction, writePrivateJson } from '../file-transaction'
 import { defaultCasebookFile, EvaluationCasebookStore } from './casebook'
 import { createEvaluationDataset } from './identity'
 import { compareEvaluationRuns, runEvaluationDataset } from './runner'
@@ -1120,50 +1120,53 @@ export class AnnotationWorkspaceStore {
     await previous
     try {
       const dataset = await this.dataset(directoryId)
-      if (reviewer === 'adjudicator') await this.assertAdjudicationReady(dataset)
-      if (request.datasetHash !== dataset.manifest.contentHash) {
-        throw new AnnotationConflictError('annotation dataset changed; reload before saving')
-      }
-      const candidate = dataset.manifest.cases.find(item => item.id === caseId)
-      if (candidate === undefined) {
-        throw new AnnotationNotFoundError('annotation case not found')
-      }
-      const [selected, detail] = await Promise.all([
-        this.actor(dataset, reviewer),
-        this.detail(dataset, candidate),
-      ])
-      if (request.revision !== selected.revision) {
-        throw new AnnotationConflictError(
-          'annotation file changed in another window; reload before saving',
-        )
-      }
-      let annotation: HumanCaseAnnotation
-      try {
-        annotation = validateCaseAnnotation(
-          request.annotation,
-          candidate,
-          detail,
-        )
-      } catch (error) {
-        throw new AnnotationInputError(
-          error instanceof Error ? error.message : String(error),
-        )
-      }
-      if (annotation.caseId !== caseId) {
-        throw new AnnotationInputError('annotation case mismatch')
-      }
-      const next: HumanEvaluationAnnotations = {
-        ...selected.annotations,
-        cases: selected.annotations.cases.map(item =>
-          item.caseId === caseId ? annotation : item),
-      }
-      await this.writeActorAnnotations(reviewer, selected.file, next)
-      const savedContents = await fs.readFile(selected.file, 'utf8')
-      return {
-        revision: revision(savedContents),
-        progress: progress(next),
-        case: caseListItem(dataset.manifest, annotation),
-      }
+      const actorPath = path.join(dataset.directory, actorFile(reviewer))
+      return await runFileTransaction(actorPath, async () => {
+        if (reviewer === 'adjudicator') await this.assertAdjudicationReady(dataset)
+        if (request.datasetHash !== dataset.manifest.contentHash) {
+          throw new AnnotationConflictError('annotation dataset changed; reload before saving')
+        }
+        const candidate = dataset.manifest.cases.find(item => item.id === caseId)
+        if (candidate === undefined) {
+          throw new AnnotationNotFoundError('annotation case not found')
+        }
+        const [selected, detail] = await Promise.all([
+          this.actor(dataset, reviewer),
+          this.detail(dataset, candidate),
+        ])
+        if (request.revision !== selected.revision) {
+          throw new AnnotationConflictError(
+            'annotation file changed in another window; reload before saving',
+          )
+        }
+        let annotation: HumanCaseAnnotation
+        try {
+          annotation = validateCaseAnnotation(
+            request.annotation,
+            candidate,
+            detail,
+          )
+        } catch (error) {
+          throw new AnnotationInputError(
+            error instanceof Error ? error.message : String(error),
+          )
+        }
+        if (annotation.caseId !== caseId) {
+          throw new AnnotationInputError('annotation case mismatch')
+        }
+        const next: HumanEvaluationAnnotations = {
+          ...selected.annotations,
+          cases: selected.annotations.cases.map(item =>
+            item.caseId === caseId ? annotation : item),
+        }
+        await this.writeActorAnnotations(reviewer, selected.file, next)
+        const savedContents = await fs.readFile(selected.file, 'utf8')
+        return {
+          revision: revision(savedContents),
+          progress: progress(next),
+          case: caseListItem(dataset.manifest, annotation),
+        }
+      })
     } finally {
       resolveWrite()
       if (this.writes.get(key) === tail) this.writes.delete(key)

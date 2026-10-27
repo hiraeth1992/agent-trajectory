@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   hookInstallationFile,
   installAgentHooks,
+  pruneHookRuntimeDirectories,
   uninstallAgentHooks,
 } from '../server/hook-installation'
 
@@ -56,6 +57,28 @@ async function fixture() {
 }
 
 describe('agent hook installation', () => {
+  it('retains only the current and previous immutable Hook runtimes', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-runtime-'))
+    roots.push(root)
+    const runtimeBase = path.join(root, 'runtime')
+    const runtimes = ['oldest', 'previous', 'current'].map(name =>
+      path.join(runtimeBase, name))
+    await Promise.all(runtimes.map(async (runtime, index) => {
+      await fs.mkdir(runtime, { recursive: true })
+      await fs.writeFile(path.join(runtime, 'agent-trajectory.mjs'), '')
+      const time = new Date(1_000 + index * 1_000)
+      await fs.utimes(runtime, time, time)
+    }))
+
+    const removed = await pruneHookRuntimeDirectories(
+      runtimeBase,
+      runtimes[2]!,
+    )
+
+    expect(removed).toEqual([runtimes[0]])
+    expect(await fs.readdir(runtimeBase)).toEqual(['current', 'previous'])
+  })
+
   it('records the current machine paths and refreshes them when hooks are reinstalled', async () => {
     const { root, locations } = await fixture()
     const dataRoot = path.join(root, 'data')

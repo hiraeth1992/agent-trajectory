@@ -13,7 +13,11 @@ import {
 import { TrajectoryDiagnosisService } from './diagnosis/service'
 import { DiagnosisEvidenceStore } from './diagnosis/evidence-store'
 import { AnnotationWorkspaceStore } from './evaluation/annotation-workspace'
-import { assertLoopbackListenHost, hasAllowedLocalRequest } from './security'
+import {
+  assertLoopbackListenHost,
+  hasAllowedBrowserMutation,
+  hasAllowedLocalRequest,
+} from './security'
 import { SessionActivationHub } from './session-activation'
 import {
   resolveSourcePaths,
@@ -196,6 +200,9 @@ export async function startAgentTrajectoryServer(
           sendJson(response, 403, { error: 'forbidden cross-origin mutation' })
           return
         }
+      } else if (!hasAllowedBrowserMutation(request, expectedOrigin)) {
+        sendJson(response, 403, { error: 'forbidden cross-origin mutation' })
+        return
       }
       if (url.pathname === '/api/integrations/activations'
         && options.sessionActivationHub !== undefined) {

@@ -19,6 +19,10 @@ import {
   projectedRecord,
   redactSensitive,
 } from '../../src/projector-utils'
+import {
+  recordTimeBounds,
+  rollupTurns,
+} from './projection-rollup'
 
 export interface ClaudeCodeEnvelope {
   type?: string
@@ -131,7 +135,12 @@ function searchable(
 function primaryRecordId(row: IndexedEnvelope): string | undefined {
   const message = object(row.message)
   const blocks = array(message.content)
-  if (row.type === 'assistant') return `message:${sourceId(row)}`
+  if (row.type === 'assistant') {
+    const visible = normalizedContent(message.content)
+    return visible.length > 0
+      ? `message:${sourceId(row)}`
+      : usage(message.usage) === undefined ? undefined : `model:${sourceId(row)}`
+  }
   if (row.type === 'user' && blocks.some(block =>
     string(object(block).type) !== 'tool_result')) {
     return `message:${sourceId(row)}`
@@ -252,6 +261,36 @@ export function projectClaudeCodeTrajectory(
     }))
   }
 
+  for (const row of rows) {
+    if (row.type !== 'assistant') continue
+    const message = object(row.message)
+    if (normalizedContent(message.content).length > 0) continue
+    const recordUsage = usage(message.usage)
+    if (recordUsage === undefined) continue
+    records.push(searchable({
+      id: `model:${sourceId(row)}`,
+      sourceEventIds: [sourceId(row)],
+      fidelity: 'exact',
+      seq: row.ordinal,
+      turn: rowTurns.get(sourceId(row)) ?? 0,
+      step: 1,
+      kind: 'model',
+      title: '模型调用',
+      summary: 'Claude Code 模型调用',
+      startTime: timestamp(row.timestamp),
+      endTime: timestamp(row.timestamp),
+      status: row.isApiErrorMessage === true ? 'error' : 'complete',
+      depth: row.isSidechain === true ? 1 : 0,
+      usage: recordUsage,
+      provider: 'anthropic',
+      model: string(message.model),
+      error: row.isApiErrorMessage === true
+        ? { name: 'ApiError', reason: string(row.error) }
+        : undefined,
+      raw: [raw(row)],
+    }))
+  }
+
   for (const [callId, call] of tools) {
     const result = toolResults.get(callId)
     const startTime = timestamp(call.row.timestamp)
@@ -323,10 +362,8 @@ export function projectClaudeCodeTrajectory(
     left.seq - right.seq
     || priority[left.kind] - priority[right.kind]
     || left.id.localeCompare(right.id))
-  const times = records.flatMap(record => [
-    record.startTime,
-    ...(record.endTime === null ? [] : [record.endTime]),
-  ]).filter(value => value > 0)
+  const bounds = recordTimeBounds(records, createdAt)
+  const turnSummaries = rollupTurns([...turns.values()], records)
   const eventTypeCounts: Record<string, number> = {}
   for (const row of rows) {
     const type = row.type ?? 'unknown'
@@ -371,14 +408,14 @@ export function projectClaudeCodeTrajectory(
       rawVersion: latestVersion,
     },
     records,
-    turns: [...turns.values()],
+    turns: turnSummaries,
     lanes: [
       { id: 'input', label: '输入' },
       { id: 'model', label: '模型' },
       { id: 'tools', label: '工具' },
     ],
-    startTime: times.length === 0 ? createdAt : Math.min(...times),
-    endTime: times.length === 0 ? createdAt : Math.max(...times),
+    startTime: bounds.startTime,
+    endTime: bounds.endTime,
     eventCount: rows.length,
     eventTypeCounts,
     unknownEventTypes: [...new Set(rows.flatMap(row =>
@@ -387,7 +424,7 @@ export function projectClaudeCodeTrajectory(
         : []))].sort(),
     ...coverage,
     relations,
-    turnEnds: Object.fromEntries([...turns.values()].flatMap(turn =>
+    turnEnds: Object.fromEntries(turnSummaries.flatMap(turn =>
       turn.endTime === null ? [] : [[turn.number, {
         time: turn.endTime,
         reason: turn.status,

@@ -11,12 +11,13 @@ import type {
   SessionDetail,
   TransportSessionDetail,
 } from '../../src/types'
-import { writePrivateJson } from '../file-transaction'
+import { runFileTransaction, writePrivateJson } from '../file-transaction'
 
 const SNAPSHOT_SCHEMA_VERSION = 1
 const SNAPSHOT_FILE = /^[A-Za-z0-9_-]{20,80}\.json$/
 const DEFAULT_MAX_SNAPSHOTS = 24
 const DEFAULT_MAX_BYTES = 256 * 1024 * 1024
+const PRUNE_GRACE_MS = 60_000
 
 export interface DiagnosisEvidenceSnapshot {
   schemaVersion: typeof SNAPSHOT_SCHEMA_VERSION
@@ -85,25 +86,28 @@ export class DiagnosisEvidenceStore {
     sourceFingerprint: string,
     detail: SessionDetail,
   ): Promise<DiagnosisEvidenceSnapshotRef> {
-    await fs.mkdir(this.root, { recursive: true, mode: 0o700 })
-    if (process.platform !== 'win32') await fs.chmod(this.root, 0o700)
-    const id = snapshotId(target, sourceFingerprint)
-    const file = path.join(this.root, `${id}.json`)
-    const snapshot: DiagnosisEvidenceSnapshot = {
-      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-      snapshotId: id,
-      createdAt: new Date().toISOString(),
-      protocol: TRAJECTORY_DIAGNOSIS_PROTOCOL,
-      target,
-      sourceFingerprint,
-      detail: transportDetail(detail),
-      analysis: redactSensitive(
-        analyzeTrajectory(detail),
-      ) as ReturnType<typeof analyzeTrajectory>,
-    }
-    await writePrivateJson(file, snapshot)
-    await this.prune(id)
-    return { snapshotId: id, file, sourceFingerprint }
+    const lock = path.join(this.root, '.snapshot-store')
+    return runFileTransaction(lock, async () => {
+      await fs.mkdir(this.root, { recursive: true, mode: 0o700 })
+      if (process.platform !== 'win32') await fs.chmod(this.root, 0o700)
+      const id = snapshotId(target, sourceFingerprint)
+      const file = path.join(this.root, `${id}.json`)
+      const snapshot: DiagnosisEvidenceSnapshot = {
+        schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+        snapshotId: id,
+        createdAt: new Date().toISOString(),
+        protocol: TRAJECTORY_DIAGNOSIS_PROTOCOL,
+        target,
+        sourceFingerprint,
+        detail: transportDetail(detail),
+        analysis: redactSensitive(
+          analyzeTrajectory(detail),
+        ) as ReturnType<typeof analyzeTrajectory>,
+      }
+      await writePrivateJson(file, snapshot)
+      await this.prune(id)
+      return { snapshotId: id, file, sourceFingerprint }
+    })
   }
 
   private async prune(currentId: string): Promise<void> {
@@ -116,11 +120,12 @@ export class DiagnosisEvidenceStore {
         return { file, id: entry.name.slice(0, -5), mtimeMs: stat.mtimeMs, size: stat.size }
       }))
     files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const protectedAfter = Date.now() - PRUNE_GRACE_MS
     let retainedBytes = 0
     const removals: Promise<void>[] = []
     for (const [index, file] of files.entries()) {
       retainedBytes += file.size
-      if (file.id === currentId) continue
+      if (file.id === currentId || file.mtimeMs >= protectedAfter) continue
       if (index >= this.maxSnapshots || retainedBytes > this.maxBytes) {
         removals.push(fs.rm(file.file, { force: true }))
       }

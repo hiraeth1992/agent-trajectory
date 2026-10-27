@@ -12,6 +12,105 @@ afterEach(async () => {
 })
 
 describe('Doubao Work source', () => {
+  it('uses the first main-agent assignment when trajectories omit user messages', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-doubao-title-'))
+    roots.push(root)
+    const session = path.join(root, '38440000000000000')
+    const master = path.join(session, 'agents', 'm_master0000', 'system')
+    const subagent = path.join(session, 'agents', 's_research0', 'system')
+    await Promise.all([
+      fs.mkdir(master, { recursive: true }),
+      fs.mkdir(subagent, { recursive: true }),
+    ])
+    await Promise.all([
+      fs.writeFile(
+        path.join(master, 'trajectory.jsonl'),
+        '{"role":"assistant","content":"主 Agent 回复"}\n',
+      ),
+      fs.writeFile(
+        path.join(master, 'assignment.md'),
+        [
+          '# Assignment',
+          '- Agent ID: m_master0000',
+          '- Role: main',
+          '',
+          '## [2026-10-27T00:00:00Z] 需求',
+          '这是原始会话标题',
+          '',
+          '## [2026-10-27T00:01:00Z] 需求',
+          '继续',
+          '',
+        ].join('\n'),
+      ),
+      fs.writeFile(
+        path.join(subagent, 'trajectory.jsonl'),
+        '{"role":"assistant","content":"子 Agent 回复"}\n',
+      ),
+      fs.writeFile(
+        path.join(subagent, 'assignment.md'),
+        [
+          '# Assignment',
+          '- Agent ID: s_research0',
+          '- Role: subagent',
+          '',
+          '## [2026-10-27T00:00:01Z] 需求',
+          '这是子 Agent 的分派指令',
+          '',
+        ].join('\n'),
+      ),
+    ])
+
+    const [ref] = await new DoubaoWorkSource({ sessionsRoot: root }).list()
+
+    expect(ref?.summary.title).toBe('这是原始会话标题')
+  })
+
+  it('refreshes the title and fingerprint when the main assignment changes', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-doubao-title-live-'))
+    roots.push(root)
+    const session = path.join(root, '38440000000000003')
+    const master = path.join(session, 'agents', 'm_master0003', 'system')
+    const assignment = path.join(master, 'assignment.md')
+    await fs.mkdir(master, { recursive: true })
+    await Promise.all([
+      fs.writeFile(
+        path.join(master, 'trajectory.jsonl'),
+        '{"role":"assistant","content":"主 Agent 回复"}\n',
+      ),
+      fs.writeFile(
+        assignment,
+        [
+          '# Assignment',
+          '- Role: main',
+          '',
+          '## [2026-10-27T00:00:00Z] 需求',
+          '修改前标题',
+          '',
+        ].join('\n'),
+      ),
+    ])
+    const source = new DoubaoWorkSource({ sessionsRoot: root })
+    const [before] = await source.list()
+    const beforeFingerprint = await source.fingerprint(before!)
+
+    await fs.writeFile(
+      assignment,
+      [
+        '# Assignment',
+        '- Role: main',
+        '',
+        '## [2026-10-27T00:00:00Z] 需求',
+        '修改后的标题内容',
+        '',
+      ].join('\n'),
+    )
+
+    const [after] = await source.list()
+    expect(after?.summary.title).toBe('修改后的标题内容')
+    expect(await source.fingerprint(after!)).not.toBe(beforeFingerprint)
+    expect((await source.load(before!)).summary.title).toBe('修改后的标题内容')
+  })
+
   it('aggregates agents, tool pairs, and spawn lineage without claiming exact timing', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-doubao-'))
     roots.push(root)

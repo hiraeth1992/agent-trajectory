@@ -49,8 +49,20 @@ function clone<T>(value: T): T {
   return structuredClone(value)
 }
 
-function sourceLabel(source: AnnotationCaseListItem['source']): string {
-  return source === 'dsh' ? 'DSH' : source === 'codex' ? 'Codex' : 'ZCode'
+export function annotationSourceLabel(
+  source: AnnotationCaseListItem['source'],
+): string {
+  const labels: Record<AnnotationCaseListItem['source'], string> = {
+    dsh: 'DSH',
+    codex: 'Codex',
+    zcode: 'ZCode',
+    claude: 'Claude Code',
+    'doubao-work': '豆包工作',
+    workbuddy: 'WorkBuddy',
+    qoder: 'Qoder',
+    opencode: 'OpenCode',
+  }
+  return labels[source]
 }
 
 function splitLabel(split: AnnotationCaseListItem['split']): string {
@@ -248,6 +260,7 @@ export function AnnotationWorkspace({
   const [error, setError] = useState<string>()
   const [mobilePane, setMobilePane] = useState<AnnotationMobilePane>('cases')
   const dirty = useRef(false)
+  const draftVersion = useRef(0)
   const requestId = useRef(0)
   const recordRequest = useRef<{
     controller: AbortController
@@ -325,6 +338,7 @@ export function AnnotationWorkspace({
       setDraft(clone(result.annotation))
       setSaved(false)
       dirty.current = false
+      draftVersion.current = 0
     }).catch((caught) => {
       if (!controller.signal.aborted) {
         setError(caught instanceof Error ? caught.message : String(caught))
@@ -340,6 +354,7 @@ export function AnnotationWorkspace({
       if (current === undefined) return current
       const next = clone(current)
       mutate(next)
+      draftVersion.current++
       dirty.current = true
       setSaved(false)
       return next
@@ -427,6 +442,7 @@ export function AnnotationWorkspace({
   const save = useCallback(async () => {
     if (saving || draft === undefined || workspace === undefined || directoryId === '') return
     const savedDraft = clone(draft)
+    const savedDraftVersion = draftVersion.current
     const savedCaseId = workspace.candidate.id
     const id = ++requestId.current
     saveRequest.current = {
@@ -477,8 +493,9 @@ export function AnnotationWorkspace({
             cases: current.cases.map(item =>
               item.id === result.case.id ? result.case : item),
           })
-      dirty.current = false
-      setSaved(true)
+      const unchanged = draftVersion.current === savedDraftVersion
+      dirty.current = !unchanged
+      setSaved(unchanged)
     } catch (caught) {
       if (isCurrent()) setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
@@ -612,7 +629,7 @@ export function AnnotationWorkspace({
                   ? <Check className="case-complete" size={15} />
                   : <Circle size={15} />}
                 <span>
-                  <strong>{index + 1}. {sourceLabel(item.source)}</strong>
+                  <strong>{index + 1}. {annotationSourceLabel(item.source)}</strong>
                   <small>
                     {splitLabel(item.split)} · {item.criteriaComplete}/{item.criteriaTotal} 项
                   </small>
@@ -628,7 +645,7 @@ export function AnnotationWorkspace({
               <strong>{workspace?.candidate.id ?? '正在加载案例'}</strong>
               {workspace !== undefined && (
                 <span>
-                  {sourceLabel(workspace.candidate.source)} · {splitLabel(workspace.candidate.split)}
+                  {annotationSourceLabel(workspace.candidate.source)} · {splitLabel(workspace.candidate.split)}
                 </span>
               )}
             </div>

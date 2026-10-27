@@ -77,7 +77,11 @@ type WorkerReply<T> = WorkerSuccess<T> | WorkerFailure
 interface PendingQuery {
   resolve(value: unknown): void
   reject(error: Error): void
+  timer: NodeJS.Timeout
 }
+
+const SQLITE_MAX_PENDING = 64
+const SQLITE_REQUEST_TIMEOUT_MS = 30_000
 
 class OpenCodeSqliteClient {
   private worker?: Worker
@@ -92,17 +96,34 @@ class OpenCodeSqliteClient {
 
   query<T>(operation: SqliteOperation, sessionId?: string): Promise<T> {
     if (this.closed) return Promise.reject(new Error('OpenCode SQLite worker is closed'))
+    if (this.pending.size >= SQLITE_MAX_PENDING) {
+      return Promise.reject(new Error(
+        `OpenCode SQLite worker queue is full (${SQLITE_MAX_PENDING})`,
+      ))
+    }
     const worker = this.ensureWorker()
     const requestId = ++this.requestId
     return new Promise<T>((resolve, reject) => {
       worker.ref()
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(requestId)
+        if (pending === undefined) return
+        this.pending.delete(requestId)
+        if (this.pending.size === 0) worker.unref()
+        pending.reject(new Error(
+          `OpenCode SQLite request timed out after ${SQLITE_REQUEST_TIMEOUT_MS} ms`,
+        ))
+      }, SQLITE_REQUEST_TIMEOUT_MS)
+      timer.unref()
       this.pending.set(requestId, {
         resolve: value => resolve(value as T),
         reject,
+        timer,
       })
       try {
         worker.postMessage({ requestId, operation, sessionId })
       } catch (caught) {
+        clearTimeout(timer)
         this.pending.delete(requestId)
         if (this.pending.size === 0) worker.unref()
         reject(caught instanceof Error ? caught : new Error(String(caught)))
@@ -137,6 +158,7 @@ class OpenCodeSqliteClient {
       const pending = this.pending.get(message.requestId)
       if (pending === undefined) return
       this.pending.delete(message.requestId)
+      clearTimeout(pending.timer)
       if (this.pending.size === 0) worker.unref()
       if (message.ok) {
         pending.resolve(message.result)
@@ -166,7 +188,10 @@ class OpenCodeSqliteClient {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error)
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer)
+      pending.reject(error)
+    }
     this.pending.clear()
   }
 }

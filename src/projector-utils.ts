@@ -108,6 +108,12 @@ function redactSensitiveArray(value: unknown[]): unknown[] {
   return safe
 }
 
+export function isSensitiveKey(key: string): boolean {
+  return /password|passwd|secret|authorization|cookie/i.test(key)
+    || /^(?:token|access[_-]?token|refresh[_-]?token|api[_-]?key|auth[_-]?token|session[_-]?token|id[_-]?token|bearer[_-]?token|private[_-]?key|signing[_-]?key|client[_-]?secret)$/i
+      .test(key)
+}
+
 export function redactSensitive(value: unknown, key = ''): unknown {
   if (/encrypted_(content|function_args)/i.test(key)) {
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
@@ -119,8 +125,7 @@ export function redactSensitive(value: unknown, key = ''): unknown {
     if (value === null || value === undefined) return { present: false }
     return { present: Array.isArray(value) ? value.length > 0 : true }
   }
-  if (/password|passwd|secret|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie/i.test(key)
-    || /^token$/i.test(key)) {
+  if (isSensitiveKey(key)) {
     return '<redacted>'
   }
   if (typeof value === 'string' && /arguments|input|output/i.test(key)) {

@@ -34,3 +34,15 @@ export function hasAllowedLocalRequest(request: IncomingMessage): boolean {
     || parsed.hostname === '127.0.0.1'
     || parsed.hostname === '[::1]'
 }
+
+export function hasAllowedBrowserMutation(
+  request: IncomingMessage,
+  expectedOrigin: string,
+): boolean {
+  if (request.method === 'GET' || request.method === 'HEAD') return true
+  const origin = request.headers.origin
+  const fetchSite = request.headers['sec-fetch-site']
+  if (origin === undefined && fetchSite === undefined) return true
+  return origin === expectedOrigin
+    && (fetchSite === undefined || fetchSite === 'same-origin')
+}

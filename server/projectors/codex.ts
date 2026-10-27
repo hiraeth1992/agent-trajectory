@@ -21,6 +21,7 @@ import {
   projectedRecord,
   redactSensitive,
 } from '../../src/projector-utils'
+import { recordTimeBounds } from './projection-rollup'
 
 export interface CodexEnvelope {
   timestamp?: string
@@ -66,6 +67,64 @@ const KNOWN_TOP_LEVEL_TYPES = new Set([
   'turn_context',
   'world_state',
 ])
+
+const RUNTIME_STATE_KEYS = new Set([
+  'agents_md', 'apps_instructions', 'collaboration_mode',
+  'context_window_guidance', 'environments', 'environments_instructions',
+  'git_attribution', 'host_skills', 'managed_developer_instructions',
+  'model', 'model_catalog', 'multi_agent_mode', 'permissions',
+  'persistent_mode', 'plugins_instructions', 'realtime', 'skills',
+])
+
+const THREAD_SETTINGS_KEYS = new Set([
+  'model', 'model_provider_id', 'service_tier', 'approval_policy',
+  'approvals_reviewer', 'permission_profile', 'active_permission_profile',
+  'cwd', 'runtime_workspace_roots', 'reasoning_effort', 'reasoning_summary',
+  'personality', 'collaboration_mode', 'disabled_plugin_ids',
+])
+
+const COMPACTED_KEYS = new Set([
+  'message', 'replacement_history', 'replacement_history_metadata',
+  'retained_context', 'window_number', 'first_window_id',
+  'previous_window_id', 'window_id', 'compaction_response_id',
+  'latest_token_usage_record', 'resume_metadata',
+])
+
+const COMPACTION_MATCH_MAX_EVENT_DISTANCE = 8
+const COMPACTION_MATCH_MAX_TIME_MS = 1_000
+
+function recognizedConfiguration(value: unknown, keys: ReadonlySet<string>): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const names = Object.keys(value)
+  return names.length > 0 && names.every(key => keys.has(key))
+}
+
+function recognizedCompactedPayload(payload: JsonObject): boolean {
+  const names = Object.keys(payload)
+  const windowNumber = number(payload.window_number)
+  return names.length > 0
+    && names.every(key => COMPACTED_KEYS.has(key))
+    && windowNumber !== undefined
+    && Number.isInteger(windowNumber)
+    && windowNumber > 0
+    && string(payload.window_id) !== undefined
+    && [
+      payload.first_window_id,
+      payload.previous_window_id,
+      payload.compaction_response_id,
+    ].every(value => value === undefined || string(value) !== undefined)
+}
+
+function compactedPayload(payload: JsonObject): JsonObject {
+  return Object.fromEntries([
+    ['type', 'compacted'],
+    ['window_number', number(payload.window_number)],
+    ['first_window_id', string(payload.first_window_id)],
+    ['previous_window_id', string(payload.previous_window_id)],
+    ['window_id', string(payload.window_id)],
+    ['compaction_response_id', string(payload.compaction_response_id)],
+  ].filter((entry): entry is [string, string | number] => entry[1] !== undefined))
+}
 
 function timestamp(value: unknown): number | undefined {
   const numeric = number(value)
@@ -297,6 +356,41 @@ function contentPayload(payload: JsonObject): JsonObject {
   }
 }
 
+function completedContentPayload(item: JsonObject): JsonObject | undefined {
+  if (item.type === 'UserMessage' || item.type === 'AgentMessage') {
+    const content = normalizeContent(item.content)
+    if (content.length === 0) return undefined
+    return {
+      type: 'message',
+      id: item.id,
+      role: item.type === 'UserMessage' ? 'user' : 'assistant',
+      content,
+    }
+  }
+  if (item.type === 'Reasoning') {
+    const summary = normalizeContent(item.summary_text, 'reasoning')
+    if (summary.length === 0) return undefined
+    return { type: 'reasoning', id: item.id, summary }
+  }
+  return undefined
+}
+
+function completedContentRaw(timing: ItemTiming): unknown {
+  return acceptedRaw(timing.envelope, {
+    type: 'item_completed',
+    turn_id: timing.envelope.payload.turn_id,
+    item: {
+      type: timing.item.type,
+      id: timing.item.id,
+      content: timing.item.content,
+      summary_text: timing.item.summary_text,
+      phase: timing.item.phase,
+    },
+    started_at_ms: timing.envelope.payload.started_at_ms,
+    completed_at_ms: timing.envelope.payload.completed_at_ms,
+  })
+}
+
 function toolPayload(payload: JsonObject): JsonObject {
   return {
     type: payload.type,
@@ -351,6 +445,8 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
   const toolOutputs = new Map<string, IndexedEnvelope>()
   const modelCalls: IndexedEnvelope[] = []
   let threadUsage: TokenUsage | undefined
+  let countedThreadUsage: TokenUsage | undefined
+  const foldedTokenEvents = new Set<string>()
 
   for (const envelope of sorted) {
     const payloadType = string(envelope.payload.type)
@@ -415,10 +511,60 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
         modelCalls.push(envelope)
       }
     }
+    if (envelope.type === 'event_msg' && payloadType === 'token_count') {
+      const usage = tokenUsage(object(envelope.payload.info).total_token_usage)
+      if (usage !== undefined) {
+        countedThreadUsage = usage
+        foldedTokenEvents.add(envelopeSourceId(envelope))
+      }
+    }
   }
 
+  const contentEnvelopes = sorted.filter(envelope =>
+    envelope.type === 'response_item')
+  const contentTimings = new Map(itemTimings)
+  const messageCandidates = new Map<string, IndexedEnvelope[]>()
+  const messageKey = (envelope: IndexedEnvelope, payload = envelope.payload) => {
+    const turnId = turnIdFor(envelope)
+    if (turnId === undefined || payload.type !== 'message') return undefined
+    const content = normalizeContent(payload.content)
+    if (content.length === 0) return undefined
+    return JSON.stringify([turnId, payload.role, content])
+  }
+  for (const envelope of contentEnvelopes) {
+    if (string(envelope.payload.id) === undefined) continue
+    const key = messageKey(envelope)
+    if (key !== undefined) {
+      const candidates = messageCandidates.get(key) ?? []
+      candidates.push(envelope)
+      messageCandidates.set(key, candidates)
+    }
+  }
+  for (const [id, timing] of itemTimings) {
+    if (responseItems.has(id)) continue
+    const payload = completedContentPayload(timing.item)
+    if (payload === undefined) continue
+    const key = messageKey(timing.envelope, payload)
+    const candidates = key === undefined ? [] : messageCandidates.get(key) ?? []
+    const candidateId = candidates.length === 1
+      ? string(candidates[0].payload.id)
+      : undefined
+    // Client message IDs may differ from response IDs. Only pair a unique
+    // same-turn, same-role, same-content candidate; never guess across turns.
+    if (candidateId !== undefined && !contentTimings.has(candidateId)) {
+      contentTimings.set(candidateId, timing)
+      continue
+    }
+    contentEnvelopes.push({
+      ...timing.envelope,
+      type: 'response_item',
+      payload: { ...payload, turn_id: turnIdFor(timing.envelope) },
+    })
+  }
+  contentEnvelopes.sort((a, b) => a.ordinal - b.ordinal || a.fileOrder - b.fileOrder)
+
   const lastAssistantByTurn = new Map<string, number>()
-  for (const envelope of sorted) {
+  for (const envelope of contentEnvelopes) {
     if (envelope.type !== 'response_item'
       || string(envelope.payload.type) !== 'message'
       || string(envelope.payload.role) !== 'assistant') continue
@@ -427,14 +573,28 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
   }
 
   const records: TrajectoryRecord[] = []
-  for (const envelope of sorted) {
-    if (envelope.type !== 'response_item') continue
+  for (const envelope of contentEnvelopes) {
     const payloadType = string(envelope.payload.type)
+    const sourceId = string(envelope.payload.id) ?? `${envelope.ordinal}:${envelope.fileOrder}`
+    const timing = contentTimings.get(sourceId)
     const turnId = turnIdFor(envelope)
+      ?? (timing === undefined ? undefined : turnIdFor(timing.envelope))
     const turn = turnId === undefined ? undefined : ensureTurn(turnId)
     const turnNumber = turn?.number ?? 0
-    const sourceId = string(envelope.payload.id) ?? `${envelope.ordinal}:${envelope.fileOrder}`
-    const timing = itemTimings.get(sourceId)
+    const sourceEventIds = [...new Set([
+      sourceId,
+      envelopeSourceId(envelope),
+      ...(timing === undefined ? [] : [
+        string(timing.item.id) ?? sourceId,
+        envelopeSourceId(timing.envelope),
+      ]),
+    ])]
+    const raw = [
+      ...(timing !== undefined && envelopeSourceId(envelope) === envelopeSourceId(timing.envelope)
+        ? []
+        : [acceptedRaw(envelope, contentPayload(envelope.payload))]),
+      ...(timing === undefined ? [] : [completedContentRaw(timing)]),
+    ]
 
     if (payloadType === 'message') {
       const role = string(envelope.payload.role)
@@ -460,8 +620,10 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       const endTime = status === 'running' ? null : messageCompletedAt
       records.push(searchable({
         id: `${classification.kind}:${sourceId}`,
-        sourceEventIds: [sourceId, envelopeSourceId(envelope)],
-        fidelity: 'exact',
+        sourceEventIds,
+        fidelity: timing !== undefined && timing.item.id !== sourceId
+          ? 'derived'
+          : 'exact',
         seq: envelope.ordinal,
         turn: turnNumber,
         step: 1,
@@ -476,7 +638,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
         output: classification.kind === 'assistant' ? content : undefined,
         provider: string(sessionPayload.model_provider),
         model: turn?.model,
-        raw: [acceptedRaw(envelope, contentPayload(envelope.payload))],
+        raw,
       }))
       continue
     }
@@ -493,7 +655,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       }
       records.push(searchable({
         id: `reasoning:${sourceId}`,
-        sourceEventIds: [sourceId, envelopeSourceId(envelope)],
+        sourceEventIds,
         fidelity: 'exact',
         seq: envelope.ordinal,
         turn: turnNumber,
@@ -508,7 +670,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
         output: content,
         provider: string(sessionPayload.model_provider),
         model: turn?.model,
-        raw: [acceptedRaw(envelope, contentPayload(envelope.payload))],
+        raw,
       }))
     }
   }
@@ -643,13 +805,87 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     }))
   }
 
+  const validCompacted = sorted.filter(envelope =>
+    envelope.type === 'compacted' && recognizedCompactedPayload(envelope.payload))
+  const compactedByItemId = new Map<string, IndexedEnvelope>()
+  const matchedCompacted = new Set<string>()
+  const usedCompactionItems = new Set<string>()
+  const isCompactionBridge = (envelope: IndexedEnvelope): boolean => {
+    if (envelope.type === 'world_state'
+      || envelope.type === 'turn_context'
+      || envelope.type === 'token_usage_record') return true
+    return envelope.type === 'event_msg'
+      && (envelope.payload.type === 'thread_settings_applied'
+        || envelope.payload.type === 'token_count')
+  }
+  for (const compacted of validCompacted) {
+    const compactedIndex = sorted.indexOf(compacted)
+    for (
+      let index = compactedIndex + 1;
+      index < sorted.length
+        && index - compactedIndex <= COMPACTION_MATCH_MAX_EVENT_DISTANCE;
+      index += 1
+    ) {
+      const candidate = sorted[index]
+      const compactedTime = envelopeTime(compacted)
+      const candidateTime = envelopeTime(candidate)
+      if (compactedTime > 0
+        && candidateTime > 0
+        && candidateTime - compactedTime > COMPACTION_MATCH_MAX_TIME_MS) break
+      const item = object(candidate.payload.item)
+      const itemId = string(item.id)
+      if (candidate.type === 'event_msg'
+        && candidate.payload.type === 'item_completed'
+        && item.type === 'ContextCompaction'
+        && itemId !== undefined
+        && !usedCompactionItems.has(itemId)) {
+        compactedByItemId.set(itemId, compacted)
+        matchedCompacted.add(envelopeSourceId(compacted))
+        usedCompactionItems.add(itemId)
+        break
+      }
+      if (!isCompactionBridge(candidate)) break
+    }
+  }
+
+  const neighboringTurnId = (compacted: IndexedEnvelope): string | undefined => {
+    const compactedIndex = sorted.indexOf(compacted)
+    const candidates = new Set<string>()
+    for (const direction of [-1, 1]) {
+      for (
+        let distance = 1;
+        distance <= COMPACTION_MATCH_MAX_EVENT_DISTANCE;
+        distance += 1
+      ) {
+        const neighbor = sorted[compactedIndex + direction * distance]
+        if (neighbor === undefined) break
+        const compactedTime = envelopeTime(compacted)
+        const neighborTime = envelopeTime(neighbor)
+        if (compactedTime > 0
+          && neighborTime > 0
+          && Math.abs(neighborTime - compactedTime) > COMPACTION_MATCH_MAX_TIME_MS) break
+        const turnId = turnIdFor(neighbor)
+        if (turnId !== undefined) {
+          candidates.add(turnId)
+          break
+        }
+      }
+    }
+    return candidates.size === 1 ? [...candidates][0] : undefined
+  }
+
   for (const [id, timing] of itemTimings) {
     if (string(timing.item.type) !== 'ContextCompaction') continue
     const turnId = turnIdFor(timing.envelope)
+    const compacted = compactedByItemId.get(id)
     records.push(searchable({
       id: `compaction:${id}`,
-      sourceEventIds: [id, envelopeSourceId(timing.envelope)],
-      fidelity: 'exact',
+      sourceEventIds: [
+        id,
+        envelopeSourceId(timing.envelope),
+        ...(compacted === undefined ? [] : [envelopeSourceId(compacted)]),
+      ],
+      fidelity: compacted === undefined ? 'exact' : 'derived',
       seq: timing.envelope.ordinal,
       turn: turnId === undefined ? 0 : ensureTurn(turnId).number,
       step: 1,
@@ -660,13 +896,40 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       endTime: timing.endTime ?? envelopeTime(timing.envelope),
       status: 'complete',
       depth: 0,
-      raw: [acceptedRaw(timing.envelope, {
-        type: 'item_completed',
-        turn_id: timing.envelope.payload.turn_id,
-        item: timing.item,
-        started_at_ms: timing.envelope.payload.started_at_ms,
-        completed_at_ms: timing.envelope.payload.completed_at_ms,
-      })],
+      raw: [
+        ...(compacted === undefined
+          ? []
+          : [acceptedRaw(compacted, compactedPayload(compacted.payload))]),
+        acceptedRaw(timing.envelope, {
+          type: 'item_completed',
+          turn_id: timing.envelope.payload.turn_id,
+          item: timing.item,
+          started_at_ms: timing.envelope.payload.started_at_ms,
+          completed_at_ms: timing.envelope.payload.completed_at_ms,
+        }),
+      ],
+    }))
+  }
+  for (const compacted of validCompacted) {
+    const sourceEventId = envelopeSourceId(compacted)
+    if (matchedCompacted.has(sourceEventId)) continue
+    const windowId = string(compacted.payload.window_id)!
+    const turnId = neighboringTurnId(compacted)
+    records.push(searchable({
+      id: `compaction:${windowId}`,
+      sourceEventIds: [sourceEventId],
+      fidelity: 'derived',
+      seq: compacted.ordinal,
+      turn: turnId === undefined ? 0 : ensureTurn(turnId).number,
+      step: 1,
+      kind: 'compaction',
+      title: '上下文压缩',
+      summary: 'Codex 上下文压缩',
+      startTime: envelopeTime(compacted),
+      endTime: envelopeTime(compacted),
+      status: 'complete',
+      depth: 0,
+      raw: [acceptedRaw(compacted, compactedPayload(compacted.payload))],
     }))
   }
 
@@ -688,12 +951,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     || a.id.localeCompare(b.id))
   assignLogicalSteps(records)
 
-  const recordTimes = records.flatMap(record => [
-    record.startTime,
-    ...(record.endTime === null ? [] : [record.endTime]),
-  ]).filter(value => Number.isFinite(value) && value > 0)
-  const startTime = recordTimes.length === 0 ? createdAt : Math.min(...recordTimes)
-  const endTime = recordTimes.length === 0 ? createdAt : Math.max(...recordTimes)
+  const { startTime, endTime } = recordTimeBounds(records, createdAt)
   const eventTypeCounts: Record<string, number> = {}
   const unknownEventTypes = new Set<string>()
   for (const envelope of sorted) {
@@ -734,7 +992,36 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       || type === 'token_usage_record') {
       return { disposition: 'folded-state' }
     }
-    if (type === 'response_item/message'
+    if (type === 'event_msg/token_count') {
+      return {
+        disposition: 'folded-state',
+        consumed: foldedTokenEvents.size,
+        reason: '累计 Token 快照折叠为会话用量；缺少有效用量的事件仍未消费。',
+      }
+    }
+    if (type === 'event_msg/thread_settings_applied'
+      && sorted.filter(envelope => envelope.type === 'event_msg'
+        && envelope.payload.type === 'thread_settings_applied')
+        .every(envelope => recognizedConfiguration(
+          envelope.payload.thread_settings,
+          THREAD_SETTINGS_KEYS,
+        ))) {
+      return {
+        disposition: 'raw-only',
+        reason: '已识别的线程运行配置保留在原始审计中，不作为任务执行结果。',
+      }
+    }
+    if (type === 'world_state'
+      && sorted.filter(envelope => envelope.type === 'world_state')
+        .every(envelope => typeof envelope.payload.full === 'boolean'
+          && recognizedConfiguration(envelope.payload.state, RUNTIME_STATE_KEYS))) {
+      return {
+        disposition: 'raw-only',
+        reason: '已识别的运行上下文快照保留在原始审计中，不作为工作区变更结果。',
+      }
+    }
+    if (type === 'compacted'
+      || type === 'response_item/message'
       || type === 'response_item/reasoning'
       || type === 'response_item/function_call'
       || type === 'response_item/function_call_output'
@@ -795,6 +1082,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
         time: turn.completedAt!,
         reason: turn.reason,
       }])),
-    usage: threadUsage ?? sumTokenUsage([...turns.values()].map(turn => turn.usage)),
+    usage: threadUsage ?? countedThreadUsage
+      ?? sumTokenUsage([...turns.values()].map(turn => turn.usage)),
   }
 }

@@ -450,6 +450,27 @@ export class CodexSource implements SessionSource {
           await this.scanDirectory(directory, false)
         }
       }
+      const knownPages = [...this.pagesByFile]
+      const knownStats = await Promise.allSettled(
+        knownPages.map(([file]) => fs.stat(file)),
+      )
+      knownPages.forEach(([file, page], index) => {
+        const result = knownStats[index]!
+        if (result.status === 'rejected') {
+          if ((result.reason as NodeJS.ErrnoException).code === 'ENOENT') {
+            this.removePage(file)
+          }
+          return
+        }
+        const stat = result.value
+        if (stat.size !== page.size || stat.mtimeMs !== page.mtimeMs) {
+          this.addPage({
+            ...page,
+            size: Number(stat.size),
+            mtimeMs: Number(stat.mtimeMs),
+          })
+        }
+      })
       const pending = [...this.pendingRollouts]
       const pendingStats = await Promise.allSettled(
         pending.map(([file]) => fs.stat(file)),

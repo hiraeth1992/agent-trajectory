@@ -217,4 +217,24 @@ describe('diagnosis evidence', () => {
       view: 'overview',
     })).rejects.toThrow('invalid snapshot id')
   })
+
+  it('does not prune snapshots returned by concurrent creation requests', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-evidence-'))
+    roots.push(root)
+    const store = new DiagnosisEvidenceStore(path.join(root, 'snapshots'), {
+      maxSnapshots: 2,
+      maxBytes: 100 * 1024 * 1024,
+    })
+
+    const snapshots = await Promise.all(Array.from({ length: 8 }, (_, index) =>
+      store.create(
+        { source: 'codex', sessionId: 'evidence-session' },
+        `fingerprint-${index}`,
+        detail(),
+      )))
+
+    expect(await Promise.all(snapshots.map(snapshot =>
+      fs.access(snapshot.file).then(() => true, () => false))))
+      .toEqual(Array.from({ length: 8 }, () => true))
+  })
 })

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { EvaluationSplit } from '../../src/evaluation-types'
 import type { SessionDetail } from '../../src/types'
 
-export const SAMPLING_POLICY_VERSION = 3
+export const SAMPLING_POLICY_VERSION = 4
 
 export interface SamplingCandidate {
   detail: SessionDetail
@@ -46,12 +46,71 @@ export function candidateGroupKey(detail: SessionDetail): string {
     : `${detail.summary.source}:parent:${parent}`
 }
 
-export function candidatePoolHash(values: SamplingCandidate[]): string {
+export function candidateGroupKeys<T extends SamplingCandidate>(
+  values: readonly T[],
+): Map<T, string> {
+  const parents = values.map((_value, index) => index)
+  const root = (index: number): number => {
+    while (parents[index] !== index) {
+      parents[index] = parents[parents[index]!]!
+      index = parents[index]!
+    }
+    return index
+  }
+  const union = (left: number, right: number) => {
+    const leftRoot = root(left)
+    const rightRoot = root(right)
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot
+  }
+  const bySession = new Map<string, number>()
+  const byWorkspace = new Map<string, number>()
+  const byMissingParent = new Map<string, number>()
+  values.forEach((value, index) => {
+    bySession.set(`${value.summary.source}:${value.summary.sourceSessionId}`, index)
+    const workspace = value.summary.cwd.replaceAll('\\', '/').replace(/\/+$/, '')
+    const workspaceKey = `${value.summary.source}:${workspace || '<unknown>'}`
+    const previous = byWorkspace.get(workspaceKey)
+    if (previous === undefined) byWorkspace.set(workspaceKey, index)
+    else union(previous, index)
+  })
+  values.forEach((value, index) => {
+    const parentId = value.detail.projection.header.parentSessionId
+    if (parentId === undefined || parentId === '') return
+    const parentKey = `${value.summary.source}:${parentId}`
+    const parentIndex = bySession.get(parentKey)
+    if (parentIndex !== undefined) {
+      union(parentIndex, index)
+      return
+    }
+    const sibling = byMissingParent.get(parentKey)
+    if (sibling === undefined) byMissingParent.set(parentKey, index)
+    else union(sibling, index)
+  })
+  const members = new Map<number, string[]>()
+  values.forEach((value, index) => {
+    const selectedRoot = root(index)
+    const group = members.get(selectedRoot) ?? []
+    group.push(`${value.summary.source}:${value.summary.sourceSessionId}`)
+    members.set(selectedRoot, group)
+  })
+  return new Map(values.map((value, index) => {
+    const identities = members.get(root(index))!.sort()
+    return [
+      value,
+      `${value.summary.source}:lineage-workspace:${sha256(identities.join('\0'))}`,
+    ]
+  }))
+}
+
+export function candidatePoolHash(
+  values: SamplingCandidate[],
+  groupKeys = candidateGroupKeys(values),
+): string {
   return sha256(JSON.stringify(values
     .map(value => ({
       source: value.summary.source,
       fingerprint: sha256(value.fingerprint),
-      groupHash: sha256(candidateGroupKey(value.detail)),
+      groupHash: sha256(groupKeys.get(value) ?? candidateGroupKey(value.detail)),
       traits: visibleCandidateTraits(value.detail),
       records: value.detail.projection.records.length,
       turns: value.detail.projection.turns.length,
@@ -109,10 +168,12 @@ function splitTargets(total: number): Record<EvaluationSplit, number> {
 export function groupAwareSplits<T extends SamplingCandidate>(
   values: T[],
   seed: string,
+  providedGroupKeys?: ReadonlyMap<T, string>,
 ): Map<T, EvaluationSplit> {
+  const groupKeys = providedGroupKeys ?? candidateGroupKeys(values)
   const groups = new Map<string, T[]>()
   for (const value of values) {
-    const key = candidateGroupKey(value.detail)
+    const key = groupKeys.get(value) ?? candidateGroupKey(value.detail)
     const group = groups.get(key) ?? []
     group.push(value)
     groups.set(key, group)

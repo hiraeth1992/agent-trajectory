@@ -604,6 +604,434 @@ describe('analyzeTrajectory', () => {
     })
   })
 
+  it('does not treat quoted command text or mixed test failures as successful validation', () => {
+    const quoted = analyzeTrajectory(detail([
+      record('quoted-validation', {
+        title: 'exec_command',
+        input: { cmd: 'echo "npm test"' },
+        output: 'Tests 2 passed',
+        status: 'complete',
+      }),
+    ]))
+    expect(quoted.outcome.label).toBe('未发现错误证据')
+
+    const mixed = analyzeTrajectory(detail([
+      record('mixed-validation', {
+        title: 'exec_command',
+        input: { cmd: 'npm test' },
+        output: 'Tests 3 passed | Tests 2 failed',
+        status: 'complete',
+      }),
+    ]))
+    expect(mixed.outcome).toMatchObject({
+      label: '结果存在未解决问题',
+      tone: 'negative',
+    })
+    expect(mixed.steps[0]?.result).toContain('失败')
+  })
+
+  it('recognizes supported validation commands independent of the source tool label', () => {
+    const analysis = analyzeTrajectory(detail([
+      record('pnpm-validation', {
+        title: 'Bash',
+        input: { command: 'pnpm test' },
+        output: 'Tests 4 passed',
+        status: 'complete',
+      }),
+    ]))
+
+    expect(analysis.outcome).toMatchObject({
+      label: '已完成并有验证证据',
+      tone: 'positive',
+    })
+  })
+
+  it('lets a final successful validation determine outcome despite older diagnostic failures', () => {
+    const analysis = analyzeTrajectory(detail([
+      record('diagnostic-first', {
+        seq: 1,
+        step: 1,
+        title: 'exec_command',
+        input: { cmd: 'node diagnose-first.js' },
+        status: 'error',
+        error: { code: '1', reason: 'diagnostic invocation failed' },
+      }),
+      record('diagnostic-second', {
+        seq: 2,
+        step: 2,
+        title: 'exec_command',
+        input: { cmd: 'node diagnose-second.js' },
+        status: 'error',
+        error: { code: '1', reason: 'diagnostic invocation failed again' },
+      }),
+      record('final-validation', {
+        seq: 3,
+        step: 3,
+        title: 'exec_command',
+        input: { cmd: 'npm test' },
+        output: 'Test Files 2 passed\nTests 12 passed',
+        status: 'complete',
+      }),
+    ]))
+
+    expect(analysis.corrections).toContainEqual(expect.objectContaining({
+      id: 'recovery:step:1:1',
+      status: 'unresolved',
+    }))
+    expect(analysis.outcome).toMatchObject({
+      label: '已完成并有验证证据',
+      tone: 'positive',
+      confidence: 'high',
+      evidenceRecordIds: ['final-validation'],
+    })
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '存在成功验证',
+      grade: 'good',
+    })
+    expect(analysis.evaluations.find(item => item.id === 'recovery')).toMatchObject({
+      label: '恢复不完整',
+      grade: 'bad',
+    })
+  })
+
+  it('does not let exit 130 from an interrupted turn block a later completed answer', () => {
+    const value = detail([
+      record('aborted-search', {
+        seq: 1,
+        turn: 1,
+        step: 1,
+        title: 'exec_command',
+        input: { cmd: 'rg localeOverride config.toml' },
+        status: 'error',
+        error: { code: '130', reason: 'command interrupted' },
+      }),
+      record('aborted-stdin', {
+        seq: 2,
+        turn: 1,
+        step: 2,
+        title: 'write_stdin',
+        input: { session_id: 25_525, chars: '\u0003' },
+        status: 'error',
+        error: { code: '130', reason: 'process interrupted' },
+      }),
+      record('follow-up', {
+        seq: 3,
+        turn: 2,
+        step: 0,
+        kind: 'user',
+        title: '用户',
+        summary: '我说的是界面语言',
+        input: [{ type: 'text', text: '我说的是界面语言' }],
+      }),
+      record('final-answer', {
+        seq: 4,
+        turn: 2,
+        step: 2,
+        kind: 'assistant',
+        title: '助手',
+        summary: '中文设置已保存，完整重启后生效。',
+        output: [{ type: 'text', text: '中文设置已保存，完整重启后生效。' }],
+      }),
+    ])
+    value.projection.turns = [
+      {
+        id: 'turn-1',
+        number: 1,
+        startTime: 1_000,
+        endTime: 3_000,
+        status: 'interrupted',
+        reason: 'interrupted',
+      },
+      {
+        id: 'turn-2',
+        number: 2,
+        startTime: 4_000,
+        endTime: 7_000,
+        status: 'complete',
+        reason: 'completed',
+      },
+    ]
+    value.projection.turnEnds = {
+      1: { time: 3_000, reason: 'interrupted' },
+      2: { time: 7_000, reason: 'completed' },
+    }
+
+    const analysis = analyzeTrajectory(value)
+
+    expect(analysis.corrections).toContainEqual(expect.objectContaining({
+      id: 'recovery:step:1:1',
+      status: 'unresolved',
+    }))
+    expect(analysis.outcome).toMatchObject({
+      label: '已完成，但缺少独立验证',
+      tone: 'warning',
+      confidence: 'medium',
+      evidenceRecordIds: expect.arrayContaining(['aborted-search', 'final-answer']),
+    })
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '缺少独立验证',
+      grade: 'warning',
+      confidence: 'medium',
+    })
+  })
+
+  it('keeps interrupted exit 130 unresolved without a later completed turn', () => {
+    const value = detail([
+      record('aborted-only', {
+        title: 'exec_command',
+        input: { cmd: 'rg localeOverride config.toml' },
+        status: 'error',
+        error: { code: '130', reason: 'command interrupted' },
+      }),
+    ])
+    value.projection.turns[0] = {
+      ...value.projection.turns[0]!,
+      status: 'interrupted',
+      reason: 'interrupted',
+    }
+    value.projection.turnEnds = {
+      1: { time: 7_000, reason: 'interrupted' },
+    }
+
+    const analysis = analyzeTrajectory(value)
+
+    expect(analysis.outcome).toMatchObject({
+      label: '结果存在未解决问题',
+      tone: 'negative',
+      confidence: 'high',
+      evidenceRecordIds: ['aborted-only'],
+    })
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '验证未通过',
+      grade: 'bad',
+    })
+  })
+
+  it('keeps an explicitly blocked follow-up negative after an interrupted turn', () => {
+    const value = detail([
+      record('aborted-before-block', {
+        seq: 1,
+        turn: 1,
+        step: 1,
+        title: 'exec_command',
+        input: { cmd: 'rg localeOverride config.toml' },
+        status: 'error',
+        error: { code: '130', reason: 'command interrupted' },
+      }),
+      record('blocked-follow-up', {
+        seq: 2,
+        turn: 2,
+        step: 0,
+        kind: 'user',
+        title: '用户',
+        summary: '继续处理',
+      }),
+      record('blocked-answer', {
+        seq: 3,
+        turn: 2,
+        step: 1,
+        kind: 'assistant',
+        title: '助手',
+        summary: '缺少权限，无法完成。',
+        output: [{ type: 'text', text: '缺少权限，无法完成。' }],
+      }),
+    ])
+    value.projection.turns = [
+      {
+        id: 'turn-1',
+        number: 1,
+        startTime: 1_000,
+        endTime: 3_000,
+        status: 'interrupted',
+        reason: 'interrupted',
+      },
+      {
+        id: 'turn-2',
+        number: 2,
+        startTime: 4_000,
+        endTime: 7_000,
+        status: 'complete',
+        reason: 'completed',
+      },
+    ]
+    value.projection.taskState = {
+      target: {
+        id: 'blocked-target',
+        objective: '处理语言设置',
+        status: 'blocked',
+        updatedAt: 7_000,
+      },
+      todos: [],
+    }
+
+    const analysis = analyzeTrajectory(value)
+
+    expect(analysis.outcome).toMatchObject({
+      label: '结果存在未解决问题',
+      summary: '任务状态明确标记为 blocked。',
+      tone: 'negative',
+      confidence: 'high',
+    })
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '任务受阻',
+      grade: 'bad',
+    })
+  })
+
+  it('does not ignore exit 130 from a turn that was not interrupted', () => {
+    const analysis = analyzeTrajectory(detail([
+      record('failed-normal-turn', {
+        title: 'exec_command',
+        input: { cmd: 'rg localeOverride config.toml' },
+        status: 'error',
+        error: { code: '130', reason: 'command interrupted' },
+      }),
+    ]))
+
+    expect(analysis.outcome).toMatchObject({
+      label: '结果存在未解决问题',
+      tone: 'negative',
+      confidence: 'high',
+      evidenceRecordIds: ['failed-normal-turn'],
+    })
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '验证未通过',
+      grade: 'bad',
+    })
+  })
+
+  it('reports partial repair when successful validation is followed by an unresolved failure', () => {
+    const analysis = analyzeTrajectory(detail([
+      record('validated-part', {
+        seq: 1,
+        step: 1,
+        title: 'exec_command',
+        input: { cmd: 'npm test' },
+        output: 'Test Files 1 passed\nTests 4 passed',
+        status: 'complete',
+      }),
+      record('later-failure', {
+        seq: 2,
+        step: 2,
+        title: 'exec_command',
+        input: { cmd: 'node verify-browser.js' },
+        status: 'error',
+        error: { code: '1', reason: 'browser verification failed' },
+      }),
+    ]))
+
+    expect(analysis.outcome).toMatchObject({
+      label: '部分修复，仍有未完成项',
+      tone: 'warning',
+      confidence: 'medium',
+      evidenceRecordIds: expect.arrayContaining(['validated-part', 'later-failure']),
+    })
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '部分通过',
+      grade: 'warning',
+    })
+  })
+
+  it('reports partial repair when task state retains explicit incomplete items', () => {
+    const value = detail([
+      record('validated-scope', {
+        title: 'exec_command',
+        input: { cmd: 'npm test' },
+        output: 'Test Files 1 passed\nTests 6 passed',
+        status: 'complete',
+      }),
+    ])
+    value.projection.taskState = {
+      target: {
+        id: 'target-partial',
+        objective: '完成两个修复项',
+        status: 'complete',
+        updatedAt: 2_000,
+      },
+      todos: [
+        { content: '修复标题', status: 'completed', position: 0 },
+        { content: '修复筛选', status: 'in_progress', position: 1 },
+      ],
+    }
+
+    const analysis = analyzeTrajectory(value)
+
+    expect(analysis.outcome).toMatchObject({
+      label: '部分修复，仍有未完成项',
+      tone: 'warning',
+      confidence: 'high',
+      evidenceRecordIds: ['validated-scope'],
+    })
+    expect(analysis.outcome.summary).toContain('1 个未完成项')
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '部分通过',
+      grade: 'warning',
+    })
+  })
+
+  it('treats an active or paused target in a finished session as explicit incomplete state', () => {
+    for (const status of ['active', 'paused']) {
+      const value = detail([
+        record(`validation-${status}`, {
+          title: 'exec_command',
+          input: { cmd: 'npm test' },
+          output: 'Tests 3 passed',
+          status: 'complete',
+        }),
+      ])
+      value.projection.taskState = {
+        target: {
+          id: `target-${status}`,
+          objective: '完成全部修复',
+          status,
+          updatedAt: 2_000,
+        },
+        todos: [],
+      }
+
+      expect(analyzeTrajectory(value).outcome).toMatchObject({
+        label: '部分修复，仍有未完成项',
+        tone: 'warning',
+        confidence: 'high',
+      })
+    }
+  })
+
+  it('preserves an explicit partial target even when the latest scoped validation failed', () => {
+    const value = detail([
+      record('partial-validation', {
+        title: 'exec_command',
+        input: { cmd: 'npm test' },
+        output: 'Tests 2 passed | Tests 1 failed',
+        status: 'error',
+        error: { code: '1', reason: 'one remaining failure' },
+      }),
+    ])
+    value.projection.taskState = {
+      target: {
+        id: 'target-explicit-partial',
+        objective: '完成全部修复',
+        status: 'partial',
+        updatedAt: 2_000,
+      },
+      todos: [],
+    }
+
+    const analysis = analyzeTrajectory(value)
+
+    expect(analysis.outcome).toMatchObject({
+      label: '部分修复，仍有未完成项',
+      tone: 'warning',
+      confidence: 'high',
+      evidenceRecordIds: ['partial-validation'],
+    })
+    expect(analysis.outcome.summary).toContain('明确标记为部分完成')
+    expect(analysis.evaluations[0]).toMatchObject({
+      label: '部分通过',
+      grade: 'warning',
+    })
+  })
+
   it('distinguishes explicit retry recovery from unresolved failures', () => {
     const retried = record('retried', {
       step: 1,
@@ -641,6 +1069,10 @@ describe('analyzeTrajectory', () => {
     expect(analysis.outcome).toMatchObject({
       label: '结果存在未解决问题',
       tone: 'negative',
+    })
+    expect(analysis.evaluations.find(item => item.id === 'recovery')).toMatchObject({
+      label: '恢复不完整',
+      summary: '1 个异常后出现成功动作；1 个异常没有后续成功证据。相邻步骤关联属于轨迹推断。',
     })
   })
 

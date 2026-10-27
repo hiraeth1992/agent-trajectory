@@ -23,7 +23,7 @@ configuration except when hooks are explicitly installed or removed.
 The animation below shows Session analysis, Trajectory evaluation, and the
 Evaluation center in the current version:
 
-![Agent Trajectory product demo](docs/assets/readme/product-overview.gif)
+![Agent Trajectory product demo](https://raw.githubusercontent.com/hiraeth1992/agent-trajectory/main/docs/assets/readme/product-overview.gif)
 
 ## Highlights
 

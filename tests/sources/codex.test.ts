@@ -80,6 +80,335 @@ describe('Codex JSONL parser', () => {
 })
 
 describe('Codex projector', () => {
+  it('merges top-level compacted events into adjacent context-compaction records without exposing history', () => {
+    const compacted = {
+      ...row(1, 'compacted', {
+        message: 'password=compaction-private-message',
+        replacement_history: [{ content: 'compaction-private-history' }],
+        replacement_history_metadata: { private: 'compaction-private-metadata' },
+        retained_context: { content: 'compaction-private-context' },
+        window_number: 1,
+        first_window_id: 'window-first',
+        previous_window_id: 'window-previous',
+        window_id: 'window-current',
+        compaction_response_id: 'response-compaction',
+        latest_token_usage_record: { total_tokens: 42 },
+        resume_metadata: { private: true },
+      }, '2026-01-01T00:00:01.000Z'),
+      metadata: { source_event_id: 'page:0:line:2:ordinal:1' },
+    }
+    const projection = projectCodexTrajectory([
+      row(0, 'event_msg', { type: 'task_started', turn_id: 'turn-compaction' }),
+      compacted,
+      row(2, 'event_msg', {
+        type: 'token_count',
+        info: { total_token_usage: { total_tokens: 42 } },
+      }, '2026-01-01T00:00:01.002Z'),
+      row(3, 'event_msg', {
+        type: 'item_completed',
+        turn_id: 'turn-compaction',
+        item: { type: 'ContextCompaction', id: 'context-compaction-item' },
+      }, '2026-01-01T00:00:01.004Z'),
+    ])
+
+    const records = projection.records.filter(record => record.kind === 'compaction')
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({
+      id: 'compaction:context-compaction-item',
+      sourceEventIds: expect.arrayContaining([
+        'page:0:line:2:ordinal:1',
+        'context-compaction-item',
+        '3',
+      ]),
+      fidelity: 'derived',
+      turn: 1,
+    })
+    expect(records[0]?.raw).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'compacted',
+        payload: {
+          type: 'compacted',
+          window_number: 1,
+          first_window_id: 'window-first',
+          previous_window_id: 'window-previous',
+          window_id: 'window-current',
+          compaction_response_id: 'response-compaction',
+        },
+      }),
+    ]))
+    expect(JSON.stringify(records[0])).not.toContain('compaction-private')
+    expect(projection.coverage).toContainEqual(expect.objectContaining({
+      type: 'compacted',
+      total: 1,
+      consumed: 1,
+      disposition: 'record',
+    }))
+  })
+
+  it('projects standalone top-level compacted events with an adjacent derived turn', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'event_msg', { type: 'task_started', turn_id: 'turn-standalone' }),
+      row(1, 'compacted', {
+        window_number: 2,
+        first_window_id: 'window-first',
+        previous_window_id: 'window-first',
+        window_id: 'window-second',
+        compaction_response_id: 'response-second',
+      }),
+    ])
+
+    expect(projection.records).toContainEqual(expect.objectContaining({
+      id: 'compaction:window-second',
+      sourceEventIds: expect.arrayContaining(['1']),
+      fidelity: 'derived',
+      kind: 'compaction',
+      turn: 1,
+    }))
+    expect(projection.coverageSummary).toEqual({ total: 2, consumed: 2, gap: 0 })
+  })
+
+  it('leaves malformed or future top-level compacted payloads uncovered', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'compacted', {
+        window_number: 1,
+        previous_window_id: 'window-previous',
+      }),
+      row(1, 'compacted', {
+        window_number: 2,
+        window_id: 'window-future',
+        future_required_state: true,
+      }),
+    ])
+
+    expect(projection.records.filter(record => record.kind === 'compaction')).toEqual([])
+    expect(projection.coverage).toContainEqual(expect.objectContaining({
+      type: 'compacted',
+      total: 2,
+      consumed: 0,
+      disposition: 'record',
+    }))
+  })
+
+  it('accounts for message and reasoning completions without duplicating their records', () => {
+    const turnId = 'turn-completion-coverage'
+    const projection = projectCodexTrajectory([
+      row(0, 'event_msg', { type: 'task_started', turn_id: turnId }),
+      row(1, 'response_item', {
+        type: 'message',
+        id: 'response-user',
+        role: 'user',
+        content: [{ type: 'input_text', text: '启动项目' }],
+        turn_id: turnId,
+      }),
+      row(2, 'event_msg', {
+        type: 'item_completed',
+        turn_id: turnId,
+        item: { type: 'UserMessage', id: 'client-user', content: [{ type: 'text', text: '启动项目' }] },
+        started_at_ms: 1_000,
+        completed_at_ms: 1_100,
+      }),
+      row(3, 'response_item', {
+        type: 'reasoning',
+        id: 'reasoning-coverage',
+        summary: [{ type: 'summary_text', text: '检查启动脚本' }],
+        turn_id: turnId,
+      }),
+      row(4, 'event_msg', {
+        type: 'item_completed',
+        turn_id: turnId,
+        item: { type: 'Reasoning', id: 'reasoning-coverage', summary_text: ['检查启动脚本'] },
+      }),
+      row(5, 'response_item', {
+        type: 'message',
+        id: 'assistant-coverage',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '已启动' }],
+        turn_id: turnId,
+      }),
+      row(6, 'event_msg', {
+        type: 'item_completed',
+        turn_id: turnId,
+        item: { type: 'AgentMessage', id: 'assistant-coverage' },
+      }),
+      row(7, 'event_msg', { type: 'task_complete', turn_id: turnId }),
+    ])
+
+    expect(projection.records).toHaveLength(3)
+    expect(projection.records.find(record => record.id === 'user:response-user'))
+      .toMatchObject({
+        sourceEventIds: expect.arrayContaining(['1', '2', 'client-user']),
+        fidelity: 'derived',
+        startTime: 1_000,
+        endTime: 1_100,
+        turn: 1,
+      })
+    expect(projection.records.find(record => record.id === 'reasoning:reasoning-coverage'))
+      .toMatchObject({ sourceEventIds: expect.arrayContaining(['3', '4']) })
+    expect(projection.records.find(record => record.id === 'assistant:assistant-coverage'))
+      .toMatchObject({ sourceEventIds: expect.arrayContaining(['5', '6']) })
+    expect(projection.coverageSummary).toEqual({ total: 8, consumed: 8, gap: 0 })
+  })
+
+  it('projects completion-only text items but leaves unknown or empty items uncovered', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'event_msg', {
+        type: 'item_completed',
+        turn_id: 'turn-only',
+        item: { type: 'UserMessage', id: 'only-user', content: [{ type: 'text', text: '请检查' }] },
+      }),
+      row(1, 'event_msg', {
+        type: 'item_completed',
+        turn_id: 'turn-only',
+        item: { type: 'AgentMessage', id: 'only-assistant', content: ['已检查'] },
+      }),
+      row(2, 'event_msg', {
+        type: 'item_completed',
+        turn_id: 'turn-only',
+        item: {
+          type: 'Reasoning',
+          id: 'only-reasoning',
+          summary_text: ['先核对事实'],
+          raw_content: ['private-reasoning-content'],
+        },
+      }),
+      row(3, 'event_msg', {
+        type: 'item_completed',
+        item: { type: 'AgentMessage', id: 'empty-assistant' },
+      }),
+      row(4, 'event_msg', {
+        type: 'item_completed',
+        item: { type: 'FutureItem', id: 'future-item', content: ['unknown'] },
+      }),
+    ])
+
+    expect(projection.records).toHaveLength(3)
+    expect(projection.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'user:only-user', input: [{ type: 'text', text: '请检查' }] }),
+      expect.objectContaining({ id: 'assistant:only-assistant', output: [{ type: 'text', text: '已检查' }] }),
+      expect.objectContaining({ id: 'reasoning:only-reasoning', output: [{ type: 'reasoning', text: '先核对事实' }] }),
+    ]))
+    expect(JSON.stringify(projection.records)).not.toContain('private-reasoning-content')
+    expect(projection.coverageSummary).toEqual({ total: 5, consumed: 3, gap: 2 })
+  })
+
+  it('does not match identical text across turns or ambiguous response messages', () => {
+    const projection = projectCodexTrajectory([
+      ...['turn-first', 'turn-second', 'turn-second'].map((turnId, index) => row(
+        index,
+        'response_item',
+        {
+          type: 'message',
+          id: `response-${index}`,
+          role: 'user',
+          content: [{ type: 'input_text', text: '继续' }],
+          turn_id: turnId,
+        },
+      )),
+      row(3, 'event_msg', {
+        type: 'item_completed',
+        turn_id: 'turn-second',
+        item: { type: 'UserMessage', id: 'ambiguous-user', content: [{ type: 'text', text: '继续' }] },
+      }),
+    ])
+
+    expect(projection.records.filter(record => record.sourceEventIds.includes('3')))
+      .toEqual([expect.objectContaining({ id: 'user:ambiguous-user', turn: 2 })])
+  })
+
+  it('folds cumulative token-count snapshots without summing duplicates or replacing explicit totals', () => {
+    const snapshots = [
+      row(0, 'event_msg', {
+        type: 'token_count',
+        info: { total_token_usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } },
+      }),
+      row(1, 'event_msg', {
+        type: 'token_count',
+        info: { total_token_usage: { input_tokens: 20, output_tokens: 4, total_tokens: 24 } },
+      }),
+    ]
+    const fallback = projectCodexTrajectory(snapshots)
+    expect(fallback.usage).toMatchObject({ inputTokens: 20, outputTokens: 4, totalTokens: 24 })
+    expect(fallback.coverageSummary).toEqual({ total: 2, consumed: 2, gap: 0 })
+    const explicit = projectCodexTrajectory([
+      ...snapshots,
+      row(2, 'token_usage_record', {
+        turn_id: 'turn-usage',
+        thread_token_usage: { input_tokens: 30, output_tokens: 6, total_tokens: 36 },
+      }),
+      row(3, 'event_msg', {
+        type: 'token_count',
+        info: { total_token_usage: { input_tokens: 20, output_tokens: 4, total_tokens: 24 } },
+      }),
+    ])
+    expect(explicit.usage).toMatchObject({ totalTokens: 36 })
+  })
+
+  it('leaves malformed token-count snapshots uncovered', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'event_msg', {
+        type: 'token_count',
+        info: { total_token_usage: { input_tokens: 'invalid' } },
+      }),
+    ])
+    expect(projection.usage).toBeUndefined()
+    expect(projection.coverage).toEqual([expect.objectContaining({
+      type: 'event_msg/token_count',
+      disposition: 'folded-state',
+      consumed: 0,
+    })])
+  })
+
+  it('retains recognized runtime configuration as audit-only rather than unsupported facts', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'world_state', {
+        full: true,
+        state: { model: 'test-model', skills: [], permissions: { sandbox_mode: 'read-only' } },
+      }),
+      row(1, 'event_msg', {
+        type: 'thread_settings_applied',
+        thread_settings: { model: 'test-model', approval_policy: 'never', cwd: '/workspace' },
+      }),
+    ])
+    expect(projection.records).toEqual([])
+    expect(projection.coverage).toEqual([
+      expect.objectContaining({ type: 'event_msg/thread_settings_applied', disposition: 'raw-only' }),
+      expect.objectContaining({ type: 'world_state', disposition: 'raw-only' }),
+    ])
+  })
+
+  it('does not reclassify unknown configuration fields or workspace changes as audit-only', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'world_state', {
+        full: true,
+        state: { model: 'test-model', workspace_changes: ['src/example.ts'] },
+      }),
+      row(1, 'event_msg', {
+        type: 'thread_settings_applied',
+        thread_settings: { model: 'test-model', future_required: true },
+      }),
+    ])
+    expect(projection.coverage?.every(entry => entry.disposition === 'unsupported')).toBe(true)
+  })
+
+  it('retains stable source IDs and redacts completion-only message evidence', () => {
+    const projection = projectCodexTrajectory([{
+      ...row(4, 'event_msg', {
+        type: 'item_completed',
+        item: {
+          type: 'UserMessage',
+          id: 'private-user',
+          content: [{ type: 'text', text: 'password=completion-private-value' }],
+        },
+      }),
+      metadata: { source_event_id: 'page:0:line:5:ordinal:4' },
+    }])
+    expect(projection.records[0]?.sourceEventIds)
+      .toContain('page:0:line:5:ordinal:4')
+    expect(projection.coverageSummary).toEqual({ total: 1, consumed: 1, gap: 0 })
+    expect(JSON.stringify(projection.records)).not.toContain('completion-private-value')
+    expect(JSON.stringify(projection.records)).toContain('password=<redacted>')
+  })
+
   it('reports a known but unprojected world-state event as a coverage gap', () => {
     const projection = projectCodexTrajectory([
       row(0, 'session_meta', { id: 'session-coverage' }),
@@ -597,6 +926,37 @@ describe('Codex source protocol detection', () => {
 })
 
 describe('Codex source incremental loading', () => {
+  it('refreshes list metadata when an indexed rollout grows', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-list-'))
+    const sessionsRoot = path.join(root, 'sessions')
+    const file = path.join(sessionsRoot, 'rollout-session.jsonl')
+    await fs.mkdir(sessionsRoot, { recursive: true })
+    try {
+      await fs.writeFile(file, `${JSON.stringify(row(0, 'session_meta', {
+        id: 'session-list-refresh',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        cwd: '/tmp/work',
+      }))}\n`)
+      const source = new CodexSource({
+        sessionsRoot,
+        sessionIndexFile: path.join(root, 'session_index.jsonl'),
+      })
+      const [before] = await source.list()
+      await fs.appendFile(file, `${JSON.stringify(row(1, 'response_item', {
+        type: 'message',
+        id: 'user-1',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'new content' }],
+      }))}\n`)
+      const [after] = await source.list()
+
+      expect(after!.summary.size).toBeGreaterThan(before!.summary.size)
+      expect(after!.summary.updatedAt).toBeGreaterThanOrEqual(before!.summary.updatedAt)
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rebuilds the least recently used session after the cache reaches its limit', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-codex-lru-'))
     const sessionsRoot = path.join(root, 'sessions')

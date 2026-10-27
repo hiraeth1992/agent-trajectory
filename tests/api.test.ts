@@ -2,6 +2,7 @@ import { createServer, request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { handleApi, sendError, type ApiRegistry } from '../server/api'
+import { projectCodexTrajectory } from '../server/projectors/codex'
 import {
   capabilities,
   completeAudit,
@@ -132,6 +133,24 @@ async function getWithHost(base: string, pathname: string, host: string): Promis
 }
 
 describe('multi-source API', () => {
+  it('redacts sensitive session titles at the list boundary', async () => {
+    const sensitive = 'list-boundary-private-value'
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [{
+        ...summary,
+        title: `password=${sensitive}`,
+      }],
+      load: async () => detail,
+      fingerprint: async () => 'v1',
+    })
+
+    const body = await (await fetch(`${base}/api/sessions`)).text()
+
+    expect(body).not.toContain(sensitive)
+    expect(body).toContain('password=<redacted>')
+  })
+
   it('routes first-batch sources through source, session-list, and detail APIs', async () => {
     const sourceIds = [
       'claude',
@@ -556,6 +575,25 @@ describe('multi-source API', () => {
     })
     expect(payload.audit).not.toHaveProperty('events')
     expect(payload.detail.projection.records[0]).not.toHaveProperty('searchText')
+    expect(payload).toMatchObject({ sourceFingerprint: 'v1' })
+  })
+
+  it('rejects an audit export when the session changes during both freeze attempts', async () => {
+    let version = 0
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => detail,
+      fingerprint: async () => `v${++version}`,
+      audit: async () => completeAudit([], { events: [] }),
+    })
+
+    const response = await fetch(`${base}/api/sessions/dsh/session-1/export`)
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({
+      code: 'session_changed_during_export',
+    })
   })
 
   it('redacts credentials again at raw and audit export boundaries', async () => {
@@ -630,6 +668,95 @@ describe('multi-source API', () => {
     expect(body).not.toContain('synthetic-private-todo')
     expect(body).toContain('password=<redacted>')
     expect(body).toContain('secret=<redacted>')
+  })
+
+  it('returns a redacted full-fact analysis with facts-quality gating', async () => {
+    const unsafeDetail = structuredClone(detail)
+    unsafeDetail.projection.unknownEventTypes = ['future/required']
+    unsafeDetail.projection.taskState = {
+      target: {
+        id: 'target-1',
+        objective: 'password=analysis-private-value',
+        status: 'complete',
+        updatedAt: 1,
+      },
+      todos: [],
+    }
+    const base = await start({
+      listSources: async () => [status],
+      listSessions: async () => [summary],
+      load: async () => unsafeDetail,
+      fingerprint: async () => 'v1',
+    })
+
+    const response = await fetch(`${base}/api/sessions/dsh/session-1`)
+    const body = await response.json() as {
+      analysis: { outcome: { label: string }; objective: string }
+    }
+
+    expect(body.analysis.outcome.label).toBe('事实质量不足')
+    expect(body.analysis.objective).not.toContain('analysis-private-value')
+  })
+
+  it('does not replace all Codex criteria with insufficient facts for normal completion and telemetry events', async () => {
+    const projection = projectCodexTrajectory([
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-codex' } },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message', id: 'codex-message', role: 'assistant', turn_id: 'turn-codex',
+          content: [{ type: 'output_text', text: '已启动服务' }],
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'item_completed', turn_id: 'turn-codex', item: { type: 'AgentMessage', id: 'codex-message' } },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'token_count', info: { total_token_usage: { total_tokens: 12 } } },
+      },
+      {
+        type: 'compacted',
+        payload: {
+          window_number: 1,
+          first_window_id: 'window-first',
+          previous_window_id: 'window-first',
+          window_id: 'window-current',
+          compaction_response_id: 'response-compaction',
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'thread_settings_applied', thread_settings: { model: 'test-model' } },
+      },
+      { type: 'world_state', payload: { full: true, state: { model: 'test-model' } } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-codex' } },
+    ])
+    const codexDetail: SessionDetail = {
+      summary: {
+        ...summary,
+        id: 'codex:completion-session',
+        source: 'codex',
+        sourceSessionId: 'completion-session',
+        capabilities: capabilities('messages', 'timing', 'usage'),
+      },
+      projection,
+    }
+    const base = await start({
+      listSources: async () => [],
+      listSessions: async () => [codexDetail.summary],
+      load: async () => codexDetail,
+      fingerprint: async () => 'v1',
+    })
+    const response = await fetch(`${base}/api/sessions/codex/completion-session`)
+    const body = await response.json() as {
+      analysis: { evaluations: Array<{ label: string }> }
+    }
+
+    expect(response.status).toBe(200)
+    expect(body.analysis.evaluations).toHaveLength(5)
+    expect(body.analysis.evaluations.every(result => result.label !== '事实质量不足')).toBe(true)
   })
 
   it('returns record deltas for a known revision and snapshots for stale revisions', async () => {

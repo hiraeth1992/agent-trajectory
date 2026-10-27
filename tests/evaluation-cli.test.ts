@@ -6,7 +6,14 @@ import { parseCliArguments, runCli } from '../server/cli'
 import type {
   EvaluationRun,
   EvaluationRunDiff,
+  HumanEvaluationAnnotations,
 } from '../src/evaluation-types'
+import {
+  createAnnotationTemplate,
+  prepareCalibrationCandidates,
+} from '../server/evaluation/calibration'
+import { SYNTHETIC_CONTRACT_DATASET } from '../server/evaluation/gold-dataset'
+import { capabilities } from '../server/sources/types'
 
 const roots: string[] = []
 
@@ -17,6 +24,94 @@ afterEach(async () => {
 })
 
 describe('evaluate command', () => {
+  it('refreshes agreement without overwriting an existing adjudication', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-agreement-'))
+    roots.push(root)
+    const dataset = path.join(root, 'dataset')
+    const details = SYNTHETIC_CONTRACT_DATASET.cases.slice(0, 3).map(testCase =>
+      structuredClone(testCase.detail))
+    const source = {
+      listSources: async () => details.map(detail => ({
+        source: detail.summary.source,
+        availability: 'available' as const,
+        label: detail.summary.source,
+        colorToken: 'blue' as const,
+        iconToken: 'agent' as const,
+        sessionCount: 1,
+        capabilities: capabilities('messages', 'tools'),
+      })),
+      listSessions: async () => details.map(detail => detail.summary),
+      fingerprint: async (sourceId: string, sessionId: string) =>
+        `${sourceId}:${sessionId}`,
+      load: async (sourceId: string, sessionId: string) =>
+        structuredClone(details.find(detail =>
+          detail.summary.source === sourceId
+          && detail.summary.sourceSessionId === sessionId)),
+    }
+    const prepared = await prepareCalibrationCandidates(source, dataset, {
+      count: 3,
+      datasetId: 'agreement-refresh-test',
+      datasetVersion: '1',
+    })
+    const complete = (reviewerId: string): HumanEvaluationAnnotations => {
+      const template = createAnnotationTemplate(prepared.manifest, reviewerId)
+      return {
+        ...template,
+        cases: template.cases.map(testCase => ({
+          ...testCase,
+          criteria: testCase.criteria.map(criterion => ({
+            ...criterion,
+            verdict: 'insufficient_evidence' as const,
+            attribution: 'source' as const,
+            notes: 'Reviewed.',
+          })),
+          requirements: [{
+            id: 'requirement-001',
+            text: 'Review the trajectory',
+            required: true,
+            state: 'insufficient_evidence' as const,
+            evidenceRecordIds: ['record-001'],
+            notes: 'Reviewed.',
+          }],
+          chain: {
+            continuity: 'not_applicable' as const,
+            evidenceRecordIds: ['record-001'],
+            notes: 'Single turn.',
+          },
+          notes: 'Reviewed.',
+        })),
+      }
+    }
+    const reviewerA = path.join(dataset, 'reviewer-a.json')
+    const reviewerB = path.join(dataset, 'reviewer-b.json')
+    await fs.writeFile(reviewerA, JSON.stringify(complete('reviewer-a')))
+    await fs.writeFile(reviewerB, JSON.stringify(complete('reviewer-b')))
+    const arguments_ = [
+      'calibrate',
+      'agreement',
+      '--dataset',
+      dataset,
+      '--reviewer-a',
+      reviewerA,
+      '--reviewer-b',
+      reviewerB,
+    ]
+
+    await runCli(arguments_)
+    const adjudicationFile = path.join(dataset, 'adjudication.json')
+    const adjudication = JSON.parse(await fs.readFile(adjudicationFile, 'utf8'))
+    adjudication.cases[0].notes = 'PRESERVE_EXISTING_ADJUDICATION'
+    await fs.writeFile(adjudicationFile, JSON.stringify(adjudication))
+    const annotations = JSON.parse(await fs.readFile(reviewerA, 'utf8'))
+    annotations.cases[0].notes = 'Reviewer correction'
+    await fs.writeFile(reviewerA, JSON.stringify(annotations))
+
+    await runCli(arguments_)
+
+    expect(JSON.parse(await fs.readFile(adjudicationFile, 'utf8')).cases[0].notes)
+      .toBe('PRESERVE_EXISTING_ADJUDICATION')
+  })
+
   it('parses first-batch source path overrides without changing the command', () => {
     expect(parseCliArguments([
       'doctor',

@@ -446,6 +446,10 @@ describe('projectTrajectory', () => {
     const value = redactSensitive({
       note: 'run with token=private-token-value',
       token: 'private-object-token',
+      auth_token: 'private-auth-token',
+      session_token: 'private-session-token',
+      id_token: 'private-id-token',
+      private_key: 'private-signing-key',
       inputTokens: 120,
       outputTokens: 30,
       tokenAllocationCoverage: 0.8,
@@ -454,6 +458,10 @@ describe('projectTrajectory', () => {
     expect(value).toEqual({
       note: 'run with token=<redacted>',
       token: '<redacted>',
+      auth_token: '<redacted>',
+      session_token: '<redacted>',
+      id_token: '<redacted>',
+      private_key: '<redacted>',
       inputTokens: 120,
       outputTokens: 30,
       tokenAllocationCoverage: 0.8,

@@ -19,6 +19,7 @@ import {
   projectedRecord,
   redactSensitive,
 } from '../../src/projector-utils'
+import { recordTimeBounds, rollupTurns } from './projection-rollup'
 
 export interface QoderEnvelope {
   type?: string
@@ -451,12 +452,10 @@ export function projectQoderTrajectory(
     const type = row.type ?? 'unknown'
     eventTypeCounts[type] = (eventTypeCounts[type] ?? 0) + 1
   }
-  const times = records.flatMap(record => [
-    record.startTime,
-    ...(record.endTime === null ? [] : [record.endTime]),
-  ]).filter(value => value > 0)
   const createdAt = input.main.map(row => timestamp(row.timestamp))
     .find(value => value > 0) ?? 0
+  const bounds = recordTimeBounds(records, createdAt)
+  const turnSummaries = rollupTurns([...turns.values()], records)
   const latestCwd = [...rows].reverse().find(row => typeof row.cwd === 'string')?.cwd
   const latestVersion = [...input.main].reverse()
     .find(row => typeof row.version === 'string')?.version
@@ -508,14 +507,14 @@ export function projectQoderTrajectory(
       rawVersion: latestVersion ?? string(runtime?.version),
     },
     records,
-    turns: [...turns.values()],
+    turns: turnSummaries,
     lanes: [
       { id: 'input', label: '输入' },
       { id: 'model', label: '模型' },
       { id: 'tools', label: '工具' },
     ],
-    startTime: times.length === 0 ? createdAt : Math.min(...times),
-    endTime: times.length === 0 ? createdAt : Math.max(...times),
+    startTime: bounds.startTime,
+    endTime: bounds.endTime,
     eventCount: rows.length,
     eventTypeCounts,
     unknownEventTypes: [...new Set(rows.flatMap(row =>
@@ -524,7 +523,7 @@ export function projectQoderTrajectory(
         : []))].sort(),
     ...coverage,
     relations,
-    turnEnds: Object.fromEntries([...turns.values()].flatMap(turn =>
+    turnEnds: Object.fromEntries(turnSummaries.flatMap(turn =>
       turn.endTime === null ? [] : [[turn.number, {
         time: turn.endTime,
         reason: turn.status,

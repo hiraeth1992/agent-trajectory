@@ -25,7 +25,7 @@ import type {
 export const LOCAL_TRAJECTORY_EVALUATOR_ID = 'local-trajectory'
 export const LOCAL_TRAJECTORY_EVALUATOR_VERSION = '1'
 export const EVALUATION_FACTS_SCHEMA_VERSION = 4
-export const EVALUATION_COVERAGE_POLICY_VERSION = 3
+export const EVALUATION_COVERAGE_POLICY_VERSION = 4
 
 export interface TrajectoryEvaluationOptions {
   target: EvaluationTargetRef
@@ -78,7 +78,14 @@ const COVERAGE_DEPENDENCIES: Record<string, LocalTrajectoryCriterionId[]> = {
   'assistant/attempt': ['reliability', 'recovery'],
   'command/done': ['outcome', 'observability'],
   'command/run': ['outcome', 'observability'],
+  compacted: ['reliability', 'efficiency', 'observability'],
   'deliverables/presented': ['outcome'],
+  'event_msg/item_completed': ALL_CRITERIA,
+  'event_msg/task_started': ['reliability', 'observability'],
+  'event_msg/task_complete': ['outcome', 'reliability', 'observability'],
+  'event_msg/turn_aborted': ['outcome', 'reliability', 'recovery', 'observability'],
+  'event_msg/thread_settings_applied': ['reliability', 'observability'],
+  'event_msg/token_count': ['efficiency', 'observability'],
   'goal/change': ['outcome', 'reliability'],
   'image/offload': ['outcome', 'observability'],
   'llm/retry': ['reliability', 'recovery', 'efficiency'],
@@ -92,6 +99,7 @@ const COVERAGE_DEPENDENCIES: Record<string, LocalTrajectoryCriterionId[]> = {
   'turn/end': ['outcome', 'reliability', 'observability'],
   'turn/start': ['reliability', 'observability'],
   'workspace/changes': ['outcome', 'observability'],
+  'world_state': ['outcome', 'reliability', 'observability'],
 }
 
 const REQUIRED_RAW_ONLY_FACTS = new Set([
@@ -730,6 +738,42 @@ export function evaluateTrajectory(
     chain,
     results,
   }
+}
+
+export function applyFactsQualityGate(
+  analysis: TrajectoryAnalysis,
+  evaluation: TrajectoryEvaluation,
+): TrajectoryAnalysis {
+  const byCriterion = new Map(evaluation.results.map(result => [
+    result.criterionId,
+    result,
+  ]))
+  const outcome = byCriterion.get('outcome')
+  const gatedEvaluations = analysis.evaluations.map((item) => {
+    const result = byCriterion.get(item.id)
+    if (result === undefined || result.blockedBy.length === 0) return item
+    return {
+      ...item,
+      grade: 'unknown' as const,
+      label: result.label,
+      summary: result.evidenceBoundary,
+      confidence: result.confidence,
+      evidenceRecordIds: result.evidenceRecordIds,
+    }
+  })
+  return outcome === undefined || outcome.blockedBy.length === 0
+    ? { ...analysis, evaluations: gatedEvaluations }
+    : {
+        ...analysis,
+        outcome: {
+          label: '事实质量不足',
+          summary: outcome.evidenceBoundary,
+          tone: 'neutral',
+          confidence: outcome.confidence,
+          evidenceRecordIds: outcome.evidenceRecordIds,
+        },
+        evaluations: gatedEvaluations,
+      }
 }
 
 export function aggregateEvaluationResults(

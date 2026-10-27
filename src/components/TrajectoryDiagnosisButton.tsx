@@ -4,7 +4,7 @@ import {
   ScanSearch,
   X,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { TrajectoryDiagnosisPromptResult } from '../diagnosis-types'
 import type { SourceId } from '../types'
 
@@ -20,21 +20,28 @@ export function TrajectoryDiagnosisButton({
   const [preparing, setPreparing] = useState(false)
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState<string>()
+  const request = useRef<AbortController>()
 
   useEffect(() => {
+    request.current?.abort()
     setPreparing(false)
     setCopied(false)
     setError(undefined)
+    return () => request.current?.abort()
   }, [source, sourceSessionId])
 
   const copyPrompt = async () => {
     if (preparing) return
     setPreparing(true)
     setError(undefined)
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
     try {
       const response = await fetch('/api/diagnosis/prompt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           target: { source, sessionId: sourceSessionId },
         }),
@@ -47,12 +54,19 @@ export function TrajectoryDiagnosisButton({
       if (body.status !== 'prepared' || typeof body.prompt !== 'string') {
         throw new Error('诊断 Prompt 响应无效')
       }
+      if (request.current !== controller) return
       await navigator.clipboard.writeText(body.prompt)
+      if (request.current !== controller) return
       setCopied(true)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
+      if (!controller.signal.aborted && request.current === controller) {
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
     } finally {
-      setPreparing(false)
+      if (request.current === controller) {
+        request.current = undefined
+        setPreparing(false)
+      }
     }
   }
 

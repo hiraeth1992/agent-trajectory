@@ -19,6 +19,7 @@ import {
   projectedRecord,
   redactSensitive,
 } from '../../src/projector-utils'
+import { recordTimeBounds } from './projection-rollup'
 
 export interface ZcodeSessionRow {
   id: string
@@ -486,12 +487,11 @@ export function projectZcodeTrajectory(input: ZcodeProjectionInput): TrajectoryP
     record.seq = index
   })
 
-  const recordTimes = records.flatMap(record => [
-    record.startTime,
-    ...(record.endTime === null ? [] : [record.endTime]),
-  ]).filter(value => Number.isFinite(value) && value > 0)
-  const startTime = recordTimes.length > 0 ? Math.min(...recordTimes) : input.session.time_created
-  const endTime = recordTimes.length > 0 ? Math.max(...recordTimes) : input.session.time_updated
+  const { startTime, endTime } = recordTimeBounds(
+    records,
+    input.session.time_created,
+    input.session.time_updated,
+  )
   const eventTypeCounts: Record<string, number> = {}
   const count = (name: string) => {
     eventTypeCounts[name] = (eventTypeCounts[name] ?? 0) + 1

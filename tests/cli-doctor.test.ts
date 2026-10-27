@@ -172,7 +172,7 @@ describe('doctor command', () => {
     const report = output.join('\n')
     expect(report).toContain(`Platform changed: installed ${oldPlatform}, current ${process.platform}`)
     expect(report).toContain(`Node executable changed: installed ${oldNode}, current ${process.execPath}`)
-    expect(report).toContain(`Hook runtime location changed: installed ${oldRuntime}`)
+    expect(report).toContain(`Hook runtime is outside the managed directory: ${oldRuntime}`)
     expect(report).toContain(`Data directory changed: installed ${oldDataRoot}, current ${dataRoot}`)
     expect(report).toContain(
       `Package version changed: installed 9.9.9, current ${packageMetadata.version}`,

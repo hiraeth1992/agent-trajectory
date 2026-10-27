@@ -493,7 +493,10 @@ function query(database: string, request: WorkerRequest): unknown {
     enableForeignKeyConstraints: false,
     timeout: 1_000,
   })
+  let transaction = false
   try {
+    db.exec('BEGIN')
+    transaction = true
     const schema = inspectSchema(db)
     if (request.operation === 'probe') {
       return {
@@ -661,6 +664,7 @@ function query(database: string, request: WorkerRequest): unknown {
         : [],
     }
   } finally {
+    if (transaction) db.exec('ROLLBACK')
     db.close()
   }
 }

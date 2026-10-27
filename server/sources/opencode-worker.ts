@@ -164,7 +164,10 @@ function query(database: string, request: WorkerRequest): unknown {
     enableForeignKeyConstraints: false,
     timeout: 1_000,
   })
+  let transaction = false
   try {
+    db.exec('BEGIN')
+    transaction = true
     const schemaFingerprint = inspectSchema(db)
     if (request.operation === 'probe') return { schemaFingerprint }
     if (request.operation === 'list') {
@@ -197,6 +200,7 @@ function query(database: string, request: WorkerRequest): unknown {
     }
     return { session, messages } satisfies OpenCodeProjectionInput
   } finally {
+    if (transaction) db.exec('ROLLBACK')
     db.close()
   }
 }

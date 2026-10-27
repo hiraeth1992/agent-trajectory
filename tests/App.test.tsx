@@ -575,6 +575,89 @@ describe('App request ordering', () => {
     await waitForLoadedSession('zcode', 'second-session')
   })
 
+  it('clears the previous detail while a newly selected session fails to load', async () => {
+    const firstSession = summary('zcode', 'loaded-session', 'Loaded session')
+    const brokenSession = summary('zcode', 'broken-session', 'Broken session')
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') {
+        return response([firstSession, brokenSession])
+      }
+      if (url === '/api/sessions/zcode/loaded-session') {
+        return response(detail(firstSession))
+      }
+      if (url === '/api/sessions/zcode/broken-session') {
+        return new Response(JSON.stringify({ error: 'broken' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    render(<App />)
+    await waitForLoadedSession('zcode', 'loaded-session')
+    fireEvent.change(screen.getByRole('combobox', { name: '选择会话' }), {
+      target: { value: brokenSession.id },
+    })
+    expect(await screen.findByText('会话加载失败 (500)')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '更多操作' }))
+    expect(screen.queryByRole('menuitem', { name: '完整审计导出' })).toBeNull()
+  })
+
+  it('periodically discovers sessions while the ordinary session view remains open', async () => {
+    vi.useFakeTimers()
+    const first = summary('zcode', 'initial-session', 'Initial session')
+    const discovered = summary('zcode', 'discovered-session', 'Discovered session')
+    let lists = 0
+    vi.stubGlobal('ResizeObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    vi.stubGlobal('EventSource', class {
+      addEventListener() {}
+      close() {}
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') {
+        lists++
+        return response(lists === 1 ? [first] : [first, discovered])
+      }
+      if (url === '/api/sessions/zcode/initial-session') {
+        return response(detail(first))
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+
+    try {
+      render(<App />)
+      await vi.advanceTimersByTimeAsync(0)
+      await Promise.resolve()
+      expect(screen.getByRole('option', {
+        name: '[ZCode API] Initial session',
+      })).toBeTruthy()
+      await vi.advanceTimersByTimeAsync(1_500)
+      await Promise.resolve()
+      expect(screen.getByRole('option', {
+        name: '[ZCode API] Discovered session',
+      })).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('remembers the selected session for each source filter', async () => {
     const first = summary('zcode', 'remember-first', 'Remember first')
     const second = summary('zcode', 'remember-second', 'Remember second')

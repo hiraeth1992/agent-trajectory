@@ -8,7 +8,10 @@ import {
   waitFor,
 } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AnnotationWorkspace } from '../src/components/AnnotationWorkspace'
+import {
+  AnnotationWorkspace,
+  annotationSourceLabel,
+} from '../src/components/AnnotationWorkspace'
 import type {
   AnnotationCaseWorkspace,
   AnnotationDatasetSummary,
@@ -137,6 +140,28 @@ afterEach(() => {
 })
 
 describe('AnnotationWorkspace', () => {
+  it('labels all supported sources without collapsing them to ZCode', () => {
+    expect([
+      annotationSourceLabel('dsh'),
+      annotationSourceLabel('codex'),
+      annotationSourceLabel('zcode'),
+      annotationSourceLabel('claude'),
+      annotationSourceLabel('doubao-work'),
+      annotationSourceLabel('workbuddy'),
+      annotationSourceLabel('qoder'),
+      annotationSourceLabel('opencode'),
+    ]).toEqual([
+      'DSH',
+      'Codex',
+      'ZCode',
+      'Claude Code',
+      '豆包工作',
+      'WorkBuddy',
+      'Qoder',
+      'OpenCode',
+    ])
+  })
+
   it('offers a focused cases, evidence, and form workflow on narrow screens', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -426,5 +451,60 @@ describe('AnnotationWorkspace', () => {
       expect(screen.getByText('real-dsh-case')).toBeTruthy()
       expect(screen.queryByText('real-dsh-case-2')).toBeNull()
     })
+  })
+
+  it('keeps edits made during an in-flight save marked as unsaved', async () => {
+    let resolveSave!: (value: Response) => void
+    const saveResponse = new Promise<Response>(resolve => {
+      resolveSave = resolve
+    })
+    vi.stubGlobal('fetch', vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      if (url === '/api/annotations/datasets/private-v1/reviewer-a') {
+        return response(overview)
+      }
+      if (url.endsWith('/cases/real-dsh-case') && init?.method !== 'PUT') {
+        return response(workspace)
+      }
+      if (url.endsWith('/cases/real-dsh-case') && init?.method === 'PUT') {
+        return saveResponse
+      }
+      throw new Error(`unexpected request: ${url}`)
+    }))
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const onExit = vi.fn()
+
+    render(
+      <AnnotationWorkspace
+        dataset={dataset}
+        reviewer="reviewer-a"
+        onExit={onExit}
+      />,
+    )
+
+    await screen.findByText('最终结果')
+    const notes = screen.getAllByPlaceholderText(
+      '写明你依据什么证据作出判断',
+    )[0]!
+    fireEvent.change(notes, { target: { value: '提交版本' } })
+    fireEvent.click(screen.getByRole('button', { name: /^保存$/ }))
+    await screen.findByRole('button', { name: /保存中/ })
+    fireEvent.change(notes, { target: { value: '保存期间的新编辑' } })
+    resolveSave(response({
+      revision: 'revision-2',
+      progress: { complete: 0, total: 1 },
+      case: overview.cases[0],
+    }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^保存$/ })).toBeTruthy()
+    })
+    expect(notes).toHaveProperty('value', '保存期间的新编辑')
+    fireEvent.click(screen.getByRole('button', { name: '返回评测中心' }))
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(onExit).not.toHaveBeenCalled()
   })
 })

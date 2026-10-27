@@ -28,6 +28,44 @@ function stubClipboard(writeText: ReturnType<typeof vi.fn>): void {
 }
 
 describe('TrajectoryDiagnosisButton', () => {
+  it('does not copy a prompt prepared for a previous target', async () => {
+    let resolve!: (value: Response) => void
+    const pending = new Promise<Response>(fulfill => {
+      resolve = fulfill
+    })
+    const writeText = vi.fn(async () => {})
+    stubClipboard(writeText)
+    vi.stubGlobal('fetch', vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => new Promise<Response>((fulfill, reject) => {
+      const abort = () => reject(Object.assign(new Error('aborted'), {
+        name: 'AbortError',
+      }))
+      init?.signal?.addEventListener('abort', abort, { once: true })
+      void pending.then(fulfill, reject)
+    })))
+    const view = render(
+      <TrajectoryDiagnosisButton
+        source="codex"
+        sourceSessionId="old-session"
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '本地 Agent 诊断' }))
+    view.rerender(
+      <TrajectoryDiagnosisButton
+        source="codex"
+        sourceSessionId="new-session"
+      />,
+    )
+    resolve(prepared('old prompt'))
+    await new Promise(resolveTick => setTimeout(resolveTick, 0))
+
+    expect(writeText).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: '已复制 Prompt' })).toBeNull()
+  })
+
   it('copies the prepared prompt and tells the user to open a new session', async () => {
     const writeText = vi.fn(async () => {})
     const fetchMock = vi.fn(async () => prepared())
@@ -46,13 +84,14 @@ describe('TrajectoryDiagnosisButton', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/diagnosis/prompt',
-      {
+      expect.objectContaining({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           target: { source: 'codex', sessionId: 'source/thread' },
         }),
-      },
+        signal: expect.any(AbortSignal),
+      }),
     ))
     expect(writeText).toHaveBeenCalledWith('diagnosis prompt')
     const dialog = await screen.findByRole('dialog', { name: '已复制 Prompt' })

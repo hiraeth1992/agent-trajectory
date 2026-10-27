@@ -158,6 +158,32 @@ async function start(
 }
 
 describe('annotation workspace API', () => {
+  it('routes adjudicator record details after checking adjudication readiness', async () => {
+    let readinessChecks = 0
+    const annotations = {
+      adjudicationOverview: async () => {
+        readinessChecks++
+        return {}
+      },
+      record: async () => ({
+        id: 'record-001',
+        output: 'adjudication evidence',
+      }),
+    } as unknown as AnnotationWorkspaceStore
+    const base = await start(annotations)
+
+    const response = await fetch(
+      `${base}/api/annotations/datasets/private-v1/adjudicator/cases/case-001/records/record-001`,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      id: 'record-001',
+      output: 'adjudication evidence',
+    })
+    expect(readinessChecks).toBe(1)
+  })
+
   it('prepares datasets only inside the configured calibration root', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-api-prepare-'))
     roots.push(root)

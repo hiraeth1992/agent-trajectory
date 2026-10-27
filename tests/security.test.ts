@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import {
   assertLoopbackListenHost,
+  hasAllowedBrowserMutation,
   hasAllowedLocalRequest,
 } from '../server/security'
 
@@ -36,5 +37,26 @@ describe('local HTTP boundary', () => {
       .toBe(false)
     expect(hasAllowedLocalRequest(request('evil.example:4317', 4317, '127.0.0.1')))
       .toBe(false)
+  })
+
+  it('rejects cross-origin browser mutations even without a browser session', () => {
+    const mutation = {
+      method: 'POST',
+      headers: {
+        origin: 'https://evil.example',
+        'sec-fetch-site': 'cross-site',
+      },
+    } as IncomingMessage
+    expect(hasAllowedBrowserMutation(
+      mutation,
+      'http://127.0.0.1:4317',
+    )).toBe(false)
+    expect(hasAllowedBrowserMutation({
+      ...mutation,
+      headers: {
+        origin: 'http://127.0.0.1:4317',
+        'sec-fetch-site': 'same-origin',
+      },
+    } as IncomingMessage, 'http://127.0.0.1:4317')).toBe(true)
   })
 })

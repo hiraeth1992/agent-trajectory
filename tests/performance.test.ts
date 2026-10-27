@@ -8,6 +8,9 @@ import {
   type CodexEnvelope,
 } from '../server/projectors/codex'
 import {
+  projectOpenCodeTrajectory,
+} from '../server/projectors/opencode'
+import {
   projectZcodeTrajectory,
   type ZcodeProjectionInput,
 } from '../server/projectors/zcode'
@@ -22,6 +25,38 @@ const codexFixture = readFileSync(path.join(fixturesRoot, 'codex-rollout.jsonl')
 const zcodeFixture = readFileSync(path.join(fixturesRoot, 'zcode-session.json'), 'utf8')
 
 describe('large trajectory baseline', () => {
+  it('projects 70,000 visible records without spreading time arrays onto the stack', () => {
+    const session = {
+      id: 'large-visible-session',
+      parent_id: null,
+      directory: '/workspace',
+      title: 'Large visible session',
+      version: '1',
+      model: null,
+      cost: 0,
+      tokens_input: 0,
+      tokens_output: 0,
+      tokens_reasoning: 0,
+      tokens_cache_read: 0,
+      tokens_cache_write: 0,
+      time_created: 1_000,
+      time_updated: 100_000,
+    }
+    const messages = Array.from({ length: 70_000 }, (_, index) => ({
+      id: `message-${index}`,
+      type: index === 0 ? 'user' : 'assistant',
+      seq: index,
+      time_created: 1_000 + index,
+      time_updated: 1_000 + index,
+      data: index === 0
+        ? { text: 'Start' }
+        : { content: [{ type: 'text', text: 'Continue' }] },
+    }))
+
+    expect(projectOpenCodeTrajectory({ session, messages }).records)
+      .toHaveLength(70_000)
+  }, 10_000)
+
   it('parses and projects 100,000 event envelopes without complexity regression', () => {
     const header: SessionHeader = {
       type: 'session',

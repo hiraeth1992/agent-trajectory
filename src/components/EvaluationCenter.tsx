@@ -139,6 +139,10 @@ export function EvaluationCenter({
   const [runSplit, setRunSplit] = useState<EvaluationSplit>('calibration')
   const [baselineRunId, setBaselineRunId] = useState('')
   const [runLoading, setRunLoading] = useState(false)
+  const runRequest = useRef<{
+    controller: AbortController
+    directoryId: string
+  }>()
   const [runResult, setRunResult] = useState<EvaluationRunResult>()
   const [runDetails, setRunDetails] = useState<EvaluationRunDetails>()
   const [runDetailsLoading, setRunDetailsLoading] = useState(false)
@@ -242,6 +246,9 @@ export function EvaluationCenter({
   }, [datasets, directoryId, workflowRevision])
 
   useEffect(() => {
+    runRequest.current?.controller.abort()
+    runRequest.current = undefined
+    setRunLoading(false)
     runDetailsRequest.current?.abort()
     runDetailsRequest.current = undefined
     setBaselineRunId('')
@@ -333,11 +340,16 @@ export function EvaluationCenter({
     }
     setRunLoading(true)
     setError(undefined)
+    const selectedDirectoryId = directoryId
+    const controller = new AbortController()
+    runRequest.current?.controller.abort()
+    runRequest.current = { controller, directoryId: selectedDirectoryId }
     try {
       const response = await fetch(
         `/api/annotations/datasets/${encodeURIComponent(directoryId)}/workflow/run`,
         {
           method: 'POST',
+          signal: controller.signal,
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             split: runSplit,
@@ -348,6 +360,8 @@ export function EvaluationCenter({
       )
       if (!response.ok) throw await responseError(response, 'EvaluationRun 执行失败')
       const result = await response.json() as EvaluationRunResult
+      if (runRequest.current?.controller !== controller
+        || runRequest.current.directoryId !== selectedDirectoryId) return
       setRunResult(result)
       setRunDetails({
         run: result.run,
@@ -355,9 +369,15 @@ export function EvaluationCenter({
       })
       setWorkflowRevision(current => current + 1)
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught))
+      if (!controller.signal.aborted
+        && runRequest.current?.controller === controller) {
+        setError(caught instanceof Error ? caught.message : String(caught))
+      }
     } finally {
-      setRunLoading(false)
+      if (runRequest.current?.controller === controller) {
+        runRequest.current = undefined
+        setRunLoading(false)
+      }
     }
   }
   const prepareDataset = async () => {

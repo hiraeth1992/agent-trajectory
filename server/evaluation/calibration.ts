@@ -33,7 +33,7 @@ import {
 import { writePrivateJson } from '../file-transaction'
 import { createEvaluationDataset } from './identity'
 import {
-  candidateGroupKey,
+  candidateGroupKeys,
   candidatePoolHash,
   groupAwareSplits,
   rankCandidates,
@@ -241,8 +241,9 @@ function stringHasCredentialShape(value: string): boolean {
 }
 
 function hasCredentialShape(value: unknown, key = ''): boolean {
-  if (/password|passwd|secret|access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie/i
-    .test(key) || /^token$/i.test(key)) {
+  if (/password|passwd|secret|authorization|cookie/i.test(key)
+    || /^(?:token|access[_-]?token|refresh[_-]?token|api[_-]?key|auth[_-]?token|session[_-]?token|id[_-]?token|bearer[_-]?token|private[_-]?key|signing[_-]?key|client[_-]?secret)$/i
+      .test(key)) {
     return value !== '<redacted>'
       && value !== undefined
       && value !== null
@@ -605,8 +606,14 @@ function hydrateCalibrationDetail(detail: TransportSessionDetail): SessionDetail
   }
 }
 
-function caseId(source: SourceId, fingerprint: string): string {
-  return `real-${source}-${sha256(fingerprint).slice(0, 12)}`
+function caseId(
+  source: SourceId,
+  sourceSessionId: string,
+  fingerprint: string,
+): string {
+  return `real-${source}-${
+    sha256(`${sourceSessionId}\0${fingerprint}`).slice(0, 12)
+  }`
 }
 
 async function stableLoad(
@@ -764,7 +771,8 @@ export async function prepareCalibrationCandidates(
     }
   }))
   const stablePool = selectedBySource.flatMap(group => group.pool)
-  const poolHash = candidatePoolHash(stablePool)
+  const stableGroupKeys = candidateGroupKeys(stablePool)
+  const poolHash = candidatePoolHash(stablePool, stableGroupKeys)
   const interleaved = []
   for (let index = 0; interleaved.length < options.count; index++) {
     let added = false
@@ -799,7 +807,7 @@ export async function prepareCalibrationCandidates(
       `selected candidates do not represent enabled stable sources: ${missingSources.join(', ')}`,
     )
   }
-  const splits = groupAwareSplits(interleaved, seed)
+  const splits = groupAwareSplits(interleaved, seed, stableGroupKeys)
   const splitCounts = new Map<EvaluationSplit, number>()
   for (const candidate of interleaved) {
     const split = splits.get(candidate)
@@ -821,7 +829,11 @@ export async function prepareCalibrationCandidates(
   })
   const refs: EvaluationCandidateRef[] = []
   for (const candidate of interleaved) {
-    const id = caseId(candidate.summary.source, candidate.fingerprint)
+    const id = caseId(
+      candidate.summary.source,
+      candidate.summary.sourceSessionId,
+      candidate.fingerprint,
+    )
     const detail = sanitizeCalibrationDetail(candidate.detail, id)
     const payload: EvaluationCandidateFile = {
       schemaVersion: 1,
@@ -839,7 +851,7 @@ export async function prepareCalibrationCandidates(
     refs.push({
       id,
       split: splits.get(candidate)!,
-      groupHash: sha256(candidateGroupKey(candidate.detail)),
+      groupHash: sha256(stableGroupKeys.get(candidate)!),
       description: `Private ${candidate.summary.source.toUpperCase()} trajectory; traits: ${
         traits.join(', ') || 'general'
       }.`,
@@ -874,7 +886,7 @@ export async function prepareCalibrationCandidates(
       candidateMultiplier: multiplier,
       samplingPolicyVersion: SAMPLING_POLICY_VERSION,
       seed,
-      groupPolicy: 'source-parent-workspace',
+      groupPolicy: 'source-lineage-workspace',
       splitPolicy: 'group-aware-50-20-30',
       independentAccess: 'restricted',
     },
@@ -1174,7 +1186,8 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
     || !SUPPORTED_SAMPLING_POLICY_VERSIONS.has(
       preparation.samplingPolicyVersion as number,
     )
-    || preparation.groupPolicy !== 'source-parent-workspace'
+    || (preparation.groupPolicy !== 'source-parent-workspace'
+      && preparation.groupPolicy !== 'source-lineage-workspace')
     || preparation.splitPolicy !== 'group-aware-50-20-30'
     || preparation.independentAccess !== 'restricted') {
     throw new Error('invalid manifest sampling policy')
@@ -1210,7 +1223,7 @@ function parseCandidateManifest(value: unknown): EvaluationCandidateManifest {
       candidateMultiplier: preparation.candidateMultiplier as number,
       samplingPolicyVersion: preparation.samplingPolicyVersion as number,
       seed,
-      groupPolicy: 'source-parent-workspace',
+      groupPolicy: preparation.groupPolicy,
       splitPolicy: 'group-aware-50-20-30',
       independentAccess: 'restricted',
     },

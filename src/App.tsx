@@ -44,7 +44,10 @@ import {
   type TransportTrajectoryRecord,
 } from './types'
 import { recordSearchText } from './projector-utils'
-import { analyzeTrajectory } from './trajectory-analysis'
+import {
+  analyzeTrajectory,
+  type TrajectoryAnalysis,
+} from './trajectory-analysis'
 import {
   buildTimelineGeometry,
   formatTime,
@@ -148,6 +151,7 @@ export function App() {
   const [view, setView] = useState<SessionView>('summary')
   const [sessionKey, setSessionKey] = useState('')
   const [detail, setDetail] = useState<SessionDetail>()
+  const [serverAnalysis, setServerAnalysis] = useState<TrajectoryAnalysis>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
   const [query, setQuery] = useState('')
@@ -347,6 +351,7 @@ export function App() {
       }
       detailRef.current = next
       detailRevision.current = { key, revision: result.revision }
+      setServerAnalysis(result.analysis)
       setView(current =>
         current === 'model-context' && next.projection.modelContextRecordIds === undefined
           ? 'conversation'
@@ -419,6 +424,24 @@ export function App() {
   }, [loadSessions, sessionTarget, waitingForSession, workspaceMode])
 
   useEffect(() => {
+    if (workspaceMode !== 'sessions' || waitingForSession) return
+    let controller: AbortController | undefined
+    const timer = window.setInterval(() => {
+      controller?.abort()
+      controller = new AbortController()
+      void loadSessions(controller.signal).catch(caught => {
+        if (!controller?.signal.aborted) {
+          setError(caught instanceof Error ? caught.message : String(caught))
+        }
+      })
+    }, 1_500)
+    return () => {
+      window.clearInterval(timer)
+      controller?.abort()
+    }
+  }, [loadSessions, waitingForSession, workspaceMode])
+
+  useEffect(() => {
     if (workspaceMode !== 'sessions') return
     let stream: EventSource
     try {
@@ -486,6 +509,8 @@ export function App() {
     setRawError(undefined)
     detailRevision.current = undefined
     detailRef.current = undefined
+    setDetail(undefined)
+    setServerAnalysis(undefined)
     if (workspaceMode === 'sessions'
       && currentSource !== undefined
       && currentSourceSessionId !== undefined) {
@@ -591,8 +616,10 @@ export function App() {
 
   const selected = detail?.projection.records.find(record => record.id === selectedId)
   const analysis = useMemo(
-    () => detail === undefined ? undefined : analyzeTrajectory(detail),
-    [detail],
+    () => detail === undefined
+      ? undefined
+      : serverAnalysis ?? analyzeTrajectory(detail),
+    [detail, serverAnalysis],
   )
   const selectedRawKey = selected === undefined
     || currentSource === undefined

@@ -22,6 +22,10 @@ import {
   projectedRecord,
   redactSensitive,
 } from '../../src/projector-utils'
+import {
+  recordTimeBounds,
+  rollupTurns,
+} from './projection-rollup'
 
 export interface WorkBuddySessionRow {
   id: string
@@ -274,10 +278,8 @@ export function projectWorkBuddyTrajectory(
       if (turnState !== undefined && row.role === 'assistant') {
         turns.set(turn, {
           ...turnState,
-          usage: usage ?? turnState.usage,
           model: model ?? turnState.model,
           traceId: traceId ?? turnState.traceId,
-          status: recordStatus(row.status, turnState.status),
         })
       }
       continue
@@ -396,10 +398,6 @@ export function projectWorkBuddyTrajectory(
     const type = row.type ?? 'unknown'
     eventTypeCounts[type] = (eventTypeCounts[type] ?? 0) + 1
   }
-  const times = records.flatMap(record => [
-    record.startTime,
-    ...(record.endTime === null ? [] : [record.endTime]),
-  ]).filter(value => value > 0)
   const requestUsage = new Map<string, TokenUsage>()
   for (const row of rows) {
     const usage = rowUsage(row)
@@ -419,8 +417,12 @@ export function projectWorkBuddyTrajectory(
     ?? string(latestMetadata.requestModelId)
     ?? input.session.model
     ?? undefined
-  const startTime = times.length === 0 ? input.session.createdAt : Math.min(...times)
-  const endTime = times.length === 0 ? input.session.updatedAt : Math.max(...times)
+  const bounds = recordTimeBounds(
+    records,
+    input.session.createdAt,
+    input.session.updatedAt,
+  )
+  const turnSummaries = rollupTurns([...turns.values()], records)
   const projectedEvents = projectedSourceEventIds(records)
   const coverage = projectionCoverage(eventTypeCounts, rows.length, (type) => {
     if (type === 'message' || type === 'reasoning'
@@ -455,14 +457,14 @@ export function projectWorkBuddyTrajectory(
       model,
     },
     records,
-    turns: [...turns.values()],
+    turns: turnSummaries,
     lanes: [
       { id: 'input', label: '输入' },
       { id: 'model', label: '模型' },
       { id: 'tools', label: '工具' },
     ],
-    startTime,
-    endTime,
+    startTime: bounds.startTime,
+    endTime: bounds.endTime,
     eventCount: rows.length,
     eventTypeCounts,
     unknownEventTypes: [...new Set(rows.flatMap(row =>
@@ -471,7 +473,7 @@ export function projectWorkBuddyTrajectory(
         : []))].sort(),
     ...coverage,
     relations,
-    turnEnds: Object.fromEntries([...turns.values()].flatMap(turn =>
+    turnEnds: Object.fromEntries(turnSummaries.flatMap(turn =>
       turn.endTime === null ? [] : [[turn.number, {
         time: turn.endTime,
         reason: turn.status,

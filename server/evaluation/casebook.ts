@@ -82,9 +82,10 @@ function retestOutcome(
   }
   const selected = run.cases.find(testCase => testCase.caseId === entry.caseId)
   if (selected === undefined || selected.error !== undefined) return 'inconclusive'
-  return selected.mismatches.some(mismatch => mismatch.criterionId === entry.subject)
-    ? 'not-fixed'
-    : 'fixed'
+  const assertion = selected.assertions.find(candidate =>
+    candidate.subject === entry.subject && candidate.required)
+  if (assertion === undefined) return 'inconclusive'
+  return assertion.passed ? 'fixed' : 'not-fixed'
 }
 
 export class EvaluationCasebookStore {

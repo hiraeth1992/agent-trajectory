@@ -298,7 +298,7 @@ export interface EvaluationCandidateManifest {
     candidateMultiplier: number
     samplingPolicyVersion: number
     seed: string
-    groupPolicy: 'source-parent-workspace'
+    groupPolicy: 'source-parent-workspace' | 'source-lineage-workspace'
     splitPolicy: 'group-aware-50-20-30'
     independentAccess: 'restricted'
   }

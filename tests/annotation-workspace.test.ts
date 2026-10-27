@@ -272,6 +272,47 @@ describe('annotation workspace store', () => {
     )).rejects.toBeInstanceOf(AnnotationConflictError)
   })
 
+  it('rejects one of two cross-store writes that start from the same revision', async () => {
+    const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-workspace-'))
+    roots.push(root)
+    const calibrationRoot = path.join(root, 'calibration')
+    const datasetRoot = path.join(calibrationRoot, 'private-v1')
+    await prepareCalibrationCandidates(
+      calibrationSource(),
+      datasetRoot,
+      {
+        count: 3,
+        datasetId: 'private-cross-store-test',
+        datasetVersion: '1',
+      },
+    )
+    const left = new AnnotationWorkspaceStore(calibrationRoot)
+    const right = new AnnotationWorkspaceStore(calibrationRoot)
+    const overview = await left.overview('private-v1', 'reviewer-a')
+    const workspaces = await Promise.all(overview.cases.slice(0, 2).map(item =>
+      left.case('private-v1', 'reviewer-a', item.id)))
+
+    const writes = await Promise.allSettled(workspaces.map((workspace, index) =>
+      (index === 0 ? left : right).saveCase(
+        'private-v1',
+        'reviewer-a',
+        workspace.candidate.id,
+        {
+          datasetHash: workspace.datasetHash,
+          revision: workspace.revision,
+          annotation: {
+            ...workspace.annotation,
+            notes: `concurrent-${index}`,
+          },
+        },
+      )))
+
+    expect(writes.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    expect(writes.filter(result => result.status === 'rejected')).toHaveLength(1)
+    expect((writes.find(result => result.status === 'rejected') as
+      PromiseRejectedResult).reason).toBeInstanceOf(AnnotationConflictError)
+  })
+
   it('rejects traversal, symlink datasets, and dangling evidence references', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'annotation-workspace-'))
     roots.push(root)

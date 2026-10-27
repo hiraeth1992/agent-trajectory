@@ -40,6 +40,59 @@ export function hookInstallationFile(dataRoot: string): string {
   return path.join(dataRoot, 'hook-installation.json')
 }
 
+export async function pruneHookRuntimeDirectories(
+  runtimeBase: string,
+  currentRuntime: string,
+  keep = 2,
+): Promise<string[]> {
+  if (!Number.isInteger(keep) || keep < 1) {
+    throw new Error('Hook runtime retention must be a positive integer')
+  }
+  const base = path.resolve(runtimeBase)
+  const current = path.resolve(currentRuntime)
+  if (!current.startsWith(`${base}${path.sep}`)) {
+    throw new Error('current Hook runtime must be inside the managed runtime directory')
+  }
+  const entries = await fs.readdir(base, { withFileTypes: true })
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return []
+      throw error
+    })
+  const runtimes = (await Promise.all(entries
+    .filter(entry => entry.isDirectory() && !entry.isSymbolicLink())
+    .map(async (entry) => {
+      const directory = path.join(base, entry.name)
+      const executable = path.join(directory, 'agent-trajectory.mjs')
+      try {
+        const [directoryStat, executableStat] = await Promise.all([
+          fs.stat(directory),
+          fs.stat(executable),
+        ])
+        return executableStat.isFile()
+          ? { directory, mtimeMs: directoryStat.mtimeMs }
+          : undefined
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+        throw error
+      }
+    }))).filter((entry): entry is {
+      directory: string
+      mtimeMs: number
+    } => entry !== undefined)
+  runtimes.sort((left, right) =>
+    Number(right.directory === current) - Number(left.directory === current)
+    || right.mtimeMs - left.mtimeMs
+    || right.directory.localeCompare(left.directory))
+  const retained = new Set(runtimes.slice(0, keep).map(entry => entry.directory))
+  retained.add(current)
+  const removed = runtimes
+    .filter(entry => !retained.has(entry.directory))
+    .map(entry => entry.directory)
+  await Promise.all(removed.map(directory =>
+    fs.rm(directory, { recursive: true, force: true })))
+  return removed
+}
+
 function storedHookInstallation(value: unknown): HookInstallation {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('invalid Hook installation record: expected an object')

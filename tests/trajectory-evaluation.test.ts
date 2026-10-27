@@ -206,7 +206,7 @@ describe('trajectory evaluation contract', () => {
       target,
       factsQuality: {
         schemaVersion: 4,
-        coveragePolicyVersion: 3,
+        coveragePolicyVersion: 4,
         ready: true,
       },
     })
@@ -342,7 +342,7 @@ describe('trajectory evaluation contract', () => {
     })
     expect(evaluation.factsQuality).toMatchObject({
       ready: false,
-      coveragePolicyVersion: 3,
+      coveragePolicyVersion: 4,
       stats: {
         coverageTotal: 3,
         coverageConsumed: 1,
@@ -409,6 +409,57 @@ describe('trajectory evaluation contract', () => {
       severity: 'blocking',
       affectedCriterionIds: expect.arrayContaining(['outcome', 'observability']),
     }))
+  })
+
+  it('limits malformed Codex usage facts to efficiency and observability', () => {
+    const value = detail([record('test-usage')])
+    value.projection.coverage = [{
+      type: 'event_msg/token_count',
+      total: 1,
+      consumed: 0,
+      disposition: 'folded-state',
+    }]
+    value.projection.coverageSummary = { total: 1, consumed: 0, gap: 1 }
+    const evaluation = evaluateTrajectory(value, analyzeTrajectory(value), { target })
+
+    expect(evaluation.factsQuality.blockedCriterionIds).toEqual(['efficiency', 'observability'])
+    expect(evaluation.results.find(result => result.criterionId === 'outcome'))
+      .toMatchObject({ blockedBy: [] })
+  })
+
+  it('limits missing Codex compaction facts to reliability, efficiency, and observability', () => {
+    const value = detail([record('test-compaction')])
+    value.projection.coverage = [{
+      type: 'compacted',
+      total: 1,
+      consumed: 0,
+      disposition: 'record',
+    }]
+    value.projection.coverageSummary = { total: 1, consumed: 0, gap: 1 }
+    const evaluation = evaluateTrajectory(value, analyzeTrajectory(value), { target })
+
+    expect(evaluation.factsQuality.blockedCriterionIds)
+      .toEqual(['reliability', 'efficiency', 'observability'])
+    expect(evaluation.results.find(result => result.criterionId === 'outcome'))
+      .toMatchObject({ blockedBy: [] })
+    expect(evaluation.results.find(result => result.criterionId === 'recovery'))
+      .toMatchObject({ blockedBy: [] })
+  })
+
+  it('keeps recognized Codex configuration gaps advisory without disabling unknown-event blockers', () => {
+    const value = detail([record('test-config')])
+    value.projection.eventCount = 2
+    value.projection.coverage = ['event_msg/thread_settings_applied', 'world_state']
+      .map(type => ({ type, total: 1, consumed: 0, disposition: 'raw-only' as const }))
+    value.projection.coverageSummary = { total: 2, consumed: 0, gap: 2 }
+    const report = buildFactsQualityReport(value, { target })
+
+    expect(report.ready).toBe(true)
+    expect(report.issues.filter(issue => issue.category === 'coverage'))
+      .toEqual([
+        expect.objectContaining({ severity: 'warning', affectedCriterionIds: ['reliability', 'observability'] }),
+        expect.objectContaining({ severity: 'warning', affectedCriterionIds: ['outcome', 'reliability', 'observability'] }),
+      ])
   })
 
   it('does not infer per-requirement completion from one overall outcome', () => {

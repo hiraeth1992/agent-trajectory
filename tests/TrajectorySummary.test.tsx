@@ -386,13 +386,14 @@ describe('TrajectorySummary diagnosis entry', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/diagnosis/prompt',
-      {
+      expect.objectContaining({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           target: { source: 'zcode', sessionId: 'summary-test' },
         }),
-      },
+        signal: expect.any(AbortSignal),
+      }),
     ))
     expect(writeText).toHaveBeenCalledWith('summary diagnosis prompt')
     expect(await screen.findByRole('dialog', { name: '已复制 Prompt' })).toBeTruthy()

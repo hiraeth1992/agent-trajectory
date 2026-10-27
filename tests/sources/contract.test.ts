@@ -176,6 +176,39 @@ describe('SessionSource registry contract', () => {
     }])
   })
 
+  it('selects one canonical reference when a source reports duplicate session ids', async () => {
+    const base = fakeSource('claude')
+    const [older] = await base.list()
+    const newer = {
+      ...older,
+      locator: '/internal/newer.jsonl',
+      summary: {
+        ...older.summary,
+        title: 'Newer session',
+        updatedAt: older.summary.updatedAt + 10,
+      },
+    }
+    const registry = new SourceRegistry([
+      fakeSource('claude', {
+        list: async () => [older, newer],
+        load: async ref => ({
+          ...(await base.load(ref)),
+          summary: ref.summary,
+        }),
+      }),
+    ])
+
+    expect(await registry.listSessions('claude')).toMatchObject([{
+      title: 'Newer session',
+    }])
+    expect((await registry.load('claude', older.sourceSessionId))?.summary.title)
+      .toBe('Newer session')
+    expect(await registry.listSources()).toMatchObject([{
+      availability: 'degraded',
+      reason: 'session_discovery_partial',
+    }])
+  })
+
   it('routes only opaque source ids and caches by fingerprint', async () => {
     const load = vi.fn(fakeSource('dsh').load)
     const registry = new SourceRegistry([fakeSource('dsh', { load })])

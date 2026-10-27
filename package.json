@@ -20,7 +20,13 @@
   "files": [
     "dist-cli/**/*",
     "README.md",
-    "LICENSE"
+    "README.en.md",
+    "SECURITY.md",
+    "SECURITY.zh-CN.md",
+    "CONTRIBUTING.md",
+    "CONTRIBUTING.zh-CN.md",
+    "LICENSE",
+    "LICENSE.zh-CN.md"
   ],
   "scripts": {
     "dev": "tsx watch --clear-screen=false server/index.ts",

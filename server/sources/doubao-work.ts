@@ -59,6 +59,7 @@ interface SessionFiles {
   sessionId: string
   directory: string
   files: string[]
+  assignmentFiles: string[]
 }
 
 async function sessionFiles(
@@ -84,9 +85,23 @@ async function sessionFiles(
       throw error
     }
   }))).filter((file): file is string => file !== undefined)
+  const assignmentFiles = (await Promise.all(present.map(async file => {
+    const assignmentFile = path.join(path.dirname(file), 'assignment.md')
+    try {
+      return (await fs.stat(assignmentFile)).isFile() ? assignmentFile : undefined
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+  }))).filter((file): file is string => file !== undefined)
   return present.length === 0
     ? undefined
-    : { sessionId, directory, files: present.sort() }
+    : {
+        sessionId,
+        directory,
+        files: present.sort(),
+        assignmentFiles: assignmentFiles.sort(),
+      }
 }
 
 function assertRef(ref: SourceSessionRef, root: string): string[] {
@@ -109,7 +124,7 @@ function assertRef(ref: SourceSessionRef, root: string): string[] {
 async function currentFiles(
   ref: SourceSessionRef,
   root: string,
-): Promise<readonly string[]> {
+): Promise<SessionFiles> {
   assertRef(ref, root)
   const session = await sessionFiles(
     path.resolve(root, ref.sourceSessionId),
@@ -118,7 +133,7 @@ async function currentFiles(
   if (session === undefined) {
     throw new Error('Doubao Work session has no agent trajectories')
   }
-  return session.files
+  return session
 }
 
 function contentText(value: unknown): string {
@@ -132,15 +147,44 @@ function contentText(value: unknown): string {
   }).join('\n')
 }
 
-function titleFor(agents: readonly DoubaoWorkAgentInput[], sessionId: string): string {
+function compactTitle(value: string): string {
+  const title = value.replace(/\s+/g, ' ').trim()
+  return title.length > 64 ? `${title.slice(0, 63)}…` : title
+}
+
+function assignmentTitle(content: string): string {
+  if (!/^- Role:\s*main\s*$/m.test(content)) return ''
+  const lines = content.split(/\r?\n/)
+  const request = lines.findIndex(line =>
+    /^## \[[^\]]+\] 需求\s*$/.test(line))
+  if (request === -1) return ''
+  const end = lines.findIndex((line, index) =>
+    index > request && /^## \[[^\]]+\]/.test(line))
+  return compactTitle(lines.slice(request + 1, end === -1 ? undefined : end).join('\n'))
+}
+
+async function mainAssignmentTitle(files: readonly string[]): Promise<string> {
+  for (const file of files) {
+    const title = assignmentTitle(await fs.readFile(file, 'utf8'))
+    if (title !== '') return title
+  }
+  return ''
+}
+
+function titleFor(
+  agents: readonly DoubaoWorkAgentInput[],
+  sessionId: string,
+  assignedTitle = '',
+): string {
+  if (assignedTitle !== '') return assignedTitle
   const ordered = [...agents].sort((left, right) =>
     Number(!left.agentId.startsWith('m_')) - Number(!right.agentId.startsWith('m_'))
     || left.agentId.localeCompare(right.agentId))
   for (const agent of ordered) {
     const row = agent.rows.find(candidate =>
       candidate.role === 'user' && contentText(candidate.content).trim() !== '')
-    const title = contentText(row?.content).replace(/\s+/g, ' ').trim()
-    if (title !== '') return title.length > 64 ? `${title.slice(0, 63)}…` : title
+    const title = compactTitle(contentText(row?.content))
+    if (title !== '') return title
   }
   return `豆包工作 · ${sessionId.slice(-8)}`
 }
@@ -219,13 +263,19 @@ export class DoubaoWorkSource implements SessionSource {
     const settled = await mapConcurrent(directories, 12, async directory => {
       const session = await sessionFiles(directory, path.basename(directory))
       if (session === undefined) return undefined
-      const [sessionStat, fileStats] = await Promise.all([
+      const [sessionStat, fileStats, assignmentStats] = await Promise.all([
         fs.stat(session.directory),
         mapConcurrent(session.files, 16, file => fs.stat(file)),
+        mapConcurrent(session.assignmentFiles, 16, file => fs.stat(file)),
       ])
-      const failed = fileStats.find(result => result.status === 'rejected')
+      const failed = [...fileStats, ...assignmentStats]
+        .find(result => result.status === 'rejected')
       if (failed?.status === 'rejected') throw failed.reason
       const stats = fileStats.map(result =>
+        (result as PromiseFulfilledResult<
+          Awaited<ReturnType<typeof fs.stat>>
+        >).value)
+      const titleStats = assignmentStats.map(result =>
         (result as PromiseFulfilledResult<
           Awaited<ReturnType<typeof fs.stat>>
         >).value)
@@ -235,10 +285,17 @@ export class DoubaoWorkSource implements SessionSource {
           `${path.relative(this.sessionsRoot, session.files[index]!)}:${
             fileStatSignature(stat)
           }`),
+        ...titleStats.map((stat, index) =>
+          `${path.relative(this.sessionsRoot, session.assignmentFiles[index]!)}:${
+            fileStatSignature(stat)
+          }`),
       ].join('|')
       const cached = this.discoveryCache.get(session.sessionId)
       if (cached?.signature === signature) return cached.ref
-      const agents = await readAgents(session.files)
+      const [agents, assignedTitle] = await Promise.all([
+        readAgents(session.files),
+        mainAssignmentTitle(session.assignmentFiles),
+      ])
       const createdAt = Number(sessionStat.birthtimeMs || sessionStat.mtimeMs)
       const updatedAt = Math.max(...stats.map(stat => Number(stat.mtimeMs)))
       const eventCount = agents.reduce((total, agent) => total + agent.rows.length, 0)
@@ -249,7 +306,7 @@ export class DoubaoWorkSource implements SessionSource {
         format: 'doubao-work-agent-trajectory-jsonl',
         capabilities: DOUBAO_WORK_CAPABILITIES,
         cwd: '',
-        title: titleFor(agents, session.sessionId),
+        title: titleFor(agents, session.sessionId, assignedTitle),
         createdAt,
         updatedAt,
         size: stats.reduce((total, stat) => total + Number(stat.size), 0),
@@ -296,7 +353,8 @@ export class DoubaoWorkSource implements SessionSource {
   }
 
   async fingerprint(ref: SourceSessionRef): Promise<string> {
-    const files = await currentFiles(ref, this.sessionsRoot)
+    const session = await currentFiles(ref, this.sessionsRoot)
+    const files = [...session.files, ...session.assignmentFiles]
     const stats = await Promise.all(files.map(file => fs.stat(file)))
     return stats.map((stat, index) =>
       `${path.relative(this.sessionsRoot, files[index]!)}:${stat.mtimeMs}:${stat.size}`)
@@ -304,8 +362,8 @@ export class DoubaoWorkSource implements SessionSource {
   }
 
   async audit(ref: SourceSessionRef) {
-    const files = await currentFiles(ref, this.sessionsRoot)
-    const agents = await readAgents(files)
+    const session = await currentFiles(ref, this.sessionsRoot)
+    const agents = await readAgents(session.files)
     const events = agents.flatMap(agent => agent.rows.map((row, rowIndex) => ({
       agentId: agent.agentId,
       row: rowIndex + 1,
@@ -319,8 +377,11 @@ export class DoubaoWorkSource implements SessionSource {
   }
 
   async load(ref: SourceSessionRef): Promise<SessionDetail> {
-    const files = await currentFiles(ref, this.sessionsRoot)
-    const agents = await readAgents(files)
+    const session = await currentFiles(ref, this.sessionsRoot)
+    const [agents, assignedTitle] = await Promise.all([
+      readAgents(session.files),
+      mainAssignmentTitle(session.assignmentFiles),
+    ])
     const input: DoubaoWorkProjectionInput = {
       sessionId: ref.sourceSessionId,
       createdAt: ref.summary.createdAt,
@@ -330,10 +391,11 @@ export class DoubaoWorkSource implements SessionSource {
       `doubao-work-source:${ref.sourceSessionId}`,
       input,
     )
-    const stats = await Promise.all(files.map(file => fs.stat(file)))
+    const stats = await Promise.all(session.files.map(file => fs.stat(file)))
     return {
       summary: {
         ...ref.summary,
+        title: titleFor(agents, ref.sourceSessionId, assignedTitle),
         updatedAt: Math.max(...stats.map(stat => Number(stat.mtimeMs))),
         size: stats.reduce((total, stat) => total + Number(stat.size), 0),
         eventCount: agents.reduce((total, agent) => total + agent.rows.length, 0),

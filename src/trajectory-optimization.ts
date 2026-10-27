@@ -1,4 +1,5 @@
 import type { SessionDetail, TrajectoryRecord } from './types'
+import { toolCommand, validationSemantics } from './tool-semantics'
 
 export const OPTIMIZATION_MEASURES = [
   'code', 'rule', 'hook', 'plugin', 'environment', 'workflow', 'verification',
@@ -274,11 +275,7 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 function command(record: TrajectoryRecord): string {
-  const input = object(record.input)
-  const value = input.cmd ?? input.command ?? input.program
-  return typeof value === 'string' ? value
-    : Array.isArray(value) && value.every(item => typeof item === 'string') ? value.join(' ')
-    : ''
+  return toolCommand(record)
 }
 
 // Exact, bounded comparison: do not remove whitespace from shell arguments or output.
@@ -302,8 +299,7 @@ function resultText(record: TrajectoryRecord): string {
 }
 
 function isValidation(record: TrajectoryRecord): boolean {
-  return /(?:^|\s|\/)(?:npm (?:run )?(?:test|build|lint|typecheck|check)|npx (?:vitest|jest|tsc)|pnpm (?:run )?(?:test|build|lint|typecheck)|pytest|vitest|jest|cargo test|go test|tsc)(?:\s|$)/i.test(command(record))
-    || /^(?:test|run_tests|typecheck|lint|build|verify)$/i.test(record.title)
+  return validationSemantics(record) !== undefined
 }
 
 function isEdit(record: TrajectoryRecord): boolean {
@@ -395,7 +391,7 @@ export function analyzeTrajectoryOptimizations(
         candidate.turn === record.turn
         && candidate.status === 'complete'
         && isEdit(candidate))
-      validated = record.status === 'complete' && !hasLaterEdit
+      validated = validationSemantics(record)?.outcome === 'passed' && !hasLaterEdit
     }
 
     const input = fingerprint(record.input)

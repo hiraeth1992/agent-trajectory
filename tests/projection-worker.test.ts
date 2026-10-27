@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
 import { Worker } from 'node:worker_threads'
 import { ProjectionWorkerClient } from '../server/projection-worker-client'
@@ -26,6 +27,28 @@ function message(seq: number, text: string): SessionEvent {
 }
 
 describe('projection worker', () => {
+  it('bounds pending requests and times out an unresponsive worker', async () => {
+    class SilentWorker extends EventEmitter {
+      postMessage() {}
+      ref() {}
+      unref() {}
+      async terminate() { return 0 }
+    }
+    const worker = new ProjectionWorkerClient(
+      () => new SilentWorker() as unknown as Worker,
+      { maxPending: 1, requestTimeoutMs: 20 },
+    )
+    try {
+      const first = worker.projectDsh('dsh:timeout', header, [])
+      await expect(worker.projectDsh('dsh:overflow', header, []))
+        .rejects.toThrow(/queue is full/)
+      await expect(first).rejects.toThrow(/timed out/)
+      expect(worker.metrics()).toMatchObject({ pending: 0, maxPending: 1 })
+    } finally {
+      await worker.close()
+    }
+  })
+
   it('reuses one worker and yields the main event loop during projection', async () => {
     let workerCreations = 0
     const worker = new ProjectionWorkerClient((filename, options) => {

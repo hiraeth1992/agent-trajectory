@@ -12,6 +12,11 @@ import {
   analyzeTrajectoryOptimizations,
   type OptimizationSuggestion,
 } from './trajectory-optimization'
+import {
+  classifyCommand,
+  toolCommand,
+  validationSemantics,
+} from './tool-semantics'
 
 export type AnalysisEvidenceLevel = 'fact' | 'inferred' | 'unknown'
 export type AnalysisConfidence = 'high' | 'medium' | 'low'
@@ -104,8 +109,6 @@ export interface TrajectoryAnalysis {
   optimizations?: OptimizationSuggestion[]
 }
 
-const VALIDATION_PATTERN = /(?:^|[\s._:/-])(test|tests|testing|pytest|vitest|jest|spec|lint|typecheck|check|verify|validation|build|compile|cargo test|go test)(?:$|[\s._:/-])/i
-
 function compact(value: string, length = 180): string {
   const normalized = value.replace(/\s+/g, ' ').trim()
   if (normalized.length <= length) return normalized
@@ -157,18 +160,8 @@ function containsChinese(value: string): boolean {
   return /[\u3400-\u9fff]/.test(value)
 }
 
-function structuredInput(record: TrajectoryRecord): Record<string, unknown> {
-  return record.input !== null && typeof record.input === 'object' && !Array.isArray(record.input)
-    ? record.input as Record<string, unknown>
-    : {}
-}
-
 function commandFrom(record: TrajectoryRecord): string {
-  const input = structuredInput(record)
-  const command = input.cmd ?? input.command ?? input.program
-  if (Array.isArray(command)) return command.map(String).join(' ')
-  if (typeof command === 'string') return command
-  return typeof record.input === 'string' ? record.input : ''
+  return toolCommand(record)
 }
 
 function patchText(value: unknown): string {
@@ -223,21 +216,16 @@ function patchPaths(record: TrajectoryRecord): string[] {
 }
 
 function commandPurpose(command: string): string {
-  const normalized = command.toLowerCase()
-  if (/\b(npm run dev|npm run preview|npm run desktop|vite(?:\s+--host)?|tsx server\/index)\b/.test(normalized)) {
-    return '启动开发服务'
-  }
-  if (/\b(npm test|vitest|pytest|jest|cargo test|go test)\b/.test(normalized)) {
-    return '运行测试'
-  }
-  if (/\b(npm run build|vite build|electron-builder|cargo build|go build)\b/.test(normalized)) {
-    return '构建项目'
-  }
-  if (/\b(typecheck|tsc\s+--noemit)\b/.test(normalized)) return '执行类型检查'
-  if (/\bgit\s+(status|diff)\b/.test(normalized)) return '检查代码变更'
-  if (/\b(rg|grep|find)\b/.test(normalized)) return '搜索相关代码和文件'
-  if (/\b(sed|cat|head|tail)\b/.test(normalized)) return '读取相关文件内容'
-  if (/\bcurl\b/.test(normalized)) return '请求并检查接口数据'
+  const purpose = classifyCommand(command)
+  if (purpose === 'dev-server') return '启动开发服务'
+  if (purpose === 'test') return '运行测试'
+  if (purpose === 'build') return '构建项目'
+  if (purpose === 'typecheck') return '执行类型检查'
+  if (purpose === 'check') return '执行检查'
+  if (purpose === 'diff') return '检查代码变更'
+  if (purpose === 'search') return '搜索相关代码和文件'
+  if (purpose === 'read') return '读取相关文件内容'
+  if (purpose === 'request') return '请求并检查接口数据'
   return command === '' ? '执行命令' : `执行命令 ${compact(command, 72)}`
 }
 
@@ -293,11 +281,15 @@ function testResult(text: string): string | undefined {
 
 function toolResult(record: TrajectoryRecord): string {
   const action = toolAction(record)
+  const validation = validationSemantics(record)
+  if (validation?.outcome === 'failed') {
+    return `${action}失败：${validation.summary ?? '验证未通过'}`
+  }
   if (record.status === 'error' || record.status === 'interrupted') {
     return `${action}失败：${failureReason(record)}`
   }
   const output = cleanText(visibleText(record.output))
-  const tested = testResult(output)
+  const tested = validation?.summary ?? testResult(output)
   if (tested !== undefined) return tested
   if (/built in|build (?:completed|succeeded)|构建成功/i.test(output)) return '项目构建成功'
   if (/tsc --noemit|typecheck/i.test(commandFrom(record)) && record.status === 'complete') {
@@ -573,18 +565,63 @@ function usageMagnitude(usage: TokenUsage | undefined): number {
 }
 
 function validationRecord(record: TrajectoryRecord): boolean {
-  if (record.kind !== 'tool' && record.kind !== 'subtool') return false
-  if (record.title === 'exec_command' || record.title === 'write_stdin') {
-    return ['运行测试', '构建项目', '执行类型检查']
-      .includes(commandPurpose(commandFrom(record)))
-  }
-  if (record.title === 'apply_patch') return false
-  return VALIDATION_PATTERN.test(record.title)
+  return validationSemantics(record) !== undefined
 }
 
 function editRecord(record: TrajectoryRecord): boolean {
   return /^(?:apply_patch|edit_file|write_file|replace_in_file|multiedit|edit|write)$/i
     .test(record.title)
+}
+
+function completedAnswerAfterInterruptedTurn(
+  detail: SessionDetail,
+): TrajectoryRecord | undefined {
+  const latestTurn = detail.projection.turns
+    .slice()
+    .sort((left, right) => left.number - right.number)
+    .at(-1)
+  if (latestTurn?.status !== 'complete') return undefined
+  const interruptedTurnNumbers = detail.projection.turns
+    .filter(turn => turn.status === 'interrupted' && turn.number < latestTurn.number)
+    .map(turn => turn.number)
+  if (interruptedTurnNumbers.length === 0) return undefined
+  const latestInterruptedTurn = Math.max(...interruptedTurnNumbers)
+  const hasFollowUpInput = detail.projection.records.some(record =>
+    record.kind === 'user'
+    && record.turn > latestInterruptedTurn
+    && record.turn <= latestTurn.number)
+  if (!hasFollowUpInput) return undefined
+  return detail.projection.records
+    .filter(record =>
+      record.kind === 'assistant'
+      && record.title !== '推理'
+      && record.turn === latestTurn.number
+      && record.status === 'complete'
+      && cleanText(visibleText(record.output)) !== '')
+    .sort((left, right) =>
+      left.step - right.step
+      || left.seq - right.seq
+      || left.startTime - right.startTime)
+    .at(-1)
+}
+
+function causedByInterruptedExit130(
+  detail: SessionDetail,
+  actions: readonly TrajectoryRecord[],
+  correction: AnalysisCorrection,
+  completedAnswer: TrajectoryRecord | undefined,
+): boolean {
+  if (completedAnswer === undefined) return false
+  const trigger = correction.locations.trigger
+  if (trigger === undefined || trigger.turn >= completedAnswer.turn) return false
+  const interruptedTurn = detail.projection.turns.find(turn =>
+    turn.number === trigger.turn && turn.status === 'interrupted')
+  if (interruptedTurn === undefined) return false
+  return actions.some(record =>
+    record.turn === trigger.turn
+    && record.step === trigger.step
+    && (record.status === 'error' || record.status === 'interrupted')
+    && String(record.error?.code ?? '') === '130')
 }
 
 function adjustmentSummary(step: AnalysisStep): string {
@@ -806,8 +843,25 @@ function outcomeEvaluation(
       || actions.indexOf(latestValidation) > actions.indexOf(latestEdit))
     ? latestValidation
     : undefined
+  const effectiveValidationSemantics = effectiveValidation === undefined
+    ? undefined
+    : validationSemantics(effectiveValidation)
   const unresolved = corrections.filter(correction => correction.status === 'unresolved')
+  const completedAnswer = completedAnswerAfterInterruptedTurn(detail)
+  const blockingUnresolved = unresolved.filter(correction =>
+    !causedByInterruptedExit130(detail, actions, correction, completedAnswer))
   const targetStatus = detail.projection.taskState?.target?.status
+  const normalizedTargetStatus = targetStatus?.toLowerCase()
+  const targetPartiallyComplete = normalizedTargetStatus !== undefined
+    && /partial|部分/u.test(normalizedTargetStatus)
+  const targetExplicitlyIncomplete = targetPartiallyComplete
+    || normalizedTargetStatus === 'active'
+    || normalizedTargetStatus === 'paused'
+  const incompleteTodos = detail.projection.taskState?.todos.filter(todo =>
+    !new Set([
+      'cancelled', 'canceled', 'complete', 'completed', 'done',
+      'resolved', 'skipped', 'superseded',
+    ]).has(todo.status.toLowerCase())) ?? []
   const running = detail.projection.turns.some(turn => turn.status === 'running')
     || actions.some(record => record.status === 'running')
   if (running) {
@@ -830,15 +884,62 @@ function outcomeEvaluation(
       },
     }
   }
-  if (effectiveValidation?.status === 'error' || targetStatus === 'blocked' || unresolved.length > 0) {
+  if (normalizedTargetStatus === 'blocked') {
+    return {
+      outcome: {
+        label: '结果存在未解决问题',
+        summary: '任务状态明确标记为 blocked。',
+        tone: 'negative',
+        confidence: 'high',
+        evidenceRecordIds: [],
+      },
+      evaluation: {
+        id: 'outcome',
+        title: '结果证据',
+        grade: 'bad',
+        label: '任务受阻',
+        summary: '任务状态明确标记为 blocked，不能判定任务完成。',
+        confidence: 'high',
+        evidenceRecordIds: [],
+      },
+    }
+  }
+  if (targetPartiallyComplete) {
+    const evidence = effectiveValidation === undefined ? [] : [effectiveValidation.id]
+    const validationBoundary = effectiveValidationSemantics?.outcome === 'failed'
+      ? `最后一次验证“${effectiveValidation!.title}”仍失败`
+      : effectiveValidationSemantics?.outcome === 'passed'
+        ? `最后一次验证“${effectiveValidation!.title}”成功，但只覆盖其实际检查范围`
+        : '缺少独立验证证明所有要求均已完成'
+    return {
+      outcome: {
+        label: '部分修复，仍有未完成项',
+        summary: `任务状态明确标记为部分完成；${validationBoundary}。`,
+        tone: 'warning',
+        confidence: 'high',
+        evidenceRecordIds: evidence,
+      },
+      evaluation: {
+        id: 'outcome',
+        title: '结果证据',
+        grade: 'warning',
+        label: '部分通过',
+        summary: '来源明确记录了部分完成状态，不能按整体成功或整体失败处理。',
+        confidence: 'high',
+        evidenceRecordIds: evidence,
+      },
+    }
+  }
+  if (effectiveValidationSemantics?.outcome === 'failed') {
     const evidence = [
-      ...(effectiveValidation?.status === 'error' ? [effectiveValidation.id] : []),
-      ...unresolved.flatMap(correction => correction.recordIds),
+      ...(effectiveValidationSemantics?.outcome === 'failed'
+        && effectiveValidation !== undefined ? [effectiveValidation.id] : []),
     ]
     return {
       outcome: {
         label: '结果存在未解决问题',
-        summary: effectiveValidation?.status === 'error'
+        summary: effectiveValidationSemantics?.outcome === 'failed'
+          && effectiveValidation !== undefined
           ? `最后一次验证“${effectiveValidation.title}”失败，轨迹中没有后续通过证据。`
           : '轨迹中存在失败或中断步骤，尚未观察到恢复证据。',
         tone: 'negative',
@@ -856,7 +957,64 @@ function outcomeEvaluation(
       },
     }
   }
-  if (effectiveValidation?.status === 'complete') {
+  if (effectiveValidationSemantics?.outcome === 'passed'
+    && effectiveValidation !== undefined) {
+    const validationIndex = actions.indexOf(effectiveValidation)
+    const unresolvedAfterValidation = unresolved.filter((correction) => {
+      const triggerIndices = correction.recordIds.flatMap((id) => {
+        const index = actions.findIndex(record => record.id === id
+          && (record.status === 'error' || record.status === 'interrupted'))
+        return index < 0 ? [] : [index]
+      })
+      if (triggerIndices.length > 0) {
+        return Math.min(...triggerIndices) > validationIndex
+      }
+      const trigger = correction.locations.trigger
+      return trigger === undefined
+        || trigger.turn > effectiveValidation.turn
+        || trigger.turn === effectiveValidation.turn
+          && trigger.step > effectiveValidation.step
+    })
+    if (targetExplicitlyIncomplete
+      || incompleteTodos.length > 0
+      || unresolvedAfterValidation.length > 0) {
+      const explicitIncomplete = targetExplicitlyIncomplete || incompleteTodos.length > 0
+      const evidence = [
+        effectiveValidation.id,
+        ...unresolvedAfterValidation.flatMap(correction => correction.recordIds),
+      ]
+      const boundaries = [
+        ...(targetExplicitlyIncomplete
+          ? [`任务状态仍为“${targetStatus}”`]
+          : []),
+        ...(incompleteTodos.length === 0
+          ? []
+          : [`任务状态仍有 ${incompleteTodos.length} 个未完成项`]),
+        ...(unresolvedAfterValidation.length === 0
+          ? []
+          : [`验证后仍有 ${unresolvedAfterValidation.length} 个异常没有恢复证据`]),
+      ]
+      return {
+        outcome: {
+          label: '部分修复，仍有未完成项',
+          summary: `最后一次验证“${effectiveValidation.title}”成功，但${
+            boundaries.join('，')
+          }；成功证据仅覆盖该验证实际检查的范围。`,
+          tone: 'warning',
+          confidence: explicitIncomplete ? 'high' : 'medium',
+          evidenceRecordIds: [...new Set(evidence)],
+        },
+        evaluation: {
+          id: 'outcome',
+          title: '结果证据',
+          grade: 'warning',
+          label: '部分通过',
+          summary: '已观察到成功验证，但仍有明确未完成项或验证后的未恢复异常。',
+          confidence: explicitIncomplete ? 'high' : 'medium',
+          evidenceRecordIds: [...new Set(evidence)],
+        },
+      }
+    }
     return {
       outcome: {
         label: '已完成并有验证证据',
@@ -873,6 +1031,54 @@ function outcomeEvaluation(
         summary: `观察到 ${validations.length} 个测试、构建或检查步骤，最后一次执行成功。`,
         confidence: 'high',
         evidenceRecordIds: validations.map(record => record.id),
+      },
+    }
+  }
+  if (blockingUnresolved.length > 0) {
+    const evidence = blockingUnresolved.flatMap(correction => correction.recordIds)
+    const confidence = blockingUnresolved.every(correction => correction.confidence === 'high')
+      ? 'high'
+      : 'medium'
+    return {
+      outcome: {
+        label: '结果存在未解决问题',
+        summary: '轨迹中存在失败或中断步骤，尚未观察到恢复证据。',
+        tone: 'negative',
+        confidence,
+        evidenceRecordIds: evidence,
+      },
+      evaluation: {
+        id: 'outcome',
+        title: '结果证据',
+        grade: 'bad',
+        label: '验证未通过',
+        summary: '存在明确失败证据，不能判定任务完成。',
+        confidence,
+        evidenceRecordIds: evidence,
+      },
+    }
+  }
+  if (completedAnswer !== undefined && unresolved.length > 0) {
+    const evidence = [
+      ...unresolved.flatMap(correction => correction.recordIds),
+      completedAnswer.id,
+    ]
+    return {
+      outcome: {
+        label: '已完成，但缺少独立验证',
+        summary: '后续轮次已完成并给出最终答复；此前中断产生的退出码 130 不代表最终任务失败，但缺少独立验证证明答复正确。',
+        tone: 'warning',
+        confidence: 'medium',
+        evidenceRecordIds: [...new Set(evidence)],
+      },
+      evaluation: {
+        id: 'outcome',
+        title: '结果证据',
+        grade: 'warning',
+        label: '缺少独立验证',
+        summary: '后续轮次完整结束并形成答复；中断轮次仍作为路径稳定性证据保留。',
+        confidence: 'medium',
+        evidenceRecordIds: [...new Set(evidence)],
       },
     }
   }
@@ -1006,8 +1212,10 @@ function buildEvaluations(
         : recovered.length > 0
           ? '观察到恢复动作'
           : '没有可评估异常',
-      summary: recovered.length > 0
-        ? `${recovered.length} 个异常后出现成功动作；相邻步骤关联属于轨迹推断。`
+      summary: recovered.length > 0 && unresolved.length > 0
+        ? `${recovered.length} 个异常后出现成功动作；${unresolved.length} 个异常没有后续成功证据。相邻步骤关联属于轨迹推断。`
+        : recovered.length > 0
+          ? `${recovered.length} 个异常后出现成功动作；相邻步骤关联属于轨迹推断。`
         : unresolved.length > 0
           ? `${unresolved.length} 个异常没有后续成功证据。`
           : '本次轨迹没有触发恢复流程。',

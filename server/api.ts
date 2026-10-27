@@ -22,6 +22,11 @@ import type {
 } from '../src/annotation-types'
 import type { TrajectoryDiagnosisPromptRequest } from '../src/diagnosis-types'
 import { redactSensitive } from '../src/projector-utils'
+import { analyzeTrajectory, type TrajectoryAnalysis } from '../src/trajectory-analysis'
+import {
+  applyFactsQualityGate,
+  evaluateTrajectory,
+} from '../src/trajectory-evaluation'
 import {
   DiagnosisRequestError,
   type TrajectoryDiagnosisService,
@@ -78,6 +83,12 @@ export class HttpError extends Error {
 
 function annotationReviewer(value: string | undefined): AnnotationReviewer | undefined {
   return value === 'reviewer-a' || value === 'reviewer-b' ? value : undefined
+}
+
+function annotationActor(
+  value: string | undefined,
+): AnnotationReviewer | 'adjudicator' | undefined {
+  return value === 'adjudicator' ? value : annotationReviewer(value)
 }
 
 export function sendJson(response: ServerResponse, status: number, payload: unknown): void {
@@ -318,6 +329,7 @@ const DETAIL_REVISION_CACHE_BYTES = 64 * 1024 * 1024
 interface DetailRevision {
   revision: string
   detail: TransportSessionDetail
+  analysis: TrajectoryAnalysis
   serializedRecords: ReadonlyMap<string, string>
   projection: Omit<TransportSessionDetail['projection'], 'records'>
   recordOrder: string[]
@@ -452,8 +464,20 @@ function preparedDetail(state: ApiSessionState, detail: SessionDetail): DetailRe
   const cached = state.preparedDetails.get(detail)
   if (cached !== undefined) return cached
   const transport = transportDetail(detail)
+  const localAnalysis = analyzeTrajectory(detail)
+  const analysis = redactSensitive(applyFactsQualityGate(
+    localAnalysis,
+    evaluateTrajectory(detail, localAnalysis, {
+      target: {
+        source: detail.summary.source,
+        sourceSessionId: detail.summary.sourceSessionId,
+        mode: detail.summary.capabilities.live ? 'live' : 'frozen',
+        fingerprint: 'detail-response',
+      },
+    }),
+  )) as TrajectoryAnalysis
   const revision = createHash('sha256')
-    .update(JSON.stringify(transport))
+    .update(JSON.stringify({ transport, analysis }))
     .digest('base64url')
   const serializedRecords = new Map(transport.projection.records.map(record => [
     record.id,
@@ -463,6 +487,7 @@ function preparedDetail(state: ApiSessionState, detail: SessionDetail): DetailRe
   const prepared = {
     revision,
     detail: transport,
+    analysis,
     serializedRecords,
     projection,
     recordOrder: transport.projection.records.map(record => record.id),
@@ -478,6 +503,7 @@ function emptyDelta(current: DetailRevision): SessionDetailResponse {
     revision: current.revision,
     summary: current.detail.summary,
     projection: current.projection,
+    analysis: current.analysis,
     upserts: [],
     removedIds: [],
     recordOrder: current.recordOrder,
@@ -500,7 +526,12 @@ function detailResponse(
     : revisionHistory(state, key).find(entry => entry.revision === requestedRevision)
   rememberRevision(state, key, current)
   if (previous === undefined) {
-    return { kind: 'snapshot', revision: current.revision, detail: current.detail }
+    return {
+      kind: 'snapshot',
+      revision: current.revision,
+      detail: current.detail,
+      analysis: current.analysis,
+    }
   }
   const after = new Set(current.recordOrder)
   const upserts = current.detail.projection.records.filter(record =>
@@ -514,6 +545,7 @@ function detailResponse(
     revision: current.revision,
     summary: current.detail.summary,
     projection: current.projection,
+    analysis: current.analysis,
     upserts,
     removedIds,
     recordOrder: current.recordOrder,
@@ -564,7 +596,9 @@ async function routeApi(
     sendJson(
       response,
       200,
-      await options.registry.listSessions(requested === 'all' ? 'all' : sourceId(requested)!),
+      redactSensitive(await options.registry.listSessions(
+        requested === 'all' ? 'all' : sourceId(requested)!,
+      )),
     )
     return true
   }
@@ -721,7 +755,7 @@ async function routeApi(
     return true
   }
   const annotationRecordMatch = url.pathname.match(
-    /^\/api\/annotations\/datasets\/([^/]+)\/(reviewer-a|reviewer-b)\/cases\/([^/]+)\/records\/([^/]+)$/,
+    /^\/api\/annotations\/datasets\/([^/]+)\/(reviewer-a|reviewer-b|adjudicator)\/cases\/([^/]+)\/records\/([^/]+)$/,
   )
   if (annotationRecordMatch !== null) {
     if (options.annotations === undefined) {
@@ -733,13 +767,16 @@ async function routeApi(
       return true
     }
     const directoryId = decodePathSegment(annotationRecordMatch[1])
-    const reviewer = annotationReviewer(annotationRecordMatch[2])
+    const reviewer = annotationActor(annotationRecordMatch[2])
     const caseId = decodePathSegment(annotationRecordMatch[3])
     const recordId = decodePathSegment(annotationRecordMatch[4])
     if (directoryId === undefined || reviewer === undefined
       || caseId === undefined || recordId === undefined) {
       sendJson(response, 400, { error: 'invalid annotation path' })
       return true
+    }
+    if (reviewer === 'adjudicator') {
+      await options.annotations.adjudicationOverview(directoryId)
     }
     sendJson(
       response,
@@ -867,11 +904,38 @@ async function routeApi(
       sendJson(response, 400, { error: 'invalid source' })
       return true
     }
-    const detail = await options.registry.load(source, id)
-    if (detail === undefined) {
-      sendJson(response, 404, { error: 'session not found' })
-    } else {
+    let frozen:
+      | {
+          audit: SourceAuditBundle | undefined
+          detail: SessionDetail
+          fingerprint: string
+        }
+      | undefined
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const before = await options.registry.fingerprint(source, id)
+      if (before === undefined) break
+      const detail = await options.registry.load(source, id)
+      if (detail === undefined) break
       const audit = await options.registry.audit?.(source, id)
+      const after = await options.registry.fingerprint(source, id)
+      if (after === before) {
+        frozen = { audit, detail, fingerprint: after }
+        break
+      }
+    }
+    if (frozen === undefined) {
+      const exists = await options.registry.fingerprint(source, id)
+      if (exists === undefined) {
+        sendJson(response, 404, { error: 'session not found' })
+        return true
+      }
+      throw new HttpError(
+        'session changed while freezing audit export; retry when the session is idle',
+        409,
+        'session_changed_during_export',
+      )
+    } else {
+      const { audit, detail, fingerprint } = frozen
       const auditMetadata = audit === undefined
         ? {
             completeness: 'partial' as const,
@@ -886,6 +950,7 @@ async function routeApi(
         format: 'agent-trajectory-audit',
         version: 3,
         complete: audit?.completeness === 'complete',
+        sourceFingerprint: fingerprint,
         detail: auditDetail(detail),
         sourceEvents: redactSensitive(audit?.events ?? []),
         audit: redactSensitive(auditMetadata),

@@ -73,6 +73,32 @@ function withListDiagnostics(
     : status
 }
 
+function canonicalReferences(
+  source: SourceId,
+  references: readonly SourceSessionRef[],
+): {
+  duplicates: SourceListDiagnostics['failures']
+  refs: SourceSessionRef[]
+} {
+  const ordered = [...references].sort((left, right) =>
+    right.summary.updatedAt - left.summary.updatedAt
+    || right.summary.size - left.summary.size
+    || left.locator.localeCompare(right.locator))
+  const selected = new Map<string, SourceSessionRef>()
+  const duplicates: SourceListDiagnostics['failures'] = []
+  for (const reference of ordered) {
+    if (!selected.has(reference.sourceSessionId)) {
+      selected.set(reference.sourceSessionId, reference)
+      continue
+    }
+    duplicates.push({
+      locator: reference.locator,
+      reason: `duplicate ${source} session id: ${reference.sourceSessionId}`,
+    })
+  }
+  return { refs: [...selected.values()], duplicates }
+}
+
 export class SourceRegistry {
   private readonly sources: ReadonlyMap<SourceId, SessionSource>
   private readonly refCache = new Map<SourceId, TimedValue<readonly SourceSessionRef[]>>()
@@ -123,9 +149,18 @@ export class SourceRegistry {
         : source.listDetailed()
     ).then(
       (result) => {
-        const refs = result.refs
+        const canonical = canonicalReferences(id, result.refs)
+        const refs = canonical.refs
+        const diagnostics = canonical.duplicates.length === 0
+          ? result.diagnostics
+          : {
+              ...result.diagnostics,
+              loaded: refs.length,
+              failed: result.diagnostics.failed + canonical.duplicates.length,
+              failures: [...result.diagnostics.failures, ...canonical.duplicates],
+            }
         this.listFailures.delete(id)
-        this.listDiagnostics.set(id, result.diagnostics)
+        this.listDiagnostics.set(id, diagnostics)
         this.knownRefs.set(id, new Map(refs.map(ref => [ref.sourceSessionId, ref])))
         for (const ref of refs) this.missingRefs.delete(`${id}:${ref.sourceSessionId}`)
         this.statusCache = undefined

@@ -13,6 +13,7 @@ import { BrowserSession } from './browser-session'
 import {
   installedAgentHooks,
   installAgentHooks,
+  pruneHookRuntimeDirectories,
   readHookInstallation,
   uninstallAgentHooks,
   type HookInstallLocations,
@@ -58,7 +59,6 @@ import type {
 } from '../src/evaluation-types'
 import {
   writePrivateJson,
-  writePrivateJsonExclusive,
   writePrivateText,
 } from './file-transaction'
 import {
@@ -607,10 +607,9 @@ async function doctor(arguments_: CliArguments): Promise<void> {
       if (missingHooks.length > 0) {
         hookIssues.push(`Installed Hook entries are missing: ${missingHooks.join(', ')}`)
       }
-      const expectedRuntime = path.join(
+      const expectedRuntimeRoot = path.join(
         arguments_.dataRoot,
         'runtime',
-        'agent-trajectory.mjs',
       )
       if (installation.platform !== process.platform) {
         hookIssues.push(
@@ -622,9 +621,10 @@ async function doctor(arguments_: CliArguments): Promise<void> {
           `Node executable changed: installed ${installation.nodeExecutable}, current ${process.execPath}`,
         )
       }
-      if (path.resolve(installation.runtimeFile) !== path.resolve(expectedRuntime)) {
+      const installedRuntime = path.resolve(installation.runtimeFile)
+      if (!installedRuntime.startsWith(`${path.resolve(expectedRuntimeRoot)}${path.sep}`)) {
         hookIssues.push(
-          `Hook runtime location changed: installed ${installation.runtimeFile}, current ${expectedRuntime}`,
+          `Hook runtime is outside the managed directory: ${installation.runtimeFile}`,
         )
       }
       if (path.resolve(installation.dataRoot) !== path.resolve(arguments_.dataRoot)) {
@@ -703,11 +703,16 @@ async function calibrate(arguments_: CliArguments): Promise<void> {
   const report = compareHumanAnnotations(manifest, reviewerA, reviewerB)
   const agreementFile = path.join(datasetDirectory, 'agreement.json')
   const adjudicationFile = path.join(datasetDirectory, 'adjudication.json')
-  await writePrivateJsonExclusive(agreementFile, report)
-  await writePrivateJsonExclusive(
-    adjudicationFile,
-    createAdjudicationTemplate(manifest, 'adjudicator'),
-  )
+  await writePrivateJson(agreementFile, report)
+  try {
+    await fs.access(adjudicationFile)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    await writePrivateJson(
+      adjudicationFile,
+      createAdjudicationTemplate(manifest, 'adjudicator'),
+    )
+  }
   console.log(`Agreement report: ${agreementFile}`)
   console.log(`Adjudication template: ${adjudicationFile}`)
   console.log(
@@ -899,23 +904,24 @@ async function updateHooks(
   remove: boolean,
 ): Promise<void> {
   const paths = await resolvedPaths(arguments_)
-  const runtimeRoot = path.join(arguments_.dataRoot, 'runtime')
-  const sourceRuntime = path.resolve(process.argv[1]!) === path.resolve(
-    path.join(runtimeRoot, 'agent-trajectory.mjs'),
+  const runtimeBase = path.join(arguments_.dataRoot, 'runtime')
+  const sourceRuntime = path.resolve(distributionRoot)
+  const runtimeRoot = path.join(
+    runtimeBase,
+    `${packageMetadata.version}-${Date.now()}-${randomBytes(6).toString('hex')}`,
   )
-    ? runtimeRoot
-    : distributionRoot
-  if (!remove && sourceRuntime !== runtimeRoot) {
-    const temporary = `${runtimeRoot}.${process.pid}.tmp`
-    await fs.rm(temporary, { recursive: true, force: true })
-    await fs.cp(sourceRuntime, temporary, { recursive: true })
-    await fs.rm(runtimeRoot, { recursive: true, force: true })
-    await fs.rename(temporary, runtimeRoot)
-  }
   const locations = hookLocations(paths)
-  const results = remove
-    ? await uninstallAgentHooks(locations, arguments_.dataRoot)
-    : await installAgentHooks(
+  let results
+  if (remove) {
+    results = await uninstallAgentHooks(locations, arguments_.dataRoot)
+  } else {
+    const temporary = `${runtimeRoot}.preparing`
+    await fs.mkdir(runtimeBase, { recursive: true, mode: 0o700 })
+    await fs.rm(temporary, { recursive: true, force: true })
+    try {
+      await fs.cp(sourceRuntime, temporary, { recursive: true })
+      await fs.rename(temporary, runtimeRoot)
+      results = await installAgentHooks(
         locations,
         process.execPath,
         path.join(runtimeRoot, 'agent-trajectory.mjs'),
@@ -923,13 +929,20 @@ async function updateHooks(
         process.platform,
         { packageVersion: packageMetadata.version },
       )
+      await pruneHookRuntimeDirectories(runtimeBase, runtimeRoot)
+    } catch (error) {
+      await fs.rm(temporary, { recursive: true, force: true }).catch(() => {})
+      await fs.rm(runtimeRoot, { recursive: true, force: true }).catch(() => {})
+      throw error
+    }
+  }
   for (const result of results) {
     console.log(`${result.source.padEnd(6)} ${result.action.padEnd(9)} ${result.file}`)
   }
   if (!remove) {
     console.log('Restart DSH and ZCode, and review/trust the new Codex hook with /hooks.')
   } else {
-    await fs.rm(runtimeRoot, { recursive: true, force: true })
+    await fs.rm(runtimeBase, { recursive: true, force: true })
   }
 }
 

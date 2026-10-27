@@ -18,7 +18,7 @@ Agent Trajectory 不修改来源会话或上游 Agent 配置。
 
 下面的动图展示了当前版本的会话分析、轨迹评测和评测中心：
 
-![Agent Trajectory 产品演示](docs/assets/readme/product-overview.gif)
+![Agent Trajectory 产品演示](https://raw.githubusercontent.com/hiraeth1992/agent-trajectory/main/docs/assets/readme/product-overview.gif)
 
 ## 核心功能
 

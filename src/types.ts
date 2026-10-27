@@ -330,6 +330,7 @@ export interface SessionDetailSnapshot {
   kind: 'snapshot'
   revision: string
   detail: TransportSessionDetail
+  analysis?: import('./trajectory-analysis').TrajectoryAnalysis
 }
 
 export interface SessionDetailDelta {
@@ -338,6 +339,7 @@ export interface SessionDetailDelta {
   revision: string
   summary: SessionSummary
   projection: Omit<TrajectoryProjection, 'records'>
+  analysis?: import('./trajectory-analysis').TrajectoryAnalysis
   upserts: TransportTrajectoryRecord[]
   removedIds: string[]
   recordOrder: string[]

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ClaudeCodeSource } from '../../server/sources/claude-code'
+import { projectClaudeCodeTrajectory } from '../../server/projectors/claude-code'
 
 const roots: string[] = []
 const fixture = path.resolve('tests/fixtures/claude-code-session.jsonl')
@@ -13,6 +14,55 @@ afterEach(async () => {
 })
 
 describe('Claude Code source', () => {
+  it('keeps usage and lineage for an assistant row containing only a tool call', () => {
+    const projection = projectClaudeCodeTrajectory([
+      {
+        type: 'user',
+        sessionId: 'tool-only-session',
+        uuid: 'user-1',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: { role: 'user', content: 'Inspect' },
+      },
+      {
+        type: 'assistant',
+        sessionId: 'tool-only-session',
+        uuid: 'assistant-1',
+        parentUuid: 'user-1',
+        timestamp: '2026-01-01T00:00:01.000Z',
+        message: {
+          role: 'assistant',
+          model: 'claude-test',
+          content: [{
+            type: 'tool_use',
+            id: 'call-1',
+            name: 'Read',
+            input: { path: 'README.md' },
+          }],
+          usage: { input_tokens: 10, output_tokens: 2 },
+        },
+      },
+    ])
+
+    expect(projection.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'model:assistant-1',
+        kind: 'model',
+        usage: expect.objectContaining({ totalTokens: 12 }),
+      }),
+      expect.objectContaining({
+        id: 'tool:call-1',
+        status: 'running',
+      }),
+    ]))
+    const ids = new Set(projection.records.map(record => record.id))
+    expect((projection.relations ?? []).every(relation =>
+      ids.has(relation.from) && ids.has(relation.to))).toBe(true)
+    expect(projection.turns[0]).toMatchObject({
+      status: 'running',
+      usage: expect.objectContaining({ totalTokens: 12 }),
+    })
+  })
+
   it('lists and loads messages, tools, usage, model, and event lineage', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'agent-trajectory-claude-'))
     roots.push(root)
