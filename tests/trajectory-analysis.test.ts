@@ -694,6 +694,57 @@ describe('analyzeTrajectory', () => {
     })
   })
 
+  it('marks failed browser checks recovered after a later browser check passes', () => {
+    const browserCheck = (body: string) =>
+      `node - <<'NODE'\nconst { chromium } = require('playwright')\n${body}\nNODE`
+    const analysis = analyzeTrajectory(detail([
+      record('browser-check-first', {
+        seq: 1,
+        step: 1,
+        title: 'exec_command',
+        input: { cmd: browserCheck('if (errors.length) process.exit(1)') },
+        status: 'error',
+        error: { code: '1', reason: 'browser verification failed' },
+      }),
+      record('browser-check-second', {
+        seq: 2,
+        step: 2,
+        title: 'exec_command',
+        input: { cmd: browserCheck('if (!nodes) process.exit(1)') },
+        status: 'error',
+        error: { code: '1', reason: 'browser verification failed again' },
+      }),
+      record('browser-fix', {
+        seq: 3,
+        step: 3,
+        title: 'apply_patch',
+        input: '*** Update File: build-map.js',
+        status: 'complete',
+      }),
+      record('browser-check-passed', {
+        seq: 4,
+        step: 4,
+        title: 'exec_command',
+        input: { cmd: browserCheck('if (errors.length) process.exit(1)') },
+        output: '{"nodes":27,"errors":[]}',
+        status: 'complete',
+      }),
+    ]))
+
+    expect(analysis.corrections.filter(correction =>
+      correction.id === 'recovery:step:1:1'
+      || correction.id === 'recovery:step:1:2'))
+      .toEqual([
+        expect.objectContaining({ status: 'recovered' }),
+        expect.objectContaining({ status: 'recovered' }),
+      ])
+    expect(analysis.outcome).toMatchObject({
+      label: '已完成并有验证证据',
+      tone: 'positive',
+      evidenceRecordIds: ['browser-check-passed'],
+    })
+  })
+
   it('does not let exit 130 from an interrupted turn block a later completed answer', () => {
     const value = detail([
       record('aborted-search', {

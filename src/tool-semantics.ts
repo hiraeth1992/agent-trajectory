@@ -140,6 +140,7 @@ function segmentPurpose(tokens: readonly string[]): CommandPurpose {
     || executable === 'pyright') return 'typecheck'
   if (executable === 'eslint' || executable === 'ruff'
     || executable === 'biome') return 'check'
+  if (executable === 'node' && args.includes('--check')) return 'check'
   if (executable === 'git'
     && (args[0] === 'status' || args[0] === 'diff')) return 'diff'
   if (['rg', 'grep', 'find'].includes(executable)) return 'search'
@@ -155,6 +156,9 @@ export function classifyCommand(command: string): CommandPurpose {
   for (const purpose of ['test', 'build', 'typecheck', 'check'] as const) {
     if (purposes.includes(purpose)) return purpose
   }
+  const explicitBrowserCheck = /\bplaywright\b/i.test(command)
+    && /process\.exit\s*\(\s*1\s*\)|\bassert(?:\.|\s*\()|throw\s+new\s+Error\b/.test(command)
+  if (explicitBrowserCheck) return 'check'
   return purposes.find(purpose => purpose !== 'unknown') ?? 'unknown'
 }
 

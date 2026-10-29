@@ -167,6 +167,41 @@ describe('Codex projector', () => {
     expect(projection.coverageSummary).toEqual({ total: 2, consumed: 2, gap: 0 })
   })
 
+  it('keeps completed internal auto-compaction calls out of real turn lifecycle', () => {
+    const attributed = (turnId: string) => ({
+      internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    })
+    const projection = projectCodexTrajectory([
+      row(0, 'event_msg', { type: 'task_started', turn_id: 'turn-first' }),
+      row(1, 'event_msg', { type: 'task_complete', turn_id: 'turn-first' }),
+      row(2, 'response_item', {
+        type: 'function_call',
+        call_id: 'internal-call',
+        name: 'untrusted_input',
+        arguments: '{}',
+        ...attributed('auto-compact-1'),
+      }),
+      row(3, 'response_item', {
+        type: 'function_call_output',
+        call_id: 'internal-call',
+        output: 'ok',
+        ...attributed('auto-compact-1'),
+      }),
+      row(4, 'event_msg', { type: 'task_started', turn_id: 'turn-second' }),
+      row(5, 'event_msg', { type: 'task_complete', turn_id: 'turn-second' }),
+    ])
+
+    expect(projection.turns).toEqual([
+      expect.objectContaining({ id: 'turn-first', number: 1, status: 'complete' }),
+      expect.objectContaining({ id: 'turn-second', number: 2, status: 'complete' }),
+    ])
+    expect(projection.records.find(record => record.callId === 'internal-call'))
+      .toMatchObject({
+        turn: 1,
+        status: 'complete',
+      })
+  })
+
   it('leaves malformed or future top-level compacted payloads uncovered', () => {
     const projection = projectCodexTrajectory([
       row(0, 'compacted', {

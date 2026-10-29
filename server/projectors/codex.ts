@@ -150,6 +150,11 @@ function turnIdFor(envelope: IndexedEnvelope): string | undefined {
     ?? string(envelope.payload.root_turn_id)
 }
 
+function businessTurnIdFor(envelope: IndexedEnvelope): string | undefined {
+  const turnId = turnIdFor(envelope)
+  return turnId?.startsWith('auto-compact-') === true ? undefined : turnId
+}
+
 function normalizeContent(value: unknown, fallbackType: 'text' | 'reasoning' = 'text'): unknown[] {
   if (typeof value === 'string') return [{ type: fallbackType, text: value }]
   return array(value).flatMap((entry) => {
@@ -450,7 +455,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
 
   for (const envelope of sorted) {
     const payloadType = string(envelope.payload.type)
-    const turnId = turnIdFor(envelope)
+    const turnId = businessTurnIdFor(envelope)
     if (turnId !== undefined) {
       const turn = ensureTurn(turnId)
       turn.rootTurnId = string(envelope.payload.root_turn_id) ?? turn.rootTurnId
@@ -520,6 +525,32 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     }
   }
 
+  const nearestBusinessTurn = (
+    ...envelopes: Array<IndexedEnvelope | undefined>
+  ): TurnState | undefined => {
+    const direct = envelopes
+      .flatMap(envelope => envelope === undefined ? [] : [businessTurnIdFor(envelope)])
+      .find((turnId): turnId is string => turnId !== undefined)
+    if (direct !== undefined) return turns.get(direct)
+    const ordinal = envelopes.find(
+      (envelope): envelope is IndexedEnvelope => envelope !== undefined,
+    )?.ordinal
+    if (ordinal === undefined) return undefined
+    let previous: TurnState | undefined
+    let following: TurnState | undefined
+    for (const candidate of sorted) {
+      const turnId = businessTurnIdFor(candidate)
+      const turn = turnId === undefined ? undefined : turns.get(turnId)
+      if (turn === undefined) continue
+      if (candidate.ordinal <= ordinal) previous = turn
+      else {
+        following = turn
+        break
+      }
+    }
+    return previous ?? following
+  }
+
   const contentEnvelopes = sorted.filter(envelope =>
     envelope.type === 'response_item')
   const contentTimings = new Map(itemTimings)
@@ -568,7 +599,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     if (envelope.type !== 'response_item'
       || string(envelope.payload.type) !== 'message'
       || string(envelope.payload.role) !== 'assistant') continue
-    const turnId = turnIdFor(envelope)
+    const turnId = businessTurnIdFor(envelope)
     if (turnId !== undefined) lastAssistantByTurn.set(turnId, envelope.ordinal)
   }
 
@@ -577,9 +608,11 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     const payloadType = string(envelope.payload.type)
     const sourceId = string(envelope.payload.id) ?? `${envelope.ordinal}:${envelope.fileOrder}`
     const timing = contentTimings.get(sourceId)
-    const turnId = turnIdFor(envelope)
-      ?? (timing === undefined ? undefined : turnIdFor(timing.envelope))
-    const turn = turnId === undefined ? undefined : ensureTurn(turnId)
+    const turnId = businessTurnIdFor(envelope)
+      ?? (timing === undefined ? undefined : businessTurnIdFor(timing.envelope))
+    const turn = turnId === undefined
+      ? nearestBusinessTurn(envelope, timing?.envelope)
+      : turns.get(turnId)
     const turnNumber = turn?.number ?? 0
     const sourceEventIds = [...new Set([
       sourceId,
@@ -677,8 +710,8 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
 
   for (const envelope of modelCalls) {
     const responseId = string(envelope.payload.response_id)!
-    const turnId = turnIdFor(envelope)
-    const turn = turnId === undefined ? undefined : ensureTurn(turnId)
+    const turnId = businessTurnIdFor(envelope)
+    const turn = turnId === undefined ? nearestBusinessTurn(envelope) : turns.get(turnId)
     const usage = tokenUsage(envelope.payload.usage)!
     const completedAt = envelopeTime(envelope)
     records.push(searchable({
@@ -720,10 +753,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     const output = toolOutputs.get(callId)
     const timing = itemTimings.get(callId)
     const item = timing?.item ?? {}
-    const turnId = call === undefined
-      ? output === undefined ? turnIdFor(timing!.envelope) : turnIdFor(output)
-      : turnIdFor(call)
-    const turn = turnId === undefined ? undefined : ensureTurn(turnId)
+    const turn = nearestBusinessTurn(call, output, timing?.envelope)
     const callPayload = call?.payload ?? {}
     const name = string(callPayload.name) ?? itemName(item)
     const input = call === undefined
@@ -864,7 +894,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
         if (compactedTime > 0
           && neighborTime > 0
           && Math.abs(neighborTime - compactedTime) > COMPACTION_MATCH_MAX_TIME_MS) break
-        const turnId = turnIdFor(neighbor)
+        const turnId = businessTurnIdFor(neighbor)
         if (turnId !== undefined) {
           candidates.add(turnId)
           break
@@ -876,7 +906,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
 
   for (const [id, timing] of itemTimings) {
     if (string(timing.item.type) !== 'ContextCompaction') continue
-    const turnId = turnIdFor(timing.envelope)
+    const turn = nearestBusinessTurn(timing.envelope)
     const compacted = compactedByItemId.get(id)
     records.push(searchable({
       id: `compaction:${id}`,
@@ -887,7 +917,7 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       ],
       fidelity: compacted === undefined ? 'exact' : 'derived',
       seq: timing.envelope.ordinal,
-      turn: turnId === undefined ? 0 : ensureTurn(turnId).number,
+      turn: turn?.number ?? 0,
       step: 1,
       kind: 'compaction',
       title: '上下文压缩',
@@ -915,12 +945,13 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     if (matchedCompacted.has(sourceEventId)) continue
     const windowId = string(compacted.payload.window_id)!
     const turnId = neighboringTurnId(compacted)
+    const turn = turnId === undefined ? nearestBusinessTurn(compacted) : turns.get(turnId)
     records.push(searchable({
       id: `compaction:${windowId}`,
       sourceEventIds: [sourceEventId],
       fidelity: 'derived',
       seq: compacted.ordinal,
-      turn: turnId === undefined ? 0 : ensureTurn(turnId).number,
+      turn: turn?.number ?? 0,
       step: 1,
       kind: 'compaction',
       title: '上下文压缩',

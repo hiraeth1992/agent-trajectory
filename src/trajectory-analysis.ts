@@ -710,14 +710,22 @@ function buildCorrections(
       (record.kind === 'tool' || record.kind === 'subtool')
       && record.status === 'complete')
     const recoveredInPlace = failedRecord.retry !== undefined && failedRecord.status === 'complete'
+    const failedValidation = validationSemantics(failedRecord)
+    const laterValidation = steps.slice(index + 1).find((candidate, offset) => {
+      const candidateGroup = groups[index + 1 + offset]
+      return candidateGroup?.records.some((record) => {
+        const validation = validationSemantics(record)
+        return validation?.outcome === 'passed'
+          && (failedValidation === undefined || validation.kind === failedValidation.kind)
+      })
+        && candidate.status === 'complete'
+    })
+    const recoveredByValidation = failedValidation?.outcome === 'failed'
+      && laterValidation !== undefined
     const recovered = recoveredInPlace
       || sameStepRecovery !== undefined
       || next?.status === 'complete'
-    const laterValidation = steps.slice(index + 1).find((candidate, offset) => {
-      const candidateGroup = groups[index + 1 + offset]
-      return candidateGroup?.records.some(validationRecord)
-        && candidate.status === 'complete'
-    })
+      || recoveredByValidation
     const diagnosis = next?.reasonLevel === 'fact'
       ? `模型判断：${next.reason}`
       : next === undefined
