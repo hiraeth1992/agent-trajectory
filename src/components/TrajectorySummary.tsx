@@ -11,7 +11,6 @@ import {
   CircleHelp,
   Clock3,
   Coins,
-  Database,
   Eye,
   GitBranch,
   LocateFixed,
@@ -33,6 +32,7 @@ import type {
 import type { SourceId, TokenUsage } from '../types'
 import {
   exclusiveTokenBreakdown,
+  nestedTokenBreakdown,
   selectedTokenTotal,
   TOKEN_BREAKDOWN_KEYS,
   tokenTotal,
@@ -91,6 +91,36 @@ const TOKEN_SEGMENTS: Array<{
 
 function usageValue(usage: TokenUsage | undefined): number {
   return tokenTotal(usage)
+}
+
+function sumUsage(values: readonly (TokenUsage | undefined)[]): TokenUsage | undefined {
+  const result: TokenUsage = {}
+  for (const usage of values) {
+    if (usage === undefined) continue
+    for (const key of Object.keys(usage) as Array<keyof TokenUsage>) {
+      const value = usage[key]
+      if (value !== undefined) result[key] = (result[key] ?? 0) + value
+    }
+  }
+  return Object.keys(result).length === 0 ? undefined : result
+}
+
+function tokenUsageText(
+  usage: TokenUsage | undefined,
+  includeTotal = true,
+): string {
+  const breakdown = nestedTokenBreakdown(usage)
+  return [
+    ...(includeTotal
+      ? [`总量 ${formatNumber(breakdown.totalTokens)}`]
+      : []),
+    `输入 ${formatNumber(breakdown.inputTokens)}（缓存 ${
+      formatNumber(breakdown.cacheTokens)
+    }）`,
+    `输出 ${formatNumber(breakdown.outputTokens)}（推理 ${
+      formatNumber(breakdown.reasoningTokens)
+    }）`,
+  ].join(' · ')
 }
 
 function evidenceLabel(level: AnalysisStep['reasonLevel']): string {
@@ -266,13 +296,14 @@ function StatStrip({
       icon: Coins,
       label: 'Token',
       value: formatNumber(analysis.stats.totalTokens),
-      detail: `输入 ${formatNumber(analysis.stats.inputTokens)} · 输出 ${
-        formatNumber(analysis.stats.outputTokens)
-      }${
-        analysis.stats.reasoningTokens === undefined
-          ? ''
-          : ` · 推理 ${formatNumber(analysis.stats.reasoningTokens)}`
-      } · 缓存读取 ${formatNumber(analysis.stats.cacheReadTokens)}${
+      detail: `${tokenUsageText({
+        inputTokens: analysis.stats.inputTokens,
+        outputTokens: analysis.stats.outputTokens,
+        reasoningTokens: analysis.stats.reasoningTokens,
+        cacheReadTokens: analysis.stats.cacheReadTokens,
+        cacheWriteTokens: analysis.stats.cacheWriteTokens,
+        totalTokens: analysis.stats.totalTokens,
+      }, false)}${
         analysis.stats.tokenAllocationCoverage === undefined
           ? ''
           : ` · 步骤覆盖 ${Math.round(analysis.stats.tokenAllocationCoverage * 100)}%`
@@ -384,13 +415,10 @@ function StepCard({
           </div>
           <footer>
             <span><Clock3 size={12} />{formatDuration(step.durationMs)}</span>
-            <span><Coins size={12} />{formatNumber(usageValue(step.usage) || undefined)} Token</span>
-            {(step.usage?.cacheReadTokens !== undefined || step.usage?.cacheWriteTokens !== undefined) && (
-              <span>
-                <Database size={12} />
-                {formatNumber(step.usage.cacheReadTokens)} 读 / {formatNumber(step.usage.cacheWriteTokens)} 写
-              </span>
-            )}
+            <span className="step-token-usage">
+              <Coins size={12} />
+              {tokenUsageText(step.usage)}
+            </span>
           </footer>
         </button>
         <button
@@ -480,10 +508,8 @@ function DecisionPath({
                 (total, step) => total + (step.durationMs ?? 0),
                 0,
               )
-              const tokens = steps.reduce(
-                (total, step) => total + usageValue(step.usage),
-                0,
-              )
+              const usage = sumUsage(steps.map(step => step.usage))
+              const breakdown = nestedTokenBreakdown(usage)
               return (
                 <section className="decision-turn" key={turn}>
                   <button
@@ -506,7 +532,40 @@ function DecisionPath({
                     {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                     <strong>{turn === 0 ? '会话级动作' : `第 ${turn} 轮`}</strong>
                     <span>{steps.length} 步</span>
-                    <small>{formatDuration(duration)} · {formatNumber(tokens || undefined)} Token</small>
+                    <span className="decision-turn-metric decision-turn-duration">
+                      {formatDuration(duration)}
+                    </span>
+                    <span
+                      className="decision-turn-separator separator-after-duration"
+                      aria-hidden="true"
+                    >
+                      ·
+                    </span>
+                    <span className="decision-turn-metric decision-turn-total">
+                      总量 {formatNumber(breakdown.totalTokens)}
+                    </span>
+                    <span
+                      className="decision-turn-separator separator-after-total"
+                      aria-hidden="true"
+                    >
+                      ·
+                    </span>
+                    <span className="decision-turn-metric decision-turn-input">
+                      {`输入 ${formatNumber(breakdown.inputTokens)}（缓存 ${
+                        formatNumber(breakdown.cacheTokens)
+                      }）`}
+                    </span>
+                    <span
+                      className="decision-turn-separator separator-after-input"
+                      aria-hidden="true"
+                    >
+                      ·
+                    </span>
+                    <span className="decision-turn-metric decision-turn-output">
+                      {`输出 ${formatNumber(breakdown.outputTokens)}（推理 ${
+                        formatNumber(breakdown.reasoningTokens)
+                      }）`}
+                    </span>
                   </button>
                   {isExpanded && (
                     <div className="decision-steps">

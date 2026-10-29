@@ -1136,11 +1136,19 @@ button.summary-evidence-link:hover {
 }
 
 .decision-turns {
+  display: grid;
+  grid-template-columns:
+    18px max-content max-content minmax(12px, 1fr)
+    max-content max-content max-content max-content
+    max-content max-content max-content;
   max-height: 680px;
   overflow: auto;
 }
 
 .decision-turn {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   border-bottom: 1px solid #e8ebef;
 }
 
@@ -1149,12 +1157,12 @@ button.summary-evidence-link:hover {
 }
 
 .decision-turn-toggle {
-  width: 100%;
+  grid-column: 1 / -1;
   height: 40px;
   display: grid;
-  grid-template-columns: 18px auto auto minmax(0, 1fr);
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: 7px;
+  column-gap: 7px;
   padding: 0 12px;
   border: 0;
   background: #fff;
@@ -1168,10 +1176,12 @@ button.summary-evidence-link:hover {
 }
 
 .decision-turn-toggle strong {
+  grid-column: 2;
   font-size: 11px;
 }
 
-.decision-turn-toggle span {
+.decision-turn-toggle > span:not(.decision-turn-metric):not(.decision-turn-separator) {
+  grid-column: 3;
   padding: 2px 5px;
   border-radius: 4px;
   background: #eef1f5;
@@ -1179,14 +1189,51 @@ button.summary-evidence-link:hover {
   font-size: 10px;
 }
 
-.decision-turn-toggle small {
-  justify-self: end;
+.decision-turn-metric {
+  justify-self: start;
   color: #8d949d;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.decision-turn-duration {
+  grid-column: 5;
+}
+
+.decision-turn-separator {
+  justify-self: center;
+  color: #c5cad1;
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 10px;
 }
 
+.separator-after-duration {
+  grid-column: 6;
+}
+
+.decision-turn-total {
+  grid-column: 7;
+}
+
+.separator-after-total {
+  grid-column: 8;
+}
+
+.decision-turn-input {
+  grid-column: 9;
+}
+
+.separator-after-input {
+  grid-column: 10;
+}
+
+.decision-turn-output {
+  grid-column: 11;
+}
+
 .decision-steps {
+  grid-column: 1 / -1;
   padding: 0 11px 11px 19px;
   background: #fafbfc;
 }
@@ -1439,6 +1486,11 @@ button.summary-evidence-link:hover {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+.step-body footer .step-token-usage {
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .evaluation-list {

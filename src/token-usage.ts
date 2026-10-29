@@ -9,6 +9,14 @@ export interface ExclusiveTokenBreakdown {
   otherTokens: number
 }
 
+export interface NestedTokenBreakdown {
+  totalTokens?: number
+  inputTokens?: number
+  cacheTokens?: number
+  outputTokens?: number
+  reasoningTokens?: number
+}
+
 export const TOKEN_BREAKDOWN_KEYS = [
   'inputTokens',
   'outputTokens',
@@ -107,6 +115,35 @@ export function exclusiveTokenBreakdown(
     cacheReadTokens: selected.cacheReadTokens,
     cacheWriteTokens: selected.cacheWriteTokens,
     otherTokens: Math.max(0, total - selected.representedTokens),
+  }
+}
+
+export function nestedTokenBreakdown(
+  usage: TokenUsage | undefined,
+): NestedTokenBreakdown {
+  if (usage === undefined) return {}
+  const breakdown = exclusiveTokenBreakdown(usage)
+  const hasInput = usage.inputTokens !== undefined
+    || usage.cacheReadTokens !== undefined
+    || usage.cacheWriteTokens !== undefined
+  const hasOutput = usage.outputTokens !== undefined
+    || usage.reasoningTokens !== undefined
+  const hasTotal = usage.totalTokens !== undefined || hasInput || hasOutput
+  return {
+    totalTokens: hasTotal ? tokenTotal(usage) : undefined,
+    inputTokens: hasInput
+      ? breakdown.inputTokens
+        + breakdown.cacheReadTokens
+        + breakdown.cacheWriteTokens
+      : undefined,
+    cacheTokens: usage.cacheReadTokens !== undefined
+      || usage.cacheWriteTokens !== undefined
+      ? (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+      : undefined,
+    outputTokens: hasOutput
+      ? breakdown.outputTokens + breakdown.reasoningTokens
+      : undefined,
+    reasoningTokens: usage.reasoningTokens,
   }
 }
 

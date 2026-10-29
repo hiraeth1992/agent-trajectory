@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   exclusiveTokenBreakdown,
+  nestedTokenBreakdown,
   selectedTokenTotal,
   tokenTotal,
 } from '../src/token-usage'
@@ -75,5 +76,51 @@ describe('token usage semantics', () => {
       new Set(['outputTokens', 'reasoningTokens']),
     )).toBe(8)
     expect(selectedTokenTotal(usage, new Set(['cacheReadTokens']))).toBe(5)
+  })
+
+  it('nests included cache and reasoning without double-counting them', () => {
+    expect(nestedTokenBreakdown({
+      inputTokens: 49_897,
+      outputTokens: 214,
+      cacheReadTokens: 28_160,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 50_111,
+    })).toEqual({
+      totalTokens: 50_111,
+      inputTokens: 49_897,
+      cacheTokens: 28_160,
+      outputTokens: 214,
+      reasoningTokens: 0,
+    })
+  })
+
+  it('nests additive cache and reasoning under inclusive parent totals', () => {
+    expect(nestedTokenBreakdown({
+      inputTokens: 20,
+      outputTokens: 7,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 2,
+      reasoningTokens: 3,
+      totalTokens: 30,
+    })).toEqual({
+      totalTokens: 30,
+      inputTokens: 20,
+      cacheTokens: 7,
+      outputTokens: 10,
+      reasoningTokens: 3,
+    })
+    expect(nestedTokenBreakdown({
+      inputTokens: 10,
+      outputTokens: 4,
+      cacheReadTokens: 90,
+      totalTokens: 104,
+    })).toEqual({
+      totalTokens: 104,
+      inputTokens: 100,
+      cacheTokens: 90,
+      outputTokens: 4,
+      reasoningTokens: undefined,
+    })
   })
 })

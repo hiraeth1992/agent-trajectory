@@ -150,6 +150,63 @@ describe('TrajectorySummary cost chart', () => {
     ])
     expect(metrics[0]?.querySelector('strong')?.textContent).toBe('5.00 s / 20 ms')
     expect(metrics.at(-1)?.className).toContain('summary-stat-token')
+    expect(metrics.at(-1)?.querySelector('.summary-stat-detail')?.textContent)
+      .toBe('输入 120（缓存 —） · 输出 30（推理 —） · 步骤覆盖 100%')
+  })
+
+  it('uses the same nested token format for the core metric, turn, and steps', () => {
+    const value = analysis()
+    value.steps = [{
+      ...value.steps[0]!,
+      usage: {
+        inputTokens: 49_897,
+        outputTokens: 214,
+        cacheReadTokens: 28_160,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        totalTokens: 50_111,
+      },
+    }]
+    value.costSteps = value.steps
+    value.stats = {
+      ...value.stats,
+      steps: 1,
+      inputTokens: 49_897,
+      outputTokens: 214,
+      cacheReadTokens: 28_160,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 50_111,
+      allocatedTokens: 50_111,
+      unallocatedTokens: 0,
+      tokenAllocationCoverage: 1,
+    }
+    const { container } = render(
+      <TrajectorySummary
+        analysis={value}
+        source="codex"
+        sourceSessionId="summary-test"
+        onOpenRecord={() => {}}
+      />,
+    )
+
+    expect(container.querySelector('.summary-stat-token .summary-stat-detail')
+      ?.textContent)
+      .toBe('输入 49,897（缓存 28,160） · 输出 214（推理 0） · 步骤覆盖 100%')
+    const turn = container.querySelector<HTMLButtonElement>('.decision-turn-toggle')!
+    expect([...turn.querySelectorAll('.decision-turn-metric')]
+      .map(metric => metric.textContent?.replace(/\s+/g, ' ').trim()))
+      .toEqual([
+        '200 ms',
+        '总量 50,111',
+        '输入 49,897（缓存 28,160）',
+        '输出 214（推理 0）',
+      ])
+    expect([...turn.querySelectorAll('.decision-turn-separator')]
+      .map(separator => separator.textContent)).toEqual(['·', '·', '·'])
+    fireEvent.click(turn)
+    expect(container.querySelector('.step-token-usage')?.textContent)
+      .toContain('总量 50,111 · 输入 49,897（缓存 28,160） · 输出 214（推理 0）')
   })
 
   it('scales token bar length by the largest step instead of filling every row', () => {

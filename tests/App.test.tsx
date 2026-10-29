@@ -1707,7 +1707,7 @@ describe('App conversation view', () => {
     expect(metrics.textContent).toContain('墙钟耗时 / 活跃耗时1 ms / —')
     expect(metrics.textContent).toContain('事件 / 记录3 / 02 种事件类型')
     expect(metrics.textContent).toContain('Token30')
-    expect(metrics.textContent).toContain('输入 20 · 输出 8')
+    expect(metrics.textContent).toContain('输入 20（缓存 —） · 输出 8（推理 —）')
     expect(metrics.textContent).toContain('轮次 / 步骤2 / 0')
     expect(metrics.textContent).toContain('1 / 2 轮已完成')
 
