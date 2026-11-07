@@ -173,6 +173,184 @@ button.summary-evidence-link:hover {
   color: var(--blue);
 }
 
+.evidence-links {
+  margin-top: 6px;
+  color: #5c7196;
+  font-size: 11px;
+}
+
+.evidence-links summary {
+  cursor: pointer;
+}
+
+.evidence-links ol {
+  max-height: 220px;
+  overflow: auto;
+  padding-left: 20px;
+}
+
+.evidence-links button,
+.quality-issue button {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-count {
+  color: #66717e;
+  font-size: 11px;
+}
+
+.quality-evaluation-content {
+  scroll-margin-top: 120px;
+}
+
+.quality-evaluation-content:target {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.quality-basis-link {
+  color: var(--blue);
+  font-size: 11px;
+  text-underline-offset: 3px;
+}
+
+.quality-evaluation-details {
+  width: 100%;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.facts-quality-panel .review-note {
+  margin: 8px 0 12px;
+}
+
+.facts-quality-panel .quality-issues {
+  padding: 0;
+}
+
+.review-note {
+  margin: 8px 16px 12px;
+  color: #65707d;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.quality-issues {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px 16px;
+}
+
+.quality-details-list {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.quality-details > summary {
+  color: var(--blue);
+  cursor: pointer;
+}
+
+.quality-detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e3e8ee;
+}
+
+.quality-issue {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e3e8ee;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.quality-issue.severity-blocking {
+  border-left: 3px solid #bc841d;
+}
+
+.quality-issue p {
+  margin: 5px 0;
+  color: #586470;
+}
+
+.quality-issue small {
+  display: block;
+  color: #77818c;
+}
+
+.review-filters,
+.review-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-filters {
+  padding: 0 16px;
+}
+
+.review-filters button {
+  padding: 5px 9px;
+  border: 1px solid #dfe5ec;
+  border-radius: 5px;
+  background: #fff;
+  color: #637082;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.review-filters button[aria-pressed="true"] {
+  border-color: #a8bedf;
+  background: #edf3ff;
+  color: var(--blue);
+}
+
+.review-tags span {
+  margin-top: 5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #f0f3f7;
+  color: #697584;
+  font-size: 10px;
+}
+
+.step-review-controls {
+  padding-top: 12px;
+  border-bottom: 1px solid #e3e8ee;
+}
+
+.step-recovery {
+  margin: 8px 0;
+  color: #806322;
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.story-detail-action {
+  padding: 0 16px 12px;
+  text-align: right;
+}
+
+.story-detail-action button {
+  padding: 5px 9px;
+  border: 1px solid #cbd8eb;
+  border-radius: 5px;
+  background: #f3f7ff;
+  color: #5578af;
+  font-size: 11px;
+  cursor: pointer;
+}
+
 .outcome-diagnosis-control {
   min-width: 0;
   display: flex;

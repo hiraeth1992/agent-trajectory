@@ -331,6 +331,7 @@ export interface SessionDetailSnapshot {
   revision: string
   detail: TransportSessionDetail
   analysis?: import('./trajectory-analysis').TrajectoryAnalysis
+  factsQuality?: import('./evaluation-types').FactsQualityReport
 }
 
 export interface SessionDetailDelta {
@@ -340,6 +341,7 @@ export interface SessionDetailDelta {
   summary: SessionSummary
   projection: Omit<TrajectoryProjection, 'records'>
   analysis?: import('./trajectory-analysis').TrajectoryAnalysis
+  factsQuality?: import('./evaluation-types').FactsQualityReport
   upserts: TransportTrajectoryRecord[]
   removedIds: string[]
   recordOrder: string[]

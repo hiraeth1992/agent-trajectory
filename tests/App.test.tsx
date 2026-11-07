@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   App,
@@ -8,6 +8,7 @@ import {
   workspaceFromLocation,
 } from '../src/App'
 import { capabilities, sessionKey } from '../server/sources/types'
+import { analyzeTrajectory } from '../src/trajectory-analysis'
 import type {
   SessionDetail,
   SessionDetailDelta,
@@ -142,6 +143,65 @@ afterEach(() => {
 })
 
 describe('App request ordering', () => {
+  it('reviews a whole recovery chain, reveals filtered tools, and reads raw evidence only on demand', async () => {
+    const currentSession = summary('zcode', 'review-session', 'Review session')
+    currentSession.capabilities = capabilities('messages', 'tools', 'timing', 'usage')
+    const records: TrajectoryRecord[] = [
+      { id: 'failed', step: 1, status: 'error', error: { code: '1', reason: 'assertion failed' },
+        title: 'exec_command', input: { cmd: 'npm test' }, output: '1 test failed' },
+      { id: 'fix', step: 2, status: 'complete', title: 'apply_patch',
+        input: '*** Update File: tests/test.ts', output: 'patched' },
+      { id: 'verified', step: 3, status: 'complete', title: 'exec_command',
+        input: { cmd: 'npm test' }, output: 'Tests 1 passed' },
+    ].map((item, index) => ({
+      ...item, source: 'zcode', sourceEventIds: [item.id], fidelity: 'exact', seq: index + 1,
+      turn: 1, kind: 'tool', summary: item.id, startTime: index * 100, endTime: index * 100 + 50,
+      depth: 0, searchText: item.id,
+    })) as TrajectoryRecord[]
+    const value = detail(currentSession)
+    value.projection.records = records
+    value.projection.turns = [{ id: 'turn-1', number: 1, startTime: 0, endTime: 250, status: 'complete' }]
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/sources') return response(statuses)
+      if (url === '/api/sessions?source=all') return response([currentSession])
+      if (url === '/api/sessions/zcode/review-session') return response({
+        kind: 'snapshot', revision: 'review-v1', detail: value, analysis: analyzeTrajectory(value),
+      })
+      if (url === '/api/sessions/zcode/review-session/records/verified/raw') {
+        return response({ raw: [{ type: 'tool_result', output: 'Tests 1 passed' }] })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+    render(<App />)
+    await screen.findByRole('region', { name: '步骤详情' })
+    openTrajectory()
+    fireEvent.click(screen.getByRole('button', { name: '轮次' }))
+    fireEvent.click(screen.getByRole('button', { name: '调用' }))
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索轨迹记录' }), { target: { value: 'no-match' } })
+    fireEvent.click(screen.getByRole('tab', { name: '轨迹评测' }))
+    const panel = screen.getByRole('region', { name: '步骤详情' })
+    fireEvent.click(within(panel).getByRole('button', { name: '执行失败 · 1' }))
+    fireEvent.click(within(panel).getByRole('button', { name: /审阅 3 条证据/ }))
+    expect(screen.getByRole('textbox', { name: '搜索轨迹记录' }).getAttribute('value')).toBe('')
+    expect(screen.getByRole('button', { name: '调用' }).getAttribute('aria-pressed')).toBe('false')
+    const inspector = screen.getByRole('complementary', { name: '记录检查器' })
+    const review = within(inspector).getByRole('region', { name: '证据审阅' })
+    expect(within(review).getAllByRole('button')).toHaveLength(3)
+    fireEvent.click(within(review).getByRole('button', { name: /步骤 3 · exec_command/ }))
+    expect(within(review).getByRole('button', { name: /步骤 3 · exec_command/ }).getAttribute('aria-current')).toBe('step')
+    expect(screen.getAllByRole('button', { name: '选择 exec_command' })
+      .map(button => button.className.includes('selected'))).toEqual([false, true])
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/raw'))).toBe(false)
+    fireEvent.click(within(inspector).getByRole('button', { name: '原始事件' }))
+    await waitFor(() => expect(inspector.textContent).toContain('tool_result'))
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/raw'))).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '选择 apply_patch' }))
+    expect(within(inspector).queryByRole('region', { name: '证据审阅' })).toBeNull()
+  })
+
   it('shows a portable protocol diagnosis for a blocked source', async () => {
     vi.stubGlobal('EventSource', class {
       addEventListener() {}
@@ -1941,7 +2001,7 @@ describe('App conversation view', () => {
       name: /汇报阶段结果，第 1 轮，1 步/,
     }))
     fireEvent.click(await screen.findByRole('button', {
-      name: '查看轨迹证据：完成模型响应',
+      name: /审阅 \d+ 条证据：完成模型响应/,
     }))
 
     expect(screen.getByRole('tab', { name: '轨迹', selected: true })).toBeTruthy()

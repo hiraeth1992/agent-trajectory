@@ -13,6 +13,7 @@ import type {
   OptimizationSuggestion,
 } from '../trajectory-optimization'
 import type { TrajectoryAnalysis } from '../trajectory-analysis'
+import type { EvidenceReviewRequest } from '../analysis-review'
 
 const MEASURE_LABELS: Record<OptimizationMeasure, string> = {
   code: '代码',
@@ -50,9 +51,11 @@ function executionActionText(action: OptimizationExecutionAction): string {
 export function OptimizationPanel({
   analysis,
   onOpenRecord,
+  onReview,
 }: {
   analysis: TrajectoryAnalysis
   onOpenRecord: (recordId: string) => void
+  onReview?: (request: EvidenceReviewRequest, selectedId?: string) => void
 }) {
   const suggestions = analysis.optimizations ?? []
   const [showAll, setShowAll] = useState(false)
@@ -185,7 +188,12 @@ export function OptimizationPanel({
                             <button
                               type="button"
                               key={evidence.recordId}
-                              onClick={() => onOpenRecord(evidence.recordId)}
+                              onClick={() => onReview === undefined ? onOpenRecord(evidence.recordId) : onReview({
+                                title: item.title,
+                                description: `${item.observation}；${item.limitation}`,
+                                level: 'inferred',
+                                recordIds: item.evidence.map(evidence => evidence.recordId),
+                              }, evidence.recordId)}
                             >
                               <LocateFixed size={12} />
                               {item.evidence.length === 1

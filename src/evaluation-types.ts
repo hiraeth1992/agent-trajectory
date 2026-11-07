@@ -1,4 +1,5 @@
 import type {
+  EventDisposition,
   SourceAvailability,
   SourceCapabilities,
   SourceId,
@@ -53,6 +54,8 @@ export interface FactsQualityIssue {
     | 'trace'
     | 'truncation'
   severity: 'warning' | 'blocking'
+  /** Structured coverage classification; absent in older reports and non-coverage issues. */
+  coverageDisposition?: EventDisposition
   summary: string
   evidenceRecordIds: string[]
   affectedCriterionIds: LocalTrajectoryCriterionId[]
@@ -84,6 +87,8 @@ export interface FactsQualityReport {
     coverageTotal: number
     coverageConsumed: number
     coverageGap: number
+    /** Unconsumed events intentionally retained only in the raw audit. Absent in older reports. */
+    coverageRawOnly?: number
   }
   ready: boolean
   issues: FactsQualityIssue[]

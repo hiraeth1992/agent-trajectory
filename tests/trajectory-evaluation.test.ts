@@ -390,6 +390,7 @@ describe('trajectory evaluation contract', () => {
     expect(advisoryReport.issues).toContainEqual(expect.objectContaining({
       id: 'coverage-gap:session/title-llm-request',
       severity: 'warning',
+      coverageDisposition: 'raw-only',
     }))
 
     const unsupported = structuredClone(advisory)
@@ -407,6 +408,7 @@ describe('trajectory evaluation contract', () => {
     expect(unsupportedReport.issues).toContainEqual(expect.objectContaining({
       id: 'coverage-gap:future/required',
       severity: 'blocking',
+      coverageDisposition: 'unsupported',
       affectedCriterionIds: expect.arrayContaining(['outcome', 'observability']),
     }))
   })
@@ -455,6 +457,9 @@ describe('trajectory evaluation contract', () => {
     const report = buildFactsQualityReport(value, { target })
 
     expect(report.ready).toBe(true)
+    expect(report.stats.coverageRawOnly).toBe(2)
+    expect(report.issues.filter(issue => issue.category === 'coverage').every(issue =>
+      issue.summary.includes('已识别，仅保留原始审计'))).toBe(true)
     expect(report.issues.filter(issue => issue.category === 'coverage'))
       .toEqual([
         expect.objectContaining({ severity: 'warning', affectedCriterionIds: ['reliability', 'observability'] }),

@@ -54,9 +54,22 @@ export interface AnalysisCorrection {
     change?: AnalysisLocation
     result?: AnalysisLocation
   }
-  status: 'recovered' | 'unresolved' | 'redirected'
+  status: 'recovered' | 'continued' | 'unresolved' | 'redirected'
+  recoveryEvidence?: 'validation' | 'retry'
+  triggerRecordId?: string
   confidence: AnalysisConfidence
   recordIds: string[]
+}
+
+export function correctionRecoveryLabel(
+  correction: Pick<AnalysisCorrection, 'status' | 'recoveryEvidence'>,
+): string {
+  if (correction.status === 'redirected') return '已调整执行方向'
+  if (correction.status === 'continued') return '后续执行成功，原问题未验证'
+  if (correction.status === 'unresolved') return '未确认恢复'
+  if (correction.recoveryEvidence === 'validation') return '原问题验证通过'
+  if (correction.recoveryEvidence === 'retry') return '原调用重试成功'
+  return '已有恢复记录，验证方式未记录'
 }
 
 export interface AnalysisLocation {
@@ -708,24 +721,45 @@ function buildCorrections(
     const failedIndex = group.records.indexOf(failedRecord)
     const sameStepRecovery = group.records.slice(failedIndex + 1).find(record =>
       (record.kind === 'tool' || record.kind === 'subtool')
-      && record.status === 'complete')
-    const recoveredInPlace = failedRecord.retry !== undefined && failedRecord.status === 'complete'
+      && record.status === 'complete' && record.error === undefined && record.output !== undefined
+      && validationSemantics(record)?.outcome !== 'failed')
+    const recoveredInPlace = (failedRecord.retry?.count ?? 0) > 0 && failedRecord.status === 'complete'
+      && failedRecord.error === undefined && failedRecord.output !== undefined
+      && validationSemantics(failedRecord)?.outcome !== 'failed'
     const failedValidation = validationSemantics(failedRecord)
+    // Matching only the validation kind would let a different test or directory
+    // "repair" this failure. Keep uncertain matches as continuation evidence.
+    const validationMatches = (record: TrajectoryRecord): boolean => {
+      const input = (value: unknown): Record<string, unknown> =>
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+          ? value as Record<string, unknown> : {}
+      const before = input(failedRecord.input)
+      const after = input(record.input)
+      return failedValidation?.outcome === 'failed'
+        && record.turn === failedRecord.turn
+        && record.title === failedRecord.title
+        && toolCommand(failedRecord).trim() !== ''
+        && toolCommand(record).trim() === toolCommand(failedRecord).trim()
+        && (before.workdir ?? before.cwd) === (after.workdir ?? after.cwd)
+        && record.status === 'complete' && record.output !== undefined
+        && record.error === undefined
+        && validationSemantics(record)?.outcome === 'passed'
+    }
+    const sameStepValidation = group.records.slice(failedIndex + 1).find(validationMatches)
     const laterValidation = steps.slice(index + 1).find((candidate, offset) => {
       const candidateGroup = groups[index + 1 + offset]
-      return candidateGroup?.records.some((record) => {
-        const validation = validationSemantics(record)
-        return validation?.outcome === 'passed'
-          && (failedValidation === undefined || validation.kind === failedValidation.kind)
-      })
+      return candidateGroup?.records.some(validationMatches)
         && candidate.status === 'complete'
     })
-    const recoveredByValidation = failedValidation?.outcome === 'failed'
-      && laterValidation !== undefined
-    const recovered = recoveredInPlace
-      || sameStepRecovery !== undefined
-      || next?.status === 'complete'
-      || recoveredByValidation
+    const recoveredByValidation = sameStepValidation !== undefined || laterValidation !== undefined
+    const recovered = recoveredInPlace || recoveredByValidation
+    const continued = sameStepRecovery !== undefined || next?.status === 'complete'
+      && groups[index + 1]?.records.some(record => record.status === 'complete'
+        && record.error === undefined && record.output !== undefined
+        && validationSemantics(record)?.outcome !== 'failed')
+    const recoveryEvidence = recoveredByValidation ? 'validation' as const
+      : recoveredInPlace ? 'retry' as const : undefined
+    const status = recovered ? 'recovered' : continued ? 'continued' : 'unresolved'
     const diagnosis = next?.reasonLevel === 'fact'
       ? `模型判断：${next.reason}`
       : next === undefined
@@ -741,6 +775,8 @@ function buildCorrections(
         : adjustmentSummary(next)
     const result = recoveredInPlace
       ? step.result
+      : sameStepValidation !== undefined
+        ? toolResult(sameStepValidation)
       : sameStepRecovery !== undefined
         ? toolResult(sameStepRecovery)
       : next === undefined
@@ -752,7 +788,8 @@ function buildCorrections(
         }`
     corrections.push({
       id: `recovery:${step.id}`,
-      title: recovered ? '异常后恢复执行' : '异常尚未恢复',
+      triggerRecordId: failedRecord.id,
+      title: correctionRecoveryLabel({ status, recoveryEvidence }),
       summary: correctionSummary(trigger, change, result),
       trigger,
       diagnosis,
@@ -767,20 +804,24 @@ function buildCorrections(
             ? recordLocation(sameStepRecovery)
             : stepLocation(next),
         result: laterValidation === undefined
-          ? recoveredInPlace
-            ? stepLocation(step)
-            : sameStepRecovery !== undefined
-              ? recordLocation(sameStepRecovery)
-              : stepLocation(next)
+          ? sameStepValidation !== undefined
+            ? recordLocation(sameStepValidation)
+            : recoveredInPlace
+              ? stepLocation(step)
+              : sameStepRecovery !== undefined
+                ? recordLocation(sameStepRecovery)
+                : stepLocation(next)
           : stepLocation(laterValidation),
       },
-      status: recovered ? 'recovered' : 'unresolved',
+      status,
+      recoveryEvidence,
       confidence: recoveredInPlace || sameStepRecovery !== undefined
         ? 'high'
         : next === undefined ? 'high' : 'medium',
       recordIds: [...new Set([
         ...step.recordIds,
         ...(sameStepRecovery === undefined ? [] : [sameStepRecovery.id]),
+        ...(sameStepValidation === undefined ? [] : [sameStepValidation.id]),
         ...(next?.recordIds ?? []),
         ...(laterValidation?.recordIds ?? []),
       ])],
@@ -1110,6 +1151,17 @@ function outcomeEvaluation(
       },
     }
   }
+  if (corrections.some(correction => correction.status === 'continued')) {
+    const evidence = corrections.filter(correction => correction.status === 'continued')
+      .flatMap(correction => correction.recordIds)
+    const message = '异常后出现成功操作，但没有原调用重试成功或原问题验证通过的证据。'
+    return {
+      outcome: { label: '已继续执行，恢复尚未验证', summary: message, tone: 'warning',
+        confidence: 'medium', evidenceRecordIds: evidence },
+      evaluation: { id: 'outcome', title: '结果证据', grade: 'warning', label: '缺少恢复验证',
+        summary: message, confidence: 'medium', evidenceRecordIds: evidence },
+    }
+  }
   if (corrections.some(correction => correction.status === 'recovered')) {
     const evidence = corrections.flatMap(correction => correction.recordIds)
     return {
@@ -1163,6 +1215,9 @@ function buildEvaluations(
   const retried = actions.filter(record => record.retry !== undefined)
   const unresolved = corrections.filter(correction => correction.status === 'unresolved')
   const recovered = corrections.filter(correction => correction.status === 'recovered')
+  const continued = corrections.filter(correction => correction.status === 'continued')
+  const validated = recovered.filter(correction => correction.recoveryEvidence === 'validation')
+  const retrySucceeded = recovered.filter(correction => correction.recoveryEvidence === 'retry')
   const costSteps = steps.filter(step => usageMagnitude(step.usage) > 0)
   const tokenSum = costSteps.reduce((total, step) => total + usageMagnitude(step.usage), 0)
   const tokenPeak = Math.max(0, ...costSteps.map(step => usageMagnitude(step.usage)))
@@ -1212,21 +1267,26 @@ function buildEvaluations(
       title: '恢复能力',
       grade: unresolved.length > 0
         ? 'bad'
+        : continued.length > 0
+          ? 'warning'
         : recovered.length > 0
           ? 'good'
           : 'unknown',
       label: unresolved.length > 0
         ? '恢复不完整'
+        : continued.length > 0
+          ? '后续执行成功，原问题未验证'
         : recovered.length > 0
-          ? '观察到恢复动作'
+          ? '观察到恢复证据'
           : '没有可评估异常',
-      summary: recovered.length > 0 && unresolved.length > 0
-        ? `${recovered.length} 个异常后出现成功动作；${unresolved.length} 个异常没有后续成功证据。相邻步骤关联属于轨迹推断。`
-        : recovered.length > 0
-          ? `${recovered.length} 个异常后出现成功动作；相邻步骤关联属于轨迹推断。`
-        : unresolved.length > 0
-          ? `${unresolved.length} 个异常没有后续成功证据。`
-          : '本次轨迹没有触发恢复流程。',
+      summary: recovered.length + continued.length + unresolved.length === 0
+        ? '本次轨迹没有触发恢复流程。'
+        : [
+            validated.length > 0 ? `${validated.length} 个原问题验证通过` : '',
+            retrySucceeded.length > 0 ? `${retrySucceeded.length} 个原调用重试成功` : '',
+            continued.length > 0 ? `${continued.length} 个异常后出现成功操作，原问题仍未验证` : '',
+            unresolved.length > 0 ? `${unresolved.length} 个异常没有后续成功证据` : '',
+          ].filter(Boolean).join('；') + '。',
       confidence: recovered.length > 0 ? 'medium' : 'high',
       evidenceRecordIds: corrections.flatMap(correction => correction.recordIds),
     },

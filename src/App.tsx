@@ -44,6 +44,8 @@ import {
   type TransportTrajectoryRecord,
 } from './types'
 import { recordSearchText } from './projector-utils'
+import type { FactsQualityReport } from './evaluation-types'
+import type { EvidenceReviewRequest } from './analysis-review'
 import {
   analyzeTrajectory,
   type TrajectoryAnalysis,
@@ -152,6 +154,8 @@ export function App() {
   const [sessionKey, setSessionKey] = useState('')
   const [detail, setDetail] = useState<SessionDetail>()
   const [serverAnalysis, setServerAnalysis] = useState<TrajectoryAnalysis>()
+  const [factsQuality, setFactsQuality] = useState<FactsQualityReport>()
+  const [evidenceReview, setEvidenceReview] = useState<EvidenceReviewRequest>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
   const [query, setQuery] = useState('')
@@ -352,6 +356,7 @@ export function App() {
       detailRef.current = next
       detailRevision.current = { key, revision: result.revision }
       setServerAnalysis(result.analysis)
+      setFactsQuality(result.factsQuality)
       setView(current =>
         current === 'model-context' && next.projection.modelContextRecordIds === undefined
           ? 'conversation'
@@ -511,6 +516,8 @@ export function App() {
     detailRef.current = undefined
     setDetail(undefined)
     setServerAnalysis(undefined)
+    setFactsQuality(undefined)
+    setEvidenceReview(undefined)
     if (workspaceMode === 'sessions'
       && currentSource !== undefined
       && currentSourceSessionId !== undefined) {
@@ -668,6 +675,31 @@ export function App() {
     else next.add(turn)
     return next
   })
+
+  const openEvidenceRecord = (id: string) => {
+    const record = detail?.projection.records.find(record => record.id === id)
+    if (record === undefined) return
+    setView('trajectory')
+    setQuery('')
+    setRange(null)
+    setCollapseCalls(false)
+    setCollapsedTurns(current => {
+      const next = new Set(current)
+      next.delete(record.turn)
+      return next
+    })
+    setSelectedId(id)
+    setInspectorTab('details')
+    setRawError(undefined)
+  }
+
+  const reviewEvidence = (request: EvidenceReviewRequest, selectedId?: string) => {
+    const ids = [...new Set(request.recordIds)]
+    const id = selectedId ?? ids.find(id => detail?.projection.records.some(record => record.id === id))
+    if (id === undefined) return
+    setEvidenceReview({ ...request, recordIds: ids })
+    openEvidenceRecord(id)
+  }
 
   const collapseAll = () => {
     const turns = new Set(filteredRecords.map(record => record.turn))
@@ -1102,6 +1134,12 @@ export function App() {
                         sourceSessionId={detail.summary.sourceSessionId}
                         sessionModel={detail.projection.header.model}
                         sessionProvider={detail.projection.header.provider}
+                        records={detail.projection.records}
+                        turns={detail.projection.turns}
+                        factsQuality={factsQuality}
+                        capabilities={detail.summary.capabilities}
+                        sourceStatus={sources.find(source => source.source === detail.summary.source)}
+                        onReview={reviewEvidence}
                         sessionMeta={{
                           eventCount: detail.projection.eventCount,
                           recordCount: detail.projection.records.length,
@@ -1113,9 +1151,9 @@ export function App() {
                           projectionEndTime: detail.projection.endTime,
                         }}
                         onOpenRecord={(id) => {
-                          setView('trajectory')
-                          setSelectedId(id)
-                          setInspectorTab('details')
+                          const step = analysis.steps.find(step => step.recordIds.includes(id))
+                          reviewEvidence({ title: step?.action ?? '轨迹证据',
+                            recordIds: step?.recordIds ?? [id], level: step?.reasonLevel }, id)
                         }}
                       />
                     )
@@ -1124,10 +1162,12 @@ export function App() {
                       <Conversation
                         records={conversationRecords}
                         onInspect={(id) => {
+                          setEvidenceReview(undefined)
                           setSelectedId(id)
                           setInspectorTab('details')
                         }}
                         onLocate={(id) => {
+                          setEvidenceReview(undefined)
                           setView('trajectory')
                           setSelectedId(id)
                           setInspectorTab('details')
@@ -1143,6 +1183,7 @@ export function App() {
                           selectedId={selectedId}
                           onRangeChange={setRange}
                           onSelect={(id) => {
+                            setEvidenceReview(undefined)
                             setSelectedId(id)
                             setInspectorTab('details')
                           }}
@@ -1166,6 +1207,7 @@ export function App() {
                                   collapsedTurns={collapsedTurns}
                                   onToggleTurn={toggleTurn}
                                   onSelect={(id) => {
+                                    setEvidenceReview(undefined)
                                     setSelectedId(id)
                                     setInspectorTab('details')
                                   }}
@@ -1188,6 +1230,9 @@ export function App() {
             : rawByRecord[selectedRawKey] ?? selected.raw}
           rawLoading={selectedRawKey !== undefined && rawLoadingKey === selectedRawKey}
           rawError={rawError}
+          review={evidenceReview}
+          records={detail!.projection.records}
+          onSelectEvidence={openEvidenceRecord}
           onTabChange={setInspectorTab}
           onClose={() => setSelectedId(undefined)}
         />

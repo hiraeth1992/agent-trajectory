@@ -149,6 +149,23 @@ Search, time ranges, evidence navigation, and the inspector are shared across
 views. The inspector exposes provenance, relationships, trace/span data,
 errors, and redacted raw events loaded on demand for an individual record.
 
+**Process evaluation** presents **Data quality** alongside outcome evidence,
+reliability, recovery, and efficiency. It combines observability and source
+limitations, showing a compact conclusion and its impact by default. Expand its
+details for coverage statistics and missing, truncated, or running records; links
+from limited conclusions reveal and navigate to those details. Data quality
+describes the completeness of evaluation evidence and also limits story
+conclusions. The story navigates stages; one **Step details** list covers all steps
+and supports combined filters for failures, repeated failures, unconfirmed recovery,
+interruptions, and the top five steps by recorded time or tokens. Opening a stage
+clears step filters and reveals its details. Stage and turn active time use the union
+of recorded intervals; unavailable timing remains unknown. Resource ranks alone do
+not establish waste.
+
+Steps, conclusions, and correction chains open their full related evidence in the
+inspector, including neighboring records and turn inputs. Evidence navigation clears
+obstructing filters and expands the selected turn.
+
 ### Local agent diagnosis
 
 Local analysis in **Trajectory evaluation** always runs automatically without

@@ -38,6 +38,17 @@ function reasonLevelLabel(stage: TrajectoryStoryStage): string {
   return '来源未记录'
 }
 
+function resultLabel(stage: TrajectoryStoryStage): string {
+  if (stage.resultLimited) return '数据受限'
+  if (stage.runningCount > 0) return '执行中'
+  return [
+    stage.errorCount > 0 ? `${stage.errorCount} 异常` : '',
+    stage.interruptedCount > 0 ? `${stage.interruptedCount} 中断` : '',
+    stage.unresolvedCount > 0 ? `${stage.unresolvedCount} 未确认恢复` : '',
+    stage.recoveredCount > 0 ? `${stage.recoveredCount} 已确认恢复` : '',
+  ].filter(Boolean).join(' · ') || '记录已结束'
+}
+
 export function TrajectoryStory({
   story,
   selectedStageId,
@@ -124,14 +135,13 @@ export function TrajectoryStory({
             className="actions"
           />
           <StoryTriadItem
-            icon={selected.errorCount > 0
+            icon={selected.resultLimited || selected.runningCount > 0 || selected.interruptedCount > 0
+              ? <CircleAlert size={14} /> : selected.errorCount > 0
               ? <RotateCcw size={14} />
               : <CheckCircle2 size={14} />}
             label="阶段结果"
             value={selected.outcome}
-            meta={selected.errorCount > 0
-              ? `${selected.errorCount} 异常 · ${selected.recoveredCount} 已恢复`
-              : '已完成'}
+            meta={resultLabel(selected)}
             className="outcome"
           />
           <StoryFacts stage={selected} />
@@ -151,7 +161,7 @@ export function TrajectoryStory({
             <small>
               {story.stages.length === 0
                 ? '没有可归纳的逻辑步骤'
-                : `${story.stages.length} 个阶段 · 单击查看聚合结论，双击展开下方明细`}
+                : `${story.stages.length} 个阶段 · 单击查看概览，双击或点击“展开阶段步骤”查看详情`}
             </small>
           </span>
         </div>
@@ -227,6 +237,7 @@ export function TrajectoryStory({
                           {stage.errorCount > 0
                             ? <CircleAlert size={13} />
                             : index === story.stages.length - 1
+                              && !stage.resultLimited && stage.runningCount === 0 && stage.interruptedCount === 0
                               ? <CheckCircle2 size={13} />
                               : <span>{index + 1}</span>}
                         </span>
@@ -244,6 +255,9 @@ export function TrajectoryStory({
               </div>
 
               {selection}
+              {selected?.resultLimited && <p className="review-note">阶段概览受数据质量限制。<a className="quality-basis-link" href="#analysis-basis">查看数据质量</a></p>}
+              {selected !== undefined && <div className="story-detail-action"><button type="button"
+                onClick={() => openDetails(selected.id)}>展开阶段步骤</button></div>}
             </>
           )}
     </section>
@@ -253,7 +267,7 @@ export function TrajectoryStory({
 function StoryFacts({ stage }: { stage: TrajectoryStoryStage }) {
   return (
     <div className="story-selection-facts">
-      <span><Clock3 size={12} />{formatDuration(stage.durationMs)}</span>
+      <span title="已记录执行区间的并集，重叠部分只计一次"><Clock3 size={12} />活跃耗时 {formatDuration(stage.durationMs)}</span>
       <span>
         <Coins size={12} />
         {formatNumber(stage.usage?.totalTokens)} Token

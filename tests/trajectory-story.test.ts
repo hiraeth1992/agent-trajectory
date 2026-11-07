@@ -4,6 +4,7 @@ import type {
   TrajectoryAnalysis,
 } from '../src/trajectory-analysis'
 import { buildTrajectoryStory } from '../src/trajectory-story'
+import type { SessionDetail, TrajectoryRecord } from '../src/types'
 
 function step(
   id: string,
@@ -55,6 +56,7 @@ function analysis(steps: AnalysisStep[]): TrajectoryAnalysis {
     costSteps: steps,
     corrections: [{
       id: 'recovery:test',
+      triggerRecordId: 'record:failed',
       title: '异常后恢复执行',
       summary: '测试失败后修正',
       trigger: '运行测试失败',
@@ -76,6 +78,56 @@ function analysis(steps: AnalysisStep[]): TrajectoryAnalysis {
 }
 
 describe('buildTrajectoryStory', () => {
+  it('keeps a running stage result pending', () => {
+    const value = analysis([step('running', 1, 1, '运行验证', { status: 'running', result: '进行中' })])
+    value.corrections = []
+    expect(buildTrajectoryStory(value).stages[0]).toMatchObject({
+      runningCount: 1, outcome: '阶段仍在执行，结果尚未确定',
+    })
+  })
+  it('keeps an unrelated success from implying the original problem recovered', () => {
+    const value = analysis([
+      step('failed', 1, 1, '执行命令', { status: 'error', result: '命令失败' }),
+      step('read', 1, 2, '读取文件', { result: '文件已读取' }),
+    ])
+    value.corrections = [{ ...value.corrections[0]!, status: 'continued',
+      triggerRecordId: 'record:failed', recordIds: ['record:failed', 'record:read'],
+      result: '文件已读取' }]
+    const stage = buildTrajectoryStory(value).stages[0]!
+    expect(stage.title).not.toContain('恢复')
+    expect(stage.outcome).toContain('原问题未验证')
+    expect(stage.recoveredCount).toBe(0)
+  })
+
+  it('does not reuse a passing validation after a later edit in a compacted stage', () => {
+    const value = analysis([
+      step('passed', 1, 1, '运行验证', { result: '测试通过' }),
+      step('edit', 1, 2, '修改实现', { result: '文件已修改' }),
+    ])
+    value.corrections = []
+    expect(buildTrajectoryStory(value, 1).stages[0]?.outcome).toContain('修改后尚未验证')
+  })
+
+  it('measures overlapping recorded intervals once and leaves absent timing unknown', () => {
+    const records = [
+      { id: 'a', startTime: 1_000, endTime: 4_000 },
+      { id: 'b', startTime: 2_000, endTime: 5_000 },
+    ].map((record, index): TrajectoryRecord => ({
+      ...record, source: 'zcode', sourceEventIds: [record.id], fidelity: 'exact',
+      seq: index + 1, turn: 1, step: index + 1, kind: 'tool', title: 'exec_command',
+      status: 'complete', depth: 0, summary: '运行验证', searchText: '',
+      input: { cmd: 'npm test' }, output: 'Tests 1 passed',
+    }))
+    const value = analysis(records.map(record => step(record.id, 1, record.step, '运行验证', {
+      recordId: record.id, recordIds: [record.id], durationMs: 3_000,
+    })))
+    value.corrections = []
+    expect(buildTrajectoryStory(value, 8, { records }).stages[0]?.durationMs).toBe(4_000)
+    expect(buildTrajectoryStory(value).stages[0]?.durationMs).toBeNull()
+    expect(buildTrajectoryStory(value, 8, { records, capabilities: { timing: false } as SessionDetail['summary']['capabilities'] })
+      .stages[0]?.durationMs).toBeNull()
+  })
+
   it('groups consecutive behavior while preserving step order and evidence mappings', () => {
     const steps = [
       step('read', 1, 1, '读取相关文件内容'),
@@ -105,7 +157,7 @@ describe('buildTrajectoryStory', () => {
       judgment: '执行 读取相关文件内容 的依据',
       actions: ['读取相关文件内容', '搜索相关代码和文件'],
       outcome: '搜索相关代码和文件完成',
-      durationMs: 200,
+      durationMs: null,
       usage: {
         inputTokens: 16,
         outputTokens: 4,
@@ -119,6 +171,7 @@ describe('buildTrajectoryStory', () => {
       recoveredCount: 1,
     })
     expect(failed?.stepIds).toContain('fix')
+    expect(story.stages.reduce((total, stage) => total + stage.recoveredCount, 0)).toBe(1)
     expect(story).not.toHaveProperty('stepNumberById')
   })
 

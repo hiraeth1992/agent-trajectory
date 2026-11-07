@@ -10,6 +10,7 @@ import {
   sourceApplicationIcons,
 } from '../server/sources/types'
 import type { SessionDetail, SessionSummary, SourceStatus } from '../src/types'
+import type { FactsQualityReport } from '../src/evaluation-types'
 
 const summary: SessionSummary = {
   id: sessionKey('dsh', 'session-1'),
@@ -692,10 +693,14 @@ describe('multi-source API', () => {
     const response = await fetch(`${base}/api/sessions/dsh/session-1`)
     const body = await response.json() as {
       analysis: { outcome: { label: string }; objective: string }
+      factsQuality: FactsQualityReport
     }
 
     expect(body.analysis.outcome.label).toBe('事实质量不足')
     expect(body.analysis.objective).not.toContain('analysis-private-value')
+    expect(body.factsQuality.ready).toBe(false)
+    expect(body.factsQuality.issues.some(issue => issue.category === 'coverage')).toBe(true)
+    expect(body.factsQuality.stats.truncatedRecords).toBe(0)
   })
 
   it('does not replace all Codex criteria with insufficient facts for normal completion and telemetry events', async () => {
@@ -759,6 +764,37 @@ describe('multi-source API', () => {
     expect(body.analysis.evaluations.every(result => result.label !== '事实质量不足')).toBe(true)
   })
 
+  it('evaluates native Codex tool discovery with audited cloud skills and tool catalogs', async () => {
+    const projection = projectCodexTrajectory([
+      { type: 'world_state', payload: { full: true, state: {
+        model: 'test-model', cloud_skills: { version: 1, entries: {} }, tools: { mcp__test: 'available tools' },
+      } } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'search-turn' } },
+      { type: 'response_item', payload: { type: 'tool_search_call', call_id: 'native-search',
+        status: 'completed', execution: 'client', arguments: { query: 'find a tool', limit: 1 },
+        internal_chat_message_metadata_passthrough: { turn_id: 'search-turn' } } },
+      { type: 'response_item', payload: { type: 'tool_search_output', call_id: 'native-search',
+        status: 'completed', execution: 'client', tools: [],
+        internal_chat_message_metadata_passthrough: { turn_id: 'search-turn' } } },
+      { type: 'world_state', payload: { full: false, state: { collaboration_mode: 'default' } } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'search-turn' } },
+    ])
+    const source: SessionDetail = { summary: { ...summary, id: 'codex:discovery', source: 'codex',
+      sourceSessionId: 'discovery', capabilities: capabilities('messages', 'tools', 'timing', 'usage') }, projection }
+    const base = await start({ listSources: async () => [], listSessions: async () => [source.summary],
+      load: async () => source, fingerprint: async () => 'v1' })
+    const response = await fetch(`${base}/api/sessions/codex/discovery`)
+    const body = await response.json() as { factsQuality: FactsQualityReport,
+      detail: SessionDetail, analysis: { evaluations: Array<{ label: string }> } }
+    expect(response.status).toBe(200)
+    expect(body.factsQuality).toMatchObject({ ready: true, blockedCriterionIds: [],
+      stats: { coverageTotal: 6, coverageConsumed: 4, coverageGap: 2, coverageRawOnly: 2,
+        toolRecords: 1, toolRecordsMissingInput: 0, toolRecordsMissingOutput: 0 } })
+    expect(body.detail.projection.records[0]).toMatchObject({ title: 'tool_search', output: { tools: [] } })
+    expect(body.analysis.evaluations).toHaveLength(5)
+    expect(body.analysis.evaluations.every(item => item.label !== '事实质量不足')).toBe(true)
+  })
+
   it('returns record deltas for a known revision and snapshots for stale revisions', async () => {
     let version = 'v1'
     let current = structuredClone(detail)
@@ -775,8 +811,10 @@ describe('multi-source API', () => {
       kind: 'snapshot'
       revision: string
       detail: SessionDetail
+      factsQuality: FactsQualityReport
     }
     expect(initial.kind).toBe('snapshot')
+    expect(initial.factsQuality.stats.records).toBe(1)
 
     version = 'v2'
     current = structuredClone(detail)
@@ -788,6 +826,7 @@ describe('multi-source API', () => {
       output: 'second',
     }]
     current.projection.eventCount = 1
+    current.projection.records[0]!.status = 'running'
     const deltaResponse = await fetch(
       `${base}/api/sessions/dsh/session-1?revision=${encodeURIComponent(initial.revision)}`,
     )
@@ -798,6 +837,7 @@ describe('multi-source API', () => {
       upserts: Array<Record<string, unknown>>
       removedIds: string[]
       recordOrder: string[]
+      factsQuality: FactsQualityReport
     }
     expect(delta).toMatchObject({
       kind: 'delta',
@@ -812,6 +852,7 @@ describe('multi-source API', () => {
       output: 'second',
     }])
     expect(delta.upserts[0]).not.toHaveProperty('searchText')
+    expect(delta.factsQuality.stats.runningRecords).toBe(1)
 
     const unchangedResponse = await fetch(
       `${base}/api/sessions/dsh/session-1?revision=${encodeURIComponent(delta.revision)}`,
@@ -831,6 +872,7 @@ describe('multi-source API', () => {
       upserts: [],
       removedIds: [],
       recordOrder: ['record-2'],
+      factsQuality: delta.factsQuality,
     })
 
     const staleResponse = await fetch(

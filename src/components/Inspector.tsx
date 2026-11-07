@@ -9,6 +9,9 @@ import {
   KIND_LABELS,
 } from '../trajectory-view-model'
 import { StateView } from './StateView'
+import { EvidenceReview } from './EvidenceReview'
+import type { EvidenceReviewRequest } from '../analysis-review'
+import { nestedTokenBreakdown } from '../token-usage'
 
 export type InspectorTab = 'details' | 'raw'
 
@@ -50,6 +53,9 @@ interface InspectorProps {
   rawError: string | undefined
   onTabChange: (tab: InspectorTab) => void
   onClose: () => void
+  review?: EvidenceReviewRequest
+  records?: readonly TrajectoryRecord[]
+  onSelectEvidence?: (id: string) => void
 }
 
 export function Inspector({
@@ -62,8 +68,15 @@ export function Inspector({
   rawError,
   onTabChange,
   onClose,
+  review,
+  records,
+  onSelectEvidence,
 }: InspectorProps) {
   const duration = record.endTime === null ? null : record.endTime - record.startTime
+  const usage = nestedTokenBreakdown(record.usage)
+  const isTool = record.kind === 'tool' || record.kind === 'subtool'
+  const hasPreview = [record.input, record.output].some(value =>
+    value !== null && typeof value === 'object' && 'truncated' in value && value.truncated === true)
   const copyRaw = () => {
     if (raw !== undefined) void navigator.clipboard.writeText(json(raw))
   }
@@ -103,6 +116,13 @@ export function Inspector({
           <Copy size={15} />
         </button>
       </div>
+      <div className="inspector-content">
+      {review !== undefined && records !== undefined && onSelectEvidence !== undefined && <EvidenceReview
+        request={review}
+        records={records}
+        selectedId={record.id}
+        onSelect={onSelectEvidence}
+      />}
       {tab === 'raw'
         ? rawLoading
           ? (
@@ -126,6 +146,9 @@ export function Inspector({
             : <pre className="raw-inspector">{json(raw)}</pre>
         : (
             <div className="inspector-body">
+              {hasPreview && <p className="inspector-evidence-note">当前内容包含截断预览，可按需查看原始事件。原始事件也可能缺失或截断。</p>}
+              {isTool && record.status === 'complete' && record.output === undefined && record.error === undefined
+                && <p className="inspector-evidence-note">来源未记录工具输出，完成状态不能替代结果验证。</p>}
               <section className="facts-grid">
                 <div><span>状态</span><strong>{record.status}</strong></div>
                 <div><span>耗时</span><strong>{capabilities.timing ? formatDuration(duration) : '—'}</strong></div>
@@ -135,6 +158,8 @@ export function Inspector({
                 <div><span>调用 ID</span><strong title={record.callId}>{record.callId ?? '—'}</strong></div>
                 <div><span>来源</span><strong>{sourceLabel}</strong></div>
                 <div><span>保真度</span><strong>{record.fidelity}</strong></div>
+                {record.provider !== undefined && <div><span>提供方</span><strong>{record.provider}</strong></div>}
+                {record.model !== undefined && <div><span>模型</span><strong>{record.model}</strong></div>}
                 {record.surface !== undefined && (
                   <div><span>Surface</span><strong>{record.surface}</strong></div>
                 )}
@@ -192,16 +217,19 @@ export function Inspector({
                 <section>
                   <h3>Token 用量</h3>
                   <div className="metric-strip">
+                    <div><span>总量</span><strong>{formatNumber(usage.totalTokens)}</strong></div>
                     <div><span>输入</span><strong>{formatNumber(record.usage.inputTokens)}</strong></div>
                     <div><span>输出</span><strong>{formatNumber(record.usage.outputTokens)}</strong></div>
                     <div><span>缓存读取</span><strong>{formatNumber(record.usage.cacheReadTokens)}</strong></div>
+                    <div><span>缓存写入</span><strong>{formatNumber(record.usage.cacheWriteTokens)}</strong></div>
+                    <div><span>推理输出</span><strong>{formatNumber(record.usage.reasoningTokens)}</strong></div>
                   </div>
                 </section>
               )}
               {record.retry !== undefined && (
                 <section className="error-panel">
                   <h3>重试 {record.retry.count} 次</h3>
-                  <p>{record.retry.message ?? '请求已恢复'}</p>
+                  <p>{record.retry.message ?? '来源未记录重试结果，请核对后续记录。'}</p>
                   <code>{record.retry.code ?? ''}</code>
                 </section>
               )}
@@ -232,6 +260,7 @@ export function Inspector({
               </section>
             </div>
           )}
+      </div>
     </aside>
   )
 }

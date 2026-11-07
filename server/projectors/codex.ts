@@ -69,11 +69,11 @@ const KNOWN_TOP_LEVEL_TYPES = new Set([
 ])
 
 const RUNTIME_STATE_KEYS = new Set([
-  'agents_md', 'apps_instructions', 'collaboration_mode',
+  'agents_md', 'apps_instructions', 'cloud_skills', 'collaboration_mode',
   'context_window_guidance', 'environments', 'environments_instructions',
   'git_attribution', 'host_skills', 'managed_developer_instructions',
   'model', 'model_catalog', 'multi_agent_mode', 'permissions',
-  'persistent_mode', 'plugins_instructions', 'realtime', 'skills',
+  'persistent_mode', 'plugins_instructions', 'realtime', 'skills', 'tools',
 ])
 
 const THREAD_SETTINGS_KEYS = new Set([
@@ -210,6 +210,24 @@ function parseArguments(value: unknown, encrypted: unknown): unknown {
   if (value !== undefined && value !== null) return value
   const encryptedValues = array(encrypted)
   return encryptedValues.length > 0 ? { encrypted: true, itemCount: encryptedValues.length } : undefined
+}
+
+const TOOL_SEARCH_STATUSES = new Set(['in_progress', 'completed', 'failed', 'error', 'cancelled', 'incomplete'])
+
+function recognizedToolSearch(payload: JsonObject): boolean {
+  if (!string(payload.call_id)?.trim()) return false
+  if (payload.status !== undefined && !TOOL_SEARCH_STATUSES.has(String(payload.status))) return false
+  if (payload.execution !== undefined && payload.execution !== 'client' && payload.execution !== 'server') return false
+  if (payload.type === 'tool_search_call') {
+    const arguments_ = object(parseArguments(payload.arguments, undefined))
+    return typeof arguments_.query === 'string'
+  }
+  if (payload.type !== 'tool_search_output') return false
+  // An empty catalog is a result; an absent or malformed catalog is not.
+  return Array.isArray(payload.tools)
+    && payload.tools.every(tool => tool !== null && typeof tool === 'object' && !Array.isArray(tool))
+    || payload.tools === undefined && (payload.status === 'failed' || payload.status === 'error'
+      || payload.status === 'cancelled' || payload.status === 'incomplete')
 }
 
 function tokenUsage(value: unknown): TokenUsage | undefined {
@@ -407,6 +425,9 @@ function toolPayload(payload: JsonObject): JsonObject {
     input: payload.input,
     encrypted_function_args: payload.encrypted_function_args,
     output: payload.output,
+    tools: payload.tools,
+    execution: payload.execution,
+    error: payload.error,
     internal_chat_message_metadata_passthrough: {
       turn_id: object(payload.internal_chat_message_metadata_passthrough).turn_id,
       create_time: object(payload.internal_chat_message_metadata_passthrough).create_time,
@@ -499,10 +520,12 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     if (envelope.type === 'response_item') {
       const id = string(envelope.payload.id)
       if (id !== undefined) responseItems.set(id, envelope)
-      if (payloadType === 'function_call' || payloadType === 'custom_tool_call') {
+      if (payloadType === 'function_call' || payloadType === 'custom_tool_call'
+        || payloadType === 'tool_search_call' && recognizedToolSearch(envelope.payload)) {
         const callId = string(envelope.payload.call_id)
         if (callId !== undefined) toolCalls.set(callId, envelope)
-      } else if (payloadType === 'function_call_output' || payloadType === 'custom_tool_call_output') {
+      } else if (payloadType === 'function_call_output' || payloadType === 'custom_tool_call_output'
+        || payloadType === 'tool_search_output' && recognizedToolSearch(envelope.payload)) {
         const callId = string(envelope.payload.call_id)
         if (callId !== undefined) toolOutputs.set(callId, envelope)
       }
@@ -755,21 +778,30 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
     const item = timing?.item ?? {}
     const turn = nearestBusinessTurn(call, output, timing?.envelope)
     const callPayload = call?.payload ?? {}
-    const name = string(callPayload.name) ?? itemName(item)
+    const isToolSearch = callPayload.type === 'tool_search_call' || output?.payload.type === 'tool_search_output'
+    const searchResult = isToolSearch ? output?.payload ?? callPayload : {}
+    const name = isToolSearch ? 'tool_search' : string(callPayload.name) ?? itemName(item)
     const input = call === undefined
       ? itemInput(item)
       : parseArguments(
           callPayload.arguments ?? callPayload.input,
           callPayload.encrypted_function_args,
         )
-    const outputValue = output?.payload.output ?? itemOutput(item)
+    const outputValue = isToolSearch
+      ? Array.isArray(output?.payload.tools) ? { tools: output.payload.tools } : undefined
+      : output?.payload.output ?? itemOutput(item)
     const inferredExitCode = processExitCode(name, outputValue)
-    const isError = itemIsError(item) || (inferredExitCode !== undefined && inferredExitCode !== 0)
+    const isError = itemIsError(item) || itemIsError(searchResult)
+      || (inferredExitCode !== undefined && inferredExitCode !== 0)
     const hasCompletedResult = output !== undefined
       || timing !== undefined
       || string(callPayload.status) === 'completed'
     const status: RecordStatus = isError
       ? 'error'
+      : searchResult.status === 'cancelled' || searchResult.status === 'incomplete'
+        ? 'interrupted'
+      : searchResult.status === 'in_progress'
+        ? turn !== undefined && turn.status !== 'running' ? 'interrupted' : 'running'
       : hasCompletedResult
         ? 'complete'
         : turn !== undefined && turn.status !== 'running'
@@ -825,8 +857,10 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
             name: 'ToolError',
             code: number(item.exit_code)?.toString()
               ?? inferredExitCode?.toString()
+              ?? string(searchResult.status)
               ?? string(item.status),
-            reason: string(object(item.result).error) ?? string(item.stderr),
+            reason: string(object(searchResult.error).message) ?? string(searchResult.error)
+              ?? string(object(item.result).error) ?? string(item.stderr),
           }
         : status === 'interrupted'
           ? { name: 'Interrupted', code: 'interrupted' }
@@ -1058,6 +1092,8 @@ export function projectCodexTrajectory(rows: readonly CodexEnvelope[]): Trajecto
       || type === 'response_item/function_call_output'
       || type === 'response_item/custom_tool_call'
       || type === 'response_item/custom_tool_call_output'
+      || type === 'response_item/tool_search_call'
+      || type === 'response_item/tool_search_output'
       || type === 'event_msg/item_completed') {
       return {
         disposition: 'record',

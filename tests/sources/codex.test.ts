@@ -80,6 +80,126 @@ describe('Codex JSONL parser', () => {
 })
 
 describe('Codex projector', () => {
+  it('pairs native tool search events and preserves a completed empty result', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'event_msg', { type: 'task_started', turn_id: 'search-turn' }),
+      { ...row(1, 'response_item', {
+        type: 'tool_search_call', id: 'search-request', call_id: 'search-call',
+        status: 'completed', execution: 'client', arguments: { query: 'find a tool', limit: 1 },
+        internal_chat_message_metadata_passthrough: { turn_id: 'search-turn' },
+      }), metadata: { source_event_id: 'source-call' } },
+      { ...row(2, 'response_item', {
+        type: 'tool_search_output', id: 'search-response', call_id: 'search-call',
+        status: 'completed', execution: 'client', tools: [],
+        internal_chat_message_metadata_passthrough: { turn_id: 'search-turn' },
+      }, '2026-01-01T00:00:02.000Z'), metadata: { source_event_id: 'source-output' } },
+      row(3, 'event_msg', { type: 'task_complete', turn_id: 'search-turn' }),
+    ])
+    expect(projection.records).toHaveLength(1)
+    expect(projection.records[0]).toMatchObject({
+      id: 'tool:search-call', kind: 'tool', title: 'tool_search', turn: 1,
+      status: 'complete', fidelity: 'exact', input: { query: 'find a tool', limit: 1 }, output: { tools: [] },
+      sourceEventIds: ['search-call', 'source-call', 'source-output'],
+      startTime: Date.parse('2026-01-01T00:00:01.000Z'), endTime: Date.parse('2026-01-01T00:00:02.000Z'),
+    })
+    expect(projection.records[0]?.usage).toBeUndefined()
+    expect(projection.records[0]?.raw).toEqual(expect.arrayContaining([
+      expect.objectContaining({ payload: expect.objectContaining({ type: 'tool_search_output', tools: [], execution: 'client' }) }),
+    ]))
+    expect(projection.coverageSummary).toEqual({ total: 4, consumed: 4, gap: 0 })
+  })
+
+  it('keeps discovered tool definitions and redacts their sensitive values', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'response_item', { type: 'tool_search_call', call_id: 'discovery',
+        arguments: '{"query":"search tools password=private-query"}', status: 'completed' }),
+      row(1, 'response_item', { type: 'tool_search_output', call_id: 'discovery', status: 'completed', tools: [
+        { type: 'function', name: 'lookup', description: 'password=private-description',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } } },
+      ] }),
+    ])
+    expect(projection.records[0]).toMatchObject({ output: { tools: [expect.objectContaining({ name: 'lookup' })] } })
+    expect(JSON.stringify(projection)).not.toContain('private-query')
+    expect(JSON.stringify(projection)).not.toContain('private-description')
+    expect(projection.coverageSummary?.gap).toBe(0)
+  })
+
+  it('keeps pending and missing tool search outputs distinct from empty results', () => {
+    const call = row(0, 'response_item', { type: 'tool_search_call', call_id: 'pending-search',
+      status: 'in_progress', execution: 'client', arguments: { query: 'tools' } })
+    const pending = projectCodexTrajectory([call])
+    expect(pending.records[0]).toMatchObject({ id: 'tool:pending-search', status: 'running', endTime: null })
+    expect(pending.records[0]?.output).toBeUndefined()
+    const completed = projectCodexTrajectory([call, row(1, 'response_item', {
+      type: 'tool_search_output', call_id: 'pending-search', status: 'completed', execution: 'client', tools: [],
+    })])
+    expect(completed.records).toHaveLength(1)
+    expect(completed.records[0]).toMatchObject({ id: 'tool:pending-search', status: 'complete', output: { tools: [] } })
+    const missing = projectCodexTrajectory([{ ...call, payload: { ...call.payload as object, status: 'completed' } }])
+    expect(missing.records[0]).toMatchObject({ status: 'complete' })
+    expect(missing.records[0]?.output).toBeUndefined()
+  })
+
+  it('preserves output-only searches and explicit failures without inventing an input or success', () => {
+    const outputOnly = projectCodexTrajectory([row(0, 'response_item', {
+      type: 'tool_search_output', call_id: 'orphan', status: 'completed', tools: [],
+    })])
+    expect(outputOnly.records[0]).toMatchObject({ title: 'tool_search', fidelity: 'derived', output: { tools: [] } })
+    expect(outputOnly.records[0]?.input).toBeUndefined()
+    const failed = projectCodexTrajectory([
+      row(0, 'response_item', { type: 'tool_search_call', call_id: 'failure', status: 'in_progress', arguments: { query: 'tools' } }),
+      row(1, 'response_item', { type: 'tool_search_output', call_id: 'failure', status: 'failed', error: { message: 'search unavailable' } }),
+    ])
+    expect(failed.records[0]).toMatchObject({ status: 'error', error: { reason: 'search unavailable' } })
+    expect(failed.coverageSummary?.gap).toBe(0)
+  })
+
+  it.each(['cancelled', 'incomplete'])('preserves %s tool searches as interruptions', status => {
+    const projection = projectCodexTrajectory([
+      row(0, 'response_item', { type: 'tool_search_call', call_id: 'interrupted',
+        status: 'in_progress', arguments: { query: 'tools' } }),
+      row(1, 'response_item', { type: 'tool_search_output', call_id: 'interrupted', status }),
+    ])
+    expect(projection.records[0]).toMatchObject({ status: 'interrupted', error: { code: 'interrupted' } })
+    expect(projection.records[0]?.output).toBeUndefined()
+    expect(projection.coverageSummary?.gap).toBe(0)
+  })
+
+  it('does not treat a partial catalog as a completed search', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'response_item', { type: 'tool_search_call', call_id: 'partial',
+        status: 'in_progress', arguments: { query: 'tools' } }),
+      row(1, 'response_item', { type: 'tool_search_output', call_id: 'partial', status: 'in_progress', tools: [] }),
+    ])
+    expect(projection.records[0]).toMatchObject({ status: 'running', endTime: null, output: { tools: [] } })
+  })
+
+  it.each([
+    { type: 'tool_search_call', status: 'completed', arguments: { query: 'missing call id' } },
+    { type: 'tool_search_call', call_id: 'bad-arguments', status: 'completed', arguments: 'not JSON' },
+    { type: 'tool_search_output', call_id: 'bad-tools', status: 'completed', tools: null },
+    { type: 'tool_search_output', call_id: 'bad-status', status: 'future-status', tools: [] },
+  ])('does not count malformed tool search payloads as consumed: $type $call_id', payload => {
+    const projection = projectCodexTrajectory([row(0, 'response_item', payload)])
+    expect(projection.records).toEqual([])
+    expect(projection.coverage).toEqual([expect.objectContaining({ disposition: 'record', total: 1, consumed: 0 })])
+    expect(projection.coverageSummary?.gap).toBe(1)
+  })
+
+  it('recognizes cloud skill and tool catalog runtime snapshots while retaining their audit boundary', () => {
+    const projection = projectCodexTrajectory([
+      row(0, 'world_state', { full: true, state: {
+        model: 'test-model', cloud_skills: { version: 1, entries: {}, roots: {},
+          usage: { tokens: 0, characters: 0 }, instructionsSent: false, omitDescriptions: false,
+          allocation: { totalBudget: { tokens: 100 }, cloudLimit: 10, cloudCatalogFingerprint: [0, 1] } },
+        tools: { mcp__example: 'Tool catalog instructions' },
+      } }),
+      row(1, 'world_state', { full: false, state: { collaboration_mode: 'default', model: 'test-model' } }),
+    ])
+    expect(projection.records).toEqual([])
+    expect(projection.coverage).toEqual([expect.objectContaining({ type: 'world_state', total: 2, consumed: 0, disposition: 'raw-only' })])
+  })
+
   it('merges top-level compacted events into adjacent context-compaction records without exposing history', () => {
     const compacted = {
       ...row(1, 'compacted', {

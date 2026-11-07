@@ -204,12 +204,13 @@ export function buildFactsQualityReport(
     issues.push(issue({
       id: `coverage-gap:${item.type}`,
       category: 'coverage',
+      coverageDisposition: item.disposition,
       severity: semanticFailure || unsupported || requiredRawOnly
         ? 'blocking'
         : 'warning',
-      summary: `${gap}/${item.total} 个 ${item.type} 事件未进入语义事实（${
-        item.disposition
-      }）${item.reason === undefined ? '。' : `：${item.reason}`}`,
+      summary: `${gap}/${item.total} 个 ${item.type} 事件${item.disposition === 'raw-only'
+        ? '已识别，仅保留原始审计'
+        : '未进入语义事实'}（${item.disposition}）${item.reason === undefined ? '。' : `：${item.reason}`}`,
       affectedCriterionIds: coverageDependencies(item.type),
     }))
   }
@@ -320,6 +321,8 @@ export function buildFactsQualityReport(
       coverageTotal,
       coverageConsumed,
       coverageGap,
+      coverageRawOnly: coverage.reduce((total, item) => total
+        + (item.disposition === 'raw-only' ? item.total - item.consumed : 0), 0),
     },
     ready: blockedCriterionIds.length === 0,
     issues,

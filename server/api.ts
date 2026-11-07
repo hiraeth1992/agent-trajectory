@@ -23,6 +23,7 @@ import type {
 import type { TrajectoryDiagnosisPromptRequest } from '../src/diagnosis-types'
 import { redactSensitive } from '../src/projector-utils'
 import { analyzeTrajectory, type TrajectoryAnalysis } from '../src/trajectory-analysis'
+import type { FactsQualityReport } from '../src/evaluation-types'
 import {
   applyFactsQualityGate,
   evaluateTrajectory,
@@ -330,6 +331,7 @@ interface DetailRevision {
   revision: string
   detail: TransportSessionDetail
   analysis: TrajectoryAnalysis
+  factsQuality: FactsQualityReport
   serializedRecords: ReadonlyMap<string, string>
   projection: Omit<TransportSessionDetail['projection'], 'records'>
   recordOrder: string[]
@@ -465,19 +467,21 @@ function preparedDetail(state: ApiSessionState, detail: SessionDetail): DetailRe
   if (cached !== undefined) return cached
   const transport = transportDetail(detail)
   const localAnalysis = analyzeTrajectory(detail)
+  const evaluation = evaluateTrajectory(detail, localAnalysis, {
+    target: {
+      source: detail.summary.source,
+      sourceSessionId: detail.summary.sourceSessionId,
+      mode: detail.summary.capabilities.live ? 'live' : 'frozen',
+      fingerprint: 'detail-response',
+    },
+  })
   const analysis = redactSensitive(applyFactsQualityGate(
     localAnalysis,
-    evaluateTrajectory(detail, localAnalysis, {
-      target: {
-        source: detail.summary.source,
-        sourceSessionId: detail.summary.sourceSessionId,
-        mode: detail.summary.capabilities.live ? 'live' : 'frozen',
-        fingerprint: 'detail-response',
-      },
-    }),
+    evaluation,
   )) as TrajectoryAnalysis
+  const factsQuality = redactSensitive(evaluation.factsQuality) as FactsQualityReport
   const revision = createHash('sha256')
-    .update(JSON.stringify({ transport, analysis }))
+    .update(JSON.stringify({ transport, analysis, factsQuality }))
     .digest('base64url')
   const serializedRecords = new Map(transport.projection.records.map(record => [
     record.id,
@@ -488,6 +492,7 @@ function preparedDetail(state: ApiSessionState, detail: SessionDetail): DetailRe
     revision,
     detail: transport,
     analysis,
+    factsQuality,
     serializedRecords,
     projection,
     recordOrder: transport.projection.records.map(record => record.id),
@@ -504,6 +509,7 @@ function emptyDelta(current: DetailRevision): SessionDetailResponse {
     summary: current.detail.summary,
     projection: current.projection,
     analysis: current.analysis,
+    factsQuality: current.factsQuality,
     upserts: [],
     removedIds: [],
     recordOrder: current.recordOrder,
@@ -531,6 +537,7 @@ function detailResponse(
       revision: current.revision,
       detail: current.detail,
       analysis: current.analysis,
+      factsQuality: current.factsQuality,
     }
   }
   const after = new Set(current.recordOrder)
@@ -546,6 +553,7 @@ function detailResponse(
     summary: current.detail.summary,
     projection: current.projection,
     analysis: current.analysis,
+    factsQuality: current.factsQuality,
     upserts,
     removedIds,
     recordOrder: current.recordOrder,

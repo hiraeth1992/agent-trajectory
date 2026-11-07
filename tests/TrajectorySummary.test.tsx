@@ -6,10 +6,13 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TrajectorySummary } from '../src/components/TrajectorySummary'
 import type { TrajectoryAnalysis } from '../src/trajectory-analysis'
+import type { FactsQualityReport } from '../src/evaluation-types'
+import { capabilities } from '../server/sources/types'
 
 function analysis(): TrajectoryAnalysis {
   const steps = [
@@ -122,6 +125,51 @@ afterEach(() => {
 })
 
 describe('TrajectorySummary cost chart', () => {
+  it('shows each data limitation once and links affected conclusions to the analysis basis', () => {
+    const value = analysis()
+    const limitation = '工具搜索事件尚未解析，无法核实执行结果。'
+    value.outcome = { ...value.outcome, label: '事实质量不足', summary: limitation, tone: 'neutral' }
+    value.evaluations = [
+      { id: 'outcome', title: '结果证据', grade: 'unknown', label: '事实质量不足',
+        summary: limitation, confidence: 'high', evidenceRecordIds: [] },
+      { id: 'efficiency', title: '资源效率', grade: 'good', label: '成本分布较均衡',
+        summary: '步骤成本可比较', confidence: 'medium', evidenceRecordIds: [] },
+      { id: 'observability', title: '可观测性', grade: 'warning', label: '2 / 4 类证据可用',
+        summary: '原因缺失 · 耗时 · Token · 工具结果缺失', confidence: 'high', evidenceRecordIds: [] },
+    ]
+    const quality: FactsQualityReport = {
+      schemaVersion: 4, coveragePolicyVersion: 4, source: 'zcode', sourceCapabilities: capabilities('tools'),
+      target: { source: 'zcode', sourceSessionId: 'summary-test', mode: 'frozen', fingerprint: 'test' },
+      contextScope: 'session', ready: false, blockedCriterionIds: ['outcome'],
+      stats: { records: 0, turns: 0, runningRecords: 0, truncatedRecords: 0, toolRecords: 0,
+        toolRecordsMissingInput: 0, toolRecordsMissingOutput: 0, brokenParentSpans: 0, unknownEventTypes: 0,
+        coverageTotal: 1, coverageConsumed: 0, coverageGap: 1 },
+      issues: [{ id: 'missing-search', category: 'coverage', severity: 'blocking', summary: limitation,
+        evidenceRecordIds: [], affectedCriterionIds: ['outcome'] }],
+    }
+    render(<TrajectorySummary analysis={value} source="zcode" sourceSessionId="summary-test"
+      records={[]} factsQuality={quality} onOpenRecord={vi.fn()} onReview={vi.fn()} />)
+    expect(screen.getAllByText(limitation)).toHaveLength(1)
+    const links = screen.getAllByRole('link', { name: '查看数据质量（1 项限制）' })
+    expect(links).toHaveLength(2)
+    for (const link of links) {
+      expect(link.getAttribute('href')).toBe('#analysis-basis')
+    }
+    const dataQuality = screen.getByRole('region', { name: '数据质量' })
+    expect(dataQuality.querySelector('#analysis-basis')?.closest('details')?.open).toBe(false)
+    const evaluation = screen.getByRole('region', { name: '过程评测' })
+    expect(within(evaluation).getByRole('region', { name: '数据质量' })).toBeTruthy()
+    expect(within(evaluation).getAllByText(/2 \/ 4 类证据可用/)).toHaveLength(1)
+    expect(evaluation.querySelectorAll('.evaluation-item')).toHaveLength(3)
+    expect(dataQuality.parentElement?.className).toBe('evaluation-list')
+    expect(screen.queryByRole('region', { name: '分析依据' })).toBeNull()
+    expect(screen.queryByRole('region', { name: '问题与资源定位' })).toBeNull()
+    const story = screen.getByRole('region', { name: '执行故事线' })
+    expect(within(story).getByText('现有数据不足，阶段结果暂无法判断。')).toBeTruthy()
+    expect(within(story).queryByText('验证通过')).toBeNull()
+    expect(screen.getByText('步骤成本可比较')).toBeTruthy()
+  })
+
   it('keeps four equal compact metrics and gives the last Token metric more space', () => {
     const { container } = render(
       <TrajectorySummary
@@ -197,7 +245,7 @@ describe('TrajectorySummary cost chart', () => {
     expect([...turn.querySelectorAll('.decision-turn-metric')]
       .map(metric => metric.textContent?.replace(/\s+/g, ' ').trim()))
       .toEqual([
-        '200 ms',
+        '活跃 —',
         '总量 50,111',
         '输入 49,897（缓存 28,160）',
         '输出 214（推理 0）',
@@ -537,6 +585,43 @@ describe('TrajectorySummary optimization panel', () => {
 })
 
 describe('TrajectorySummary story linkage', () => {
+  it('uses one step list for filters and stage navigation, with complete evidence even for ordinary steps', () => {
+    const value = analysis()
+    value.steps = [
+      { ...value.steps[0]!, id: 'failed-step', recordId: 'failed', recordIds: ['failed'], step: 1,
+        status: 'error', action: '失败调用', durationMs: null, usage: undefined },
+      { ...value.steps[1]!, id: 'ordinary-step', recordId: 'ordinary', recordIds: ['ordinary', 'reply'],
+        step: 1, turn: 2, action: '汇报阶段结果', durationMs: null, usage: undefined },
+    ]
+    value.costSteps = []
+    const records = value.steps.flatMap(step => step.recordIds.map(id => ({
+      id, source: 'zcode' as const, sourceEventIds: [id], fidelity: 'exact' as const,
+      turn: step.turn, step: step.step, seq: step.turn, kind: step.kind, title: step.action,
+      summary: step.action, startTime: 0, endTime: null, status: step.status, depth: 0, searchText: '',
+    })))
+    const onReview = vi.fn()
+    const props = { analysis: value, source: 'zcode' as const, sourceSessionId: 'unified', records,
+      onOpenRecord: vi.fn(), onReview }
+    const { rerender } = render(<TrajectorySummary {...props} />)
+    const details = screen.getByRole('region', { name: '步骤详情' })
+    expect(within(details).getByRole('status').textContent).toBe('共 2 步 · 问题与资源候选 1 步 · 当前显示 2 步')
+    fireEvent.click(within(details).getByRole('button', { name: '执行失败 · 1' }))
+    expect(within(details).getByRole('status').textContent).toContain('当前显示 1 步')
+    expect(within(details).queryByRole('button', { name: /审阅 2 条证据/ })).toBeNull()
+    const stage = screen.getByRole('button', { name: /汇报阶段结果，第 2 轮，1 步/ })
+    fireEvent.click(stage)
+    fireEvent.click(screen.getByRole('button', { name: '展开阶段步骤' }))
+    expect(within(details).getByRole('button', { name: '全部步骤 · 2' }).getAttribute('aria-pressed')).toBe('true')
+    const evidence = within(details).getByRole('button', { name: '审阅 2 条证据：汇报阶段结果' })
+    fireEvent.click(evidence)
+    expect(onReview).toHaveBeenCalledWith(expect.objectContaining({ recordIds: ['ordinary', 'reply'] }), 'ordinary')
+    expect(details.querySelectorAll('#decision-ordinary-step')).toHaveLength(1)
+    fireEvent.click(within(details).getByRole('button', { name: '执行失败 · 1' }))
+    rerender(<TrajectorySummary {...props} analysis={{ ...value }} />)
+    expect(within(details).getByRole('button', { name: '执行失败 · 1' }).getAttribute('aria-pressed')).toBe('true')
+    expect(within(details).getByRole('status').textContent).toContain('当前显示 1 步')
+  })
+
   it('selects an aggregate on click and opens turn details only on double click', async () => {
     const value = analysis()
     value.steps = [
@@ -581,7 +666,7 @@ describe('TrajectorySummary story linkage', () => {
       '.decision-turn-toggle',
     )].find(button => button.textContent?.includes('第 2 轮'))
     expect(turnTwo?.getAttribute('aria-expanded')).toBe('false')
-    expect(screen.getByText('故事线实现完成')).toBeTruthy()
+    expect(screen.getByText('修改后尚未验证；请在后续步骤中核实验证结果')).toBeTruthy()
     expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled()
 
     fireEvent.doubleClick(editStage)

@@ -694,7 +694,7 @@ describe('analyzeTrajectory', () => {
     })
   })
 
-  it('marks failed browser checks recovered after a later browser check passes', () => {
+  it('marks only the matching browser check recovered after validation passes', () => {
     const browserCheck = (body: string) =>
       `node - <<'NODE'\nconst { chromium } = require('playwright')\n${body}\nNODE`
     const analysis = analyzeTrajectory(detail([
@@ -735,8 +735,8 @@ describe('analyzeTrajectory', () => {
       correction.id === 'recovery:step:1:1'
       || correction.id === 'recovery:step:1:2'))
       .toEqual([
-        expect.objectContaining({ status: 'recovered' }),
-        expect.objectContaining({ status: 'recovered' }),
+        expect.objectContaining({ status: 'recovered', recoveryEvidence: 'validation' }),
+        expect.objectContaining({ status: 'unresolved', recordIds: ['browser-check-second', 'browser-fix'] }),
       ])
     expect(analysis.outcome).toMatchObject({
       label: '已完成并有验证证据',
@@ -1090,6 +1090,7 @@ describe('analyzeTrajectory', () => {
       kind: 'assistant',
       status: 'complete',
       retry: { count: 2, message: 'rate limited' },
+      output: 'response after retry',
     })
     const unresolved = record('unresolved', {
       seq: 2,
@@ -1109,6 +1110,7 @@ describe('analyzeTrajectory', () => {
       expect.objectContaining({
         id: 'recovery:step:1:1',
         status: 'recovered',
+        recoveryEvidence: 'retry',
         confidence: 'high',
       }),
       expect.objectContaining({
@@ -1123,7 +1125,7 @@ describe('analyzeTrajectory', () => {
     })
     expect(analysis.evaluations.find(item => item.id === 'recovery')).toMatchObject({
       label: '恢复不完整',
-      summary: '1 个异常后出现成功动作；1 个异常没有后续成功证据。相邻步骤关联属于轨迹推断。',
+      summary: '1 个原调用重试成功；1 个异常没有后续成功证据。',
     })
   })
 

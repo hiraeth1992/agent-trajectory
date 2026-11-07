@@ -19,7 +19,7 @@ import {
   Target,
   TimerReset,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import type {
   AnalysisConfidence,
@@ -29,7 +29,9 @@ import type {
   AnalysisStep,
   TrajectoryAnalysis,
 } from '../trajectory-analysis'
-import type { SourceId, TokenUsage } from '../types'
+import type { SourceCapabilities, SourceId, SourceStatus, TokenUsage, TrajectoryRecord, TrajectoryTurnSummary } from '../types'
+import type { FactsQualityReport } from '../evaluation-types'
+import { buildReviewSteps, REVIEW_FILTERS, type EvidenceReviewRequest, type ReviewFilter, type ReviewStep } from '../analysis-review'
 import {
   exclusiveTokenBreakdown,
   nestedTokenBreakdown,
@@ -44,12 +46,14 @@ import {
   formatTime,
   KIND_LABELS,
 } from '../trajectory-view-model'
-import { buildTrajectoryStory } from '../trajectory-story'
+import { buildTrajectoryStory, stepsActiveDuration } from '../trajectory-story'
 import type { TrajectoryStory as Story } from '../trajectory-story'
 import { HoverDetailText } from './HoverDetailText'
 import { OptimizationPanel } from './OptimizationPanel'
 import { TrajectoryDiagnosisButton } from './TrajectoryDiagnosisButton'
 import { TrajectoryStory } from './TrajectoryStory'
+import { FactsQualityDetails, ReviewFilters } from './AnalysisReview'
+import { EvidenceLinks } from './EvidenceLinks'
 
 type CostMode = 'time' | 'tokens'
 
@@ -74,6 +78,12 @@ interface TrajectorySummaryProps {
   sessionProvider?: string
   sessionMeta?: SummarySessionMeta
   onOpenRecord: (recordId: string) => void
+  records?: readonly TrajectoryRecord[]
+  turns?: readonly TrajectoryTurnSummary[]
+  factsQuality?: FactsQualityReport
+  capabilities?: SourceCapabilities
+  sourceStatus?: SourceStatus
+  onReview?: (request: EvidenceReviewRequest, selectedId?: string) => void
 }
 
 const TOKEN_SEGMENTS: Array<{
@@ -194,14 +204,31 @@ function EvidenceButton({
   )
 }
 
+function qualityBlockCount(quality: FactsQualityReport | undefined, criterion: AnalysisEvaluation['id']): number {
+  return quality?.issues.filter(issue => issue.severity === 'blocking'
+    && issue.affectedCriterionIds.includes(criterion)).length ?? 0
+}
+
+function QualityBoundary({ count }: { count: number }) {
+  return <>
+    <p>现有数据不足，暂无法判断。</p>
+    <a className="quality-basis-link" href="#analysis-basis">查看数据质量（{count} 项限制）</a>
+  </>
+}
+
 function OutcomeHero({
   analysis,
   source,
   sourceSessionId,
+  onOpenRecord,
+  records,
+  onReview,
+  factsQuality,
   withObjective = false,
 }: TrajectorySummaryProps & {
   withObjective?: boolean
 }) {
+  const blocked = qualityBlockCount(factsQuality, 'outcome')
   return (
     <section
       className={`summary-outcome outcome-${analysis.outcome.tone}${
@@ -220,9 +247,16 @@ function OutcomeHero({
           执行结论 · {confidenceLabel(analysis.outcome.confidence)}
         </span>
         <h1>{analysis.outcome.label}</h1>
-        <p>
+        {blocked > 0 ? <QualityBoundary count={blocked} /> : <p>
           <HoverDetailText text={analysis.outcome.summary} />
-        </p>
+        </p>}
+        {blocked === 0 && analysis.outcome.evidenceRecordIds.length > 0 && <EvidenceLinks
+          title="执行结论"
+          recordIds={analysis.outcome.evidenceRecordIds}
+          onOpenRecord={onOpenRecord}
+          records={records}
+          onReview={onReview}
+        />}
       </div>
       <TrajectoryDiagnosisButton
         source={source}
@@ -358,15 +392,24 @@ function Objective({
 function StepCard({
   step,
   onOpenRecord,
+  onReview,
+  review,
+  capabilities,
   selected = false,
   onSelect,
 }: {
   step: AnalysisStep
   onOpenRecord: (recordId: string) => void
+  onReview?: TrajectorySummaryProps['onReview']
+  review?: ReviewStep
+  capabilities?: SourceCapabilities
   selected?: boolean
   onSelect?: (stepId: string) => void
 }) {
   const stepNumber = step.step > 0 ? String(step.step) : '—'
+  const evidence = review ?? { title: step.action, recordIds: step.recordIds,
+    description: step.result, level: step.reasonLevel }
+  const openEvidence = () => onReview === undefined ? onOpenRecord(step.recordId) : onReview(evidence, step.recordId)
   return (
     <div
       className={`analysis-step status-${step.status}${
@@ -388,7 +431,7 @@ function StepCard({
           className="step-body"
           aria-pressed={onSelect === undefined ? undefined : selected}
           onClick={() => {
-            if (onSelect === undefined) onOpenRecord(step.recordId)
+            if (onSelect === undefined) openEvidence()
             else onSelect(step.id)
           }}
           aria-label={onSelect === undefined
@@ -400,6 +443,8 @@ function StepCard({
             <strong>{step.action}</strong>
             <small>{statusLabel(step.status)}</small>
           </header>
+          {review !== undefined && <div className="review-tags">{review.tags.map(tag =>
+            <span key={tag}>{REVIEW_FILTERS.find(([id]) => id === tag)?.[1]}</span>)}</div>}
           <div className="step-reason">
             <Brain size={13} />
             <span>{step.reason}</span>
@@ -411,21 +456,23 @@ function StepCard({
           </div>
           <div className="step-result">
             <span>结果</span>
-            <strong>{step.result}</strong>
+            <strong>{review?.result ?? step.result}</strong>
           </div>
+          {review?.recovery !== undefined && <p className="step-recovery">{review.recovery}（关系来自轨迹分析）</p>}
           <footer>
-            <span><Clock3 size={12} />{formatDuration(step.durationMs)}</span>
+            <span><Clock3 size={12} />{formatDuration(capabilities?.timing === false ? null : step.durationMs)}</span>
             <span className="step-token-usage">
               <Coins size={12} />
-              {tokenUsageText(step.usage)}
+              {tokenUsageText(capabilities?.usage === false ? undefined : step.usage)}
             </span>
           </footer>
         </button>
         <button
           type="button"
           className="step-evidence-action"
-          aria-label={`查看轨迹证据：${step.action}`}
-          onClick={() => onOpenRecord(step.recordId)}
+          aria-label={onReview === undefined ? `查看轨迹证据：${step.action}` : `审阅 ${evidence.recordIds.length} 条证据：${step.action}`}
+          title={`审阅 ${evidence.recordIds.length} 条证据`}
+          onClick={openEvidence}
         >
           <LocateFixed size={13} />
         </button>
@@ -437,6 +484,10 @@ function StepCard({
 function DecisionPath({
   analysis,
   onOpenRecord,
+  onReview,
+  records,
+  capabilities,
+  reviewSteps,
   story,
   selectedStageId,
   openStageRequest,
@@ -446,7 +497,10 @@ function DecisionPath({
   selectedStageId?: string
   openStageRequest?: { stageId: string; revision: number }
   onSelectStage?: (stageId: string) => void
+  reviewSteps: readonly ReviewStep[]
 }) {
+  const [filters, setFilters] = useState<Set<ReviewFilter>>(() => new Set())
+  const reviews = useMemo(() => new Map(reviewSteps.map(step => [step.id, step])), [reviewSteps])
   const groups = useMemo(() => {
     const result = new Map<number, AnalysisStep[]>()
     const ordered = [...analysis.steps].sort((left, right) =>
@@ -454,13 +508,15 @@ function DecisionPath({
       || left.step - right.step
       || left.id.localeCompare(right.id))
     for (const step of ordered) {
+      if (![...filters].every(filter => reviews.get(step.id)?.tags.includes(filter))) continue
       const group = result.get(step.turn) ?? []
       group.push(step)
       result.set(step.turn, group)
     }
     return [...result.entries()]
-  }, [analysis.steps])
+  }, [analysis.steps, reviews, filters])
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set())
+  const handledStageRequest = useRef<typeof openStageRequest>()
   const selectedStage = story?.stages.find(stage => stage.id === selectedStageId)
   const selectedStepIds = useMemo(
     () => new Set(selectedStage?.stepIds ?? []),
@@ -468,10 +524,12 @@ function DecisionPath({
   )
 
   useEffect(() => {
-    if (openStageRequest === undefined) return
+    if (openStageRequest === undefined || handledStageRequest.current === openStageRequest) return
     const requestedStage = story?.stages.find(stage =>
       stage.id === openStageRequest.stageId)
     if (requestedStage === undefined) return
+    handledStageRequest.current = openStageRequest
+    setFilters(new Set())
     setExpanded(current => new Set([...current, ...requestedStage.turns]))
     const firstStepId = requestedStage.stepIds[0]
     if (firstStepId === undefined) return
@@ -487,28 +545,33 @@ function DecisionPath({
     const stageId = story?.stageIdByStepId[stepId]
     if (stageId !== undefined) onSelectStage?.(stageId)
   }
+  const changeFilters = (next: Set<ReviewFilter>) => {
+    setFilters(next)
+    if (next.size > 0) setExpanded(new Set(analysis.steps.filter(step =>
+      [...next].every(filter => reviews.get(step.id)?.tags.includes(filter))).map(step => step.turn)))
+  }
 
   return (
-    <section className="summary-panel decision-panel">
+    <section className="summary-panel decision-panel" aria-label="步骤详情">
       <header className="summary-panel-heading">
         <div>
           <GitBranch size={17} />
           <span>
-            <strong>决策与行动路径</strong>
-            <small>展开轮次查看“做什么、为什么、结果如何”</small>
+            <strong>步骤详情</strong>
+            <small>按轮次查看行动、结果和完整关联证据</small>
           </span>
         </div>
       </header>
+      {records !== undefined && <ReviewFilters steps={reviewSteps} total={analysis.steps.length}
+        visible={groups.reduce((total, [, steps]) => total + steps.length, 0)}
+        filters={filters} onChange={changeFilters} />}
       <div className="decision-turns">
         {groups.length === 0
-          ? <div className="summary-empty">没有可分析的行动步骤</div>
+          ? <div className="summary-empty">{filters.size > 0 ? '没有同时满足这些条件的步骤' : '没有可分析的行动步骤'}</div>
           : groups.map(([turn, steps]) => {
               const isExpanded = expanded.has(turn)
-              const duration = steps.reduce(
-                (total, step) => total + (step.durationMs ?? 0),
-                0,
-              )
-              const usage = sumUsage(steps.map(step => step.usage))
+              const duration = stepsActiveDuration(steps, records, capabilities?.timing)
+              const usage = capabilities?.usage === false ? undefined : sumUsage(steps.map(step => step.usage))
               const breakdown = nestedTokenBreakdown(usage)
               return (
                 <section className="decision-turn" key={turn}>
@@ -533,7 +596,7 @@ function DecisionPath({
                     <strong>{turn === 0 ? '会话级动作' : `第 ${turn} 轮`}</strong>
                     <span>{steps.length} 步</span>
                     <span className="decision-turn-metric decision-turn-duration">
-                      {formatDuration(duration)}
+                      活跃 {formatDuration(duration)}
                     </span>
                     <span
                       className="decision-turn-separator separator-after-duration"
@@ -574,6 +637,9 @@ function DecisionPath({
                           key={step.id}
                           step={step}
                           onOpenRecord={onOpenRecord}
+                          onReview={onReview}
+                          review={reviews.get(step.id)}
+                          capabilities={capabilities}
                           selected={selectedStepIds.has(step.id)}
                           onSelect={story === undefined ? undefined : selectStep}
                         />
@@ -589,14 +655,22 @@ function DecisionPath({
 }
 
 function EvaluationPanel({
-  evaluations,
+  analysis,
   onOpenRecord,
+  records,
+  onReview,
+  factsQuality,
+  sourceStatus,
 }: {
-  evaluations: AnalysisEvaluation[]
+  analysis: TrajectoryAnalysis
   onOpenRecord: (recordId: string) => void
+  records?: readonly TrajectoryRecord[]
+  onReview?: TrajectorySummaryProps['onReview']
+  factsQuality?: FactsQualityReport
+  sourceStatus?: SourceStatus
 }) {
   return (
-    <section className="summary-panel evaluation-panel">
+    <section className="summary-panel evaluation-panel" aria-label="过程评测">
       <header className="summary-panel-heading">
         <div>
           <ShieldCheck size={17} />
@@ -607,8 +681,9 @@ function EvaluationPanel({
         </div>
       </header>
       <div className="evaluation-list">
-        {evaluations.map((evaluation) => {
+        {analysis.evaluations.filter(item => item.id !== 'observability').map((evaluation) => {
           const Icon = evaluationIcon(evaluation)
+          const blocked = qualityBlockCount(factsQuality, evaluation.id)
           return (
             <article className={`evaluation-item grade-${evaluation.grade}`} key={evaluation.id}>
               <div className="evaluation-icon"><Icon size={16} /></div>
@@ -617,19 +692,19 @@ function EvaluationPanel({
                   {evaluation.title} · {confidenceLabel(evaluation.confidence)}
                 </span>
                 <strong>{evaluation.label}</strong>
-                <p>{evaluation.summary}</p>
-                <EvidenceButton
-                  recordId={evaluation.evidenceRecordIds[0]}
+                {blocked > 0 ? <QualityBoundary count={blocked} /> : <p>{evaluation.summary}</p>}
+                {blocked === 0 && <EvidenceLinks
+                  title={evaluation.title}
+                  recordIds={evaluation.evidenceRecordIds}
+                  records={records}
                   onOpenRecord={onOpenRecord}
-                >
-                  {evaluation.evidenceRecordIds.length === 0
-                    ? '无可定位证据'
-                    : `${evaluation.evidenceRecordIds.length} 条证据`}
-                </EvidenceButton>
+                  onReview={onReview}
+                />}
               </div>
             </article>
           )
         })}
+        <FactsQualityDetails analysis={analysis} quality={factsQuality} sourceStatus={sourceStatus} onReview={onReview} />
       </div>
     </section>
   )
@@ -858,6 +933,8 @@ function CostChart({
 function CorrectionPanel({
   analysis,
   onOpenRecord,
+  records,
+  onReview,
 }: TrajectorySummaryProps) {
   const locationLabel = (location: AnalysisLocation | undefined): string =>
     location === undefined
@@ -883,7 +960,7 @@ function CorrectionPanel({
         <div>
           <TimerReset size={17} />
           <span>
-            <strong>纠错与改道</strong>
+            <strong>纠错与恢复</strong>
             <small>触发 → 模型判断 → 具体调整 → 后续结果</small>
           </span>
         </div>
@@ -959,12 +1036,13 @@ function CorrectionPanel({
                         )
                       })}
                     </div>
-                    <EvidenceButton
-                      recordId={correction.recordIds[0]}
+                    <EvidenceLinks
+                      title="证据链"
+                      recordIds={correction.recordIds}
+                      records={records}
                       onOpenRecord={onOpenRecord}
-                    >
-                      证据链
-                    </EvidenceButton>
+                      onReview={onReview}
+                    />
                   </article>
                 )
               })}
@@ -975,9 +1053,16 @@ function CorrectionPanel({
 }
 
 function SummaryContent(props: TrajectorySummaryProps) {
+  const factsQuality = props.factsQuality
+  const reviewSteps = useMemo(() => props.records === undefined ? []
+    : buildReviewSteps(props.analysis, props.records, props.turns, props.capabilities),
+  [props.analysis, props.records, props.turns, props.capabilities])
   const story = useMemo(
-    () => buildTrajectoryStory(props.analysis),
-    [props.analysis],
+    () => buildTrajectoryStory(props.analysis, 8, {
+      records: props.records, capabilities: props.capabilities, quality: factsQuality,
+      reviewSteps: props.records === undefined ? undefined : reviewSteps,
+    }),
+    [props.analysis, props.records, props.capabilities, factsQuality, reviewSteps],
   )
   const [selectedStageId, setSelectedStageId] = useState<string>()
   const [openStageRequest, setOpenStageRequest] = useState<{
@@ -1005,6 +1090,7 @@ function SummaryContent(props: TrajectorySummaryProps) {
     <div className="summary-variant">
       <OutcomeHero
         {...props}
+        factsQuality={factsQuality}
         withObjective
       />
       <StatStrip analysis={props.analysis} sessionMeta={props.sessionMeta} />
@@ -1016,7 +1102,9 @@ function SummaryContent(props: TrajectorySummaryProps) {
       />
       <div className="summary-primary-grid">
         <DecisionPath
+          key={`${props.source}:${props.sourceSessionId}`}
           {...props}
+          reviewSteps={reviewSteps}
           story={story}
           selectedStageId={selectedStageId}
           openStageRequest={openStageRequest}
@@ -1024,12 +1112,17 @@ function SummaryContent(props: TrajectorySummaryProps) {
         />
         <aside className="summary-insight-column">
           <EvaluationPanel
-            evaluations={props.analysis.evaluations}
+            analysis={props.analysis}
+            sourceStatus={props.sourceStatus}
+            factsQuality={factsQuality}
             onOpenRecord={props.onOpenRecord}
+            records={props.records}
+            onReview={props.onReview}
           />
           <OptimizationPanel
             analysis={props.analysis}
             onOpenRecord={props.onOpenRecord}
+            onReview={props.onReview}
           />
         </aside>
       </div>
